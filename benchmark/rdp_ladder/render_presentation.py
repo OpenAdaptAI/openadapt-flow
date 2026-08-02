@@ -17,9 +17,11 @@ the result authority.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -54,6 +56,13 @@ PUBLIC_FACT_KEYS = frozenset(
         "outcome",
     }
 )
+PUBLICATION_APPROVAL_SCHEMA = "openadapt.rdp-publication-approval.v2"
+PUBLICATION_APPROVAL_SCOPE = "openadapt.rdp-publication.finalize.v1"
+CANDIDATE_VIDEO_NAME = "openadapt-rdp-demo.mp4"
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 class HybridTimeline:
@@ -233,11 +242,11 @@ def validate_hybrid_timeline(
         if source_frame is not None:
             if not isinstance(source_frame, dict):
                 raise RuntimeError("hybrid timeline source frame is invalid")
-            presentation_phase = source_frame.get("presentation_phase")
+            source_phase = source_frame.get("presentation_phase")
             file = source_frame.get("file")
-            if not isinstance(presentation_phase, str) or not isinstance(file, str):
+            if not isinstance(source_phase, str) or not isinstance(file, str):
                 raise RuntimeError("hybrid timeline source frame is incomplete")
-            source = source_frames.get((presentation_phase, file))
+            source = source_frames.get((source_phase, file))
             if source is None:
                 raise RuntimeError("hybrid timeline source frame is not retained")
             for key, source_key in (
@@ -938,6 +947,136 @@ def render(presentation_dir: Path, output: Path) -> dict:
         encoding="utf-8",
     )
     return render_manifest
+
+
+def _candidate_paths(candidate_dir: Path) -> tuple[Path, Path, Path]:
+    """Return the only files that a public RDP presentation may contain."""
+    video = candidate_dir / CANDIDATE_VIDEO_NAME
+    return video, video.with_suffix(".timeline.json"), video.with_suffix(
+        ".manifest.json"
+    )
+
+
+def _candidate_inventory(candidate_dir: Path) -> tuple[Path, Path, Path]:
+    """Refuse a candidate directory with any unsigned extra file or directory."""
+    video, timeline, manifest = _candidate_paths(candidate_dir)
+    expected = {video.name, timeline.name, manifest.name}
+    if not candidate_dir.is_dir():
+        raise RuntimeError("public artifact candidate directory does not exist")
+    actual = {path.name for path in candidate_dir.iterdir()}
+    if actual != expected or not all(
+        path.is_file() for path in (video, timeline, manifest)
+    ):
+        raise RuntimeError("public artifact candidate inventory is not exact")
+    return video, timeline, manifest
+
+
+def render_candidate(presentation_dir: Path, candidate_dir: Path) -> dict:
+    """Render an isolated review candidate. This function never publishes it."""
+    if candidate_dir.exists():
+        raise RuntimeError("public artifact candidate directory already exists")
+    candidate_dir.mkdir(parents=True)
+    video, _timeline, _manifest = _candidate_paths(candidate_dir)
+    return render(presentation_dir, video)
+
+
+def approve_public_artifact_set(
+    candidate_dir: Path,
+    *,
+    approval_path: Path,
+    key_id: str,
+    private_key: bytes,
+) -> Path:
+    """Create a detached approval for a reviewed exact candidate manifest."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    _video, _timeline, manifest = _candidate_inventory(candidate_dir)
+    unsigned = {
+        "schema_version": PUBLICATION_APPROVAL_SCHEMA,
+        "candidate_sha256": _sha256(manifest),
+        "signer_key_id": key_id,
+        "approval_scope": PUBLICATION_APPROVAL_SCOPE,
+    }
+    signature = Ed25519PrivateKey.from_private_bytes(private_key).sign(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    )
+    approval_path.write_text(
+        json.dumps(
+            {**unsigned, "signature": base64.b64encode(signature).decode()},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return approval_path
+
+
+def finalize_public_artifact_set(
+    presentation_dir: Path,
+    candidate_dir: Path,
+    output_dir: Path,
+    *,
+    approval_path: Path,
+    trusted_public_keys: dict[str, bytes],
+) -> None:
+    """Verify one closed candidate directory, then publish it by one rename."""
+    if candidate_dir.resolve() == output_dir.resolve():
+        raise RuntimeError("candidate and public artifact directories must differ")
+    if approval_path.resolve().is_relative_to(candidate_dir.resolve()):
+        raise RuntimeError("publication approval must be detached from the candidate")
+    if output_dir.exists():
+        raise RuntimeError("public artifact output directory already exists")
+    video, timeline_path, manifest_path = _candidate_inventory(candidate_dir)
+    approval = _load_json(approval_path)
+    required = {
+        "schema_version",
+        "candidate_sha256",
+        "signer_key_id",
+        "approval_scope",
+        "signature",
+    }
+    if (
+        not isinstance(approval, dict)
+        or set(approval) != required
+        or approval.get("schema_version") != PUBLICATION_APPROVAL_SCHEMA
+        or approval.get("approval_scope") != PUBLICATION_APPROVAL_SCOPE
+        or approval.get("candidate_sha256") != _sha256(manifest_path)
+        or not isinstance(approval.get("signer_key_id"), str)
+    ):
+        raise RuntimeError("publication approval does not bind the exact candidate")
+    key = trusted_public_keys.get(approval["signer_key_id"])
+    if key is None:
+        raise RuntimeError("publication approval signer is not trusted")
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    unsigned = {key: value for key, value in approval.items() if key != "signature"}
+    try:
+        Ed25519PublicKey.from_public_bytes(key).verify(
+            base64.b64decode(approval["signature"], validate=True),
+            json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode(),
+        )
+    except Exception as exc:
+        raise RuntimeError("publication approval signature is invalid") from exc
+
+    manifest = _load_json(manifest_path)
+    timeline = _load_json(timeline_path)
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("video") != video.name
+        or manifest.get("video_sha256") != _sha256(video)
+        or manifest.get("hybrid_timeline") != timeline_path.name
+        or manifest.get("hybrid_timeline_sha256") != _sha256(timeline_path)
+    ):
+        raise RuntimeError("public artifact candidate hashes do not match")
+    source_manifests = {
+        name: _load_json(presentation_dir / name / "manifest.json")
+        for name in PHASE_DIRS
+    }
+    graph = _load_json(presentation_dir / "02-compiled-workflow" / "program-graph.json")
+    validate_hybrid_timeline(timeline, manifests=source_manifests, graph=graph)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(candidate_dir, output_dir)
 
 
 def main() -> int:

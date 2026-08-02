@@ -806,6 +806,39 @@ def _run_once(
         )
     else:
         passed = bool(report.success and oracle["all_effects_ok"])
+    step_diagnostics = [
+        {
+            "step_id": result.step_id,
+            "ok": result.ok,
+            "failure_category": result.failure_category,
+            "safety_halt": result.safety_halt,
+            "delivery_attempted": result.delivery_attempted,
+            "actuation": result.actuation,
+            "resolution_rung": (
+                result.resolution.rung if result.resolution is not None else None
+            ),
+            "error": result.error,
+            "delivery_uncertainty": (
+                result.delivery_uncertainty.model_dump(
+                    mode="json",
+                    exclude={"observed_at"},
+                )
+                if result.delivery_uncertainty is not None
+                else None
+            ),
+            "safety_refusal_evidence": (
+                result.safety_refusal_evidence.model_dump(mode="json")
+                if result.safety_refusal_evidence is not None
+                else None
+            ),
+        }
+        for result in report.results
+        if (
+            result.error is not None
+            or result.delivery_uncertainty is not None
+            or result.safety_refusal_evidence is not None
+        )
+    ]
     return {
         "condition": condition,
         "passed": passed,
@@ -843,6 +876,10 @@ def _run_once(
         "oracle": oracle,
         "rung_counts": dict(report.rung_counts),
         "errors": errors,
+        "failed_step_ids": [
+            result.step_id for result in report.results if not result.ok
+        ],
+        "step_diagnostics": step_diagnostics,
     }
 
 
@@ -884,22 +921,27 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "commit_then_timeout",
     )
     trials: list[dict[str, Any]] = []
+    stopped_early = False
     for condition in conditions:
         for index in range(1, TRIALS + 1):
-            trials.append(
-                _run_once(
-                    container=container,
-                    root=root,
-                    workflow=workflow,
-                    verifier=verifier,
-                    gate=gate,
-                    bundle_dir=bundle_dir,
-                    run_dir=work / f"run-{condition}-{index}",
-                    condition=condition,
-                    save_pointer_acquisition=save_pointer_acquisition,
-                    save_step_id=step_ids["save"],
-                )
+            trial = _run_once(
+                container=container,
+                root=root,
+                workflow=workflow,
+                verifier=verifier,
+                gate=gate,
+                bundle_dir=bundle_dir,
+                run_dir=work / f"run-{condition}-{index}",
+                condition=condition,
+                save_pointer_acquisition=save_pointer_acquisition,
+                save_step_id=step_ids["save"],
             )
+            trials.append(trial)
+            if not trial["passed"]:
+                stopped_early = True
+                break
+        if stopped_early:
+            break
     runtimes = sorted(float(trial["runtime_s"]) for trial in trials)
 
     def nearest_rank(percentile: float) -> float:
@@ -918,6 +960,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
             "severe_display_drift",
         ],
         "run_count": len(trials),
+        "stopped_early": stopped_early,
         "accepted_subset": all(trial["passed"] for trial in trials),
         "verified_outcomes": sum(
             bool(trial["runtime_success"] and trial["oracle"]["all_effects_ok"])

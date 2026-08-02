@@ -17,6 +17,7 @@ import sqlite3
 import statistics
 import tempfile
 import time
+from collections.abc import Callable
 from email import policy as email_policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -74,6 +75,46 @@ WORKLIST_TARGET_REGION = (35, 455, 920, 70)
 TARGET_RECORD_REGION = (35, 123, 430, 68)
 
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
+
+
+def _install_commit_then_timeout_fault(
+    backend: Any,
+    *,
+    condition: str,
+    save_pointer_acquisition: int,
+    acquisition_count: Callable[[], int],
+) -> dict[str, Any]:
+    """Lose the receipt only after the real qualified Save click returns.
+
+    The wrapper does not simulate the write. It lets the RDP backend send the
+    guarded pointer action to the fixture first. It then reports typed delivery
+    uncertainty to the runtime. The runtime must not send the click again.
+    """
+
+    state: dict[str, Any] = {"injected": False, "save_delivery_calls": 0}
+    original_click_guarded = backend.click_guarded
+
+    def click_guarded(*args: Any, **kwargs: Any):
+        from openadapt_flow.backend import ActionDeliveryUncertain
+
+        receipt = original_click_guarded(*args, **kwargs)
+        if (
+            condition == "commit_then_timeout"
+            and acquisition_count() == save_pointer_acquisition
+        ):
+            state["save_delivery_calls"] += 1
+            if not state["injected"]:
+                state["injected"] = True
+                raise ActionDeliveryUncertain(
+                    operation="rdp_click",
+                    native=False,
+                    target_fingerprint=receipt.target_fingerprint,
+                    cause_type="TimeoutError",
+                )
+        return receipt
+
+    backend.click_guarded = click_guarded
+    return state
 
 
 def _read_ack(root: Path) -> Optional[str]:
@@ -579,6 +620,12 @@ def _run_once(
         return original_acquire()
 
     backend.acquire_actuation_frame = acquire_with_fault  # type: ignore[method-assign]
+    commit_timeout = _install_commit_then_timeout_fault(
+        backend,
+        condition=condition,
+        save_pointer_acquisition=save_pointer_acquisition,
+        acquisition_count=lambda: acquisitions,
+    )
     started = time.monotonic()
     report = Replayer(
         backend,
@@ -608,6 +655,38 @@ def _run_once(
     )
     if expected_halt:
         passed = bool(injected and safe_halt)
+    elif condition == "commit_then_timeout":
+        save_result = next(
+            result
+            for result in report.results
+            if result.step_id == workflow.steps[13].id
+        )
+        uncertainty = save_result.delivery_uncertainty
+        sqlite_proved_one_write = bool(
+            oracle["database_ok"]
+            and oracle["input_counts"].get("save_appointment") == 1
+            and not oracle["duplicate_effect"]
+        )
+        verified_after_uncertainty = bool(
+            report.success
+            and report.transaction_outcome == "VERIFIED"
+            and sqlite_proved_one_write
+            and uncertainty is not None
+            and uncertainty.retried is False
+            and uncertainty.effects_confirmed is True
+            and uncertainty.resolved_by_contract is True
+        )
+        reconciliation_required = bool(
+            not report.success
+            and not sqlite_proved_one_write
+            and report.transaction_outcome == "RECONCILIATION_REQUIRED"
+        )
+        passed = bool(
+            commit_timeout["injected"]
+            and commit_timeout["save_delivery_calls"] == 1
+            and oracle["input_counts"].get("save_appointment") == 1
+            and (verified_after_uncertainty or reconciliation_required)
+        )
     else:
         passed = bool(report.success and oracle["all_effects_ok"])
     return {
@@ -616,7 +695,21 @@ def _run_once(
         "runtime_s": round(time.monotonic() - started, 3),
         "runtime_success": bool(report.success),
         "model_calls": int(report.model_calls),
-        "fault_injected": injected,
+        "fault_injected": bool(injected or commit_timeout["injected"]),
+        "commit_timeout_injected": bool(commit_timeout["injected"]),
+        "save_delivery_calls": int(commit_timeout["save_delivery_calls"]),
+        "uncertain_delivery_outcome": (
+            "verified"
+            if condition == "commit_then_timeout"
+            and report.success
+            and report.transaction_outcome == "VERIFIED"
+            and oracle["database_ok"]
+            else (
+                "reconciliation_required"
+                if condition == "commit_then_timeout"
+                else None
+            )
+        ),
         "safe_halt": safe_halt,
         "silent_incorrect_success": bool(
             report.success and not oracle["all_effects_ok"]
@@ -663,6 +756,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "row_reordered",
         "wrong_record_before_write",
         "focus_theft_before_write",
+        "commit_then_timeout",
     )
     trials: list[dict[str, Any]] = []
     for condition in conditions:
@@ -698,7 +792,6 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
             "partial_render",
             "moderate_display_drift",
             "severe_display_drift",
-            "commit_then_timeout",
         ],
         "run_count": len(trials),
         "accepted_subset": all(trial["passed"] for trial in trials),

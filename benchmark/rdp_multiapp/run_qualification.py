@@ -67,6 +67,11 @@ SEND_CONFIRMATION = (165, 447)
 ACTIVE_RECORD_REGION = (510, 86, 740, 60)
 WORKLIST_SELECTION_REGION = (35, 596, 920, 58)
 INBOX_DETAIL_REGION = (35, 238, 915, 150)
+INBOX_HEADER_REGION = (35, 20, 930, 82)
+INBOX_REQUEST_REGION = (35, 123, 890, 100)
+WORKLIST_HEADER_REGION = (35, 20, 930, 82)
+WORKLIST_TARGET_REGION = (35, 455, 920, 70)
+TARGET_RECORD_REGION = (35, 123, 430, 68)
 
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
 
@@ -227,8 +232,22 @@ def _arm_recording(recording_dir: Path) -> None:
     path = recording_dir / "events.jsonl"
     events = [json.loads(line) for line in path.read_text().splitlines() if line]
     expected = {
+        0: INBOX_REQUEST_REGION,
+        1: INBOX_HEADER_REGION,
+        2: WORKLIST_HEADER_REGION,
+        4: WORKLIST_TARGET_REGION,
+        5: WORKLIST_SELECTION_REGION,
+        6: TARGET_RECORD_REGION,
+        7: ACTIVE_RECORD_REGION,
+        9: ACTIVE_RECORD_REGION,
+        11: ACTIVE_RECORD_REGION,
         13: ACTIVE_RECORD_REGION,
+        14: ACTIVE_RECORD_REGION,
+        15: WORKLIST_HEADER_REGION,
+        17: WORKLIST_TARGET_REGION,
         18: WORKLIST_SELECTION_REGION,
+        19: WORKLIST_SELECTION_REGION,
+        20: INBOX_REQUEST_REGION,
         21: INBOX_DETAIL_REGION,
     }
     for index, region in expected.items():

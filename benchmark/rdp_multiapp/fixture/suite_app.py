@@ -327,6 +327,21 @@ class Suite:
         for widget in (canvas, self.work_inner):
             widget.bind("<Button-4>", lambda _event: canvas.yview_scroll(-1, "units"))
             widget.bind("<Button-5>", lambda _event: canvas.yview_scroll(1, "units"))
+        self.work_focus_button = tk.Button(
+            window,
+            text="Scroll request list",
+            command=canvas.focus_set,
+            bg="#dce7ff",
+            fg=FG,
+            font=("DejaVu Sans", 13, "bold"),
+        )
+        self.work_focus_button.place(x=990, y=125, width=240, height=44)
+        self.work_focus_button.bind(
+            "<Button-4>", lambda _event: canvas.yview_scroll(-1, "units")
+        )
+        self.work_focus_button.bind(
+            "<Button-5>", lambda _event: canvas.yview_scroll(1, "units")
+        )
         self.work_status = _label(
             window, "No request selected", 42, 610, font=("DejaVu Sans", 15, "bold")
         )

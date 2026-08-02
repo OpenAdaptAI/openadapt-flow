@@ -11673,16 +11673,23 @@ class Replayer:
             if self.use_structural and hasattr(self.backend, "locate_structural")
             else None
         )
-        resolved = resolve(
-            step.anchor,
-            frame_png,
-            self.vision,
-            None,  # scroll readiness must remain deterministic and model-free
-            step.intent,
-            template_png=template_png,
-            viewport=self.backend.viewport,
-            structural=structural,
-        )
+        try:
+            resolved = resolve(
+                step.anchor,
+                frame_png,
+                self.vision,
+                None,  # scroll readiness must remain deterministic and model-free
+                step.intent,
+                template_png=template_png,
+                viewport=self.backend.viewport,
+                structural=structural,
+            )
+        except OcrResolutionRefused:
+            # Readiness is a bounded, non-actuating probe. An ambiguous OCR
+            # candidate means that the target is not ready yet, so the scroll
+            # loop must continue. The later target action runs the full
+            # resolver again and still halts on the same ambiguity.
+            return False
         if resolved is None:
             return False
         resolution, _matched_region = resolved

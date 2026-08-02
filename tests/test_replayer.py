@@ -21,6 +21,7 @@ from openadapt_flow.ir import (
     Landmark,
     Postcondition,
     PostconditionKind,
+    Resolution,
     RunReport,
     Step,
     Workflow,
@@ -1995,6 +1996,55 @@ def test_closed_loop_scroll_noops_when_anchor_already_in_view(bundle, run_dir):
     )
     assert report.success is True
     assert backend.actions == [("click", 110, 105, False)]
+
+
+def test_closed_loop_scroll_ocr_ambiguity_continues_but_click_halts(
+    bundle, run_dir, monkeypatch
+):
+    """Only the non-actuating readiness probe can treat ambiguity as not ready."""
+
+    target = (
+        Resolution(
+            rung="ocr",
+            point=(110, 105),
+            confidence=0.95,
+            elapsed_ms=1.0,
+        ),
+        (100, 100, 50, 20),
+    )
+    outcomes = iter(
+        [
+            AmbiguousOcrMatchError("two off-screen candidates"),
+            target,
+            AmbiguousOcrMatchError("two live click candidates"),
+        ]
+    )
+
+    def scripted_resolve(*args, **kwargs):
+        del args, kwargs
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.replayer.resolve",
+        scripted_resolve,
+    )
+    backend = FakeBackend()
+    workflow = Workflow(name="wf", steps=[scroll_step(), click_step()])
+
+    report = Replayer(backend, vision=FakeVision(), poll_interval_s=0.01).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is False
+    assert backend.actions == [("scroll", 0, 400)]
+    assert any(
+        "two live click candidates" in (result.error or "") for result in report.results
+    )
 
 
 def test_closed_loop_scroll_requires_armed_target_identity(

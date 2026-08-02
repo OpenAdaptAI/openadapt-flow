@@ -96,6 +96,10 @@
       "sha256": "0182320bfda16d62b36f2a71642f11fcaa7747d16b2a6be87db714c0669de253"
     },
     {
+      "path": ".github/workflows/docker-rdp-multiapp-vision.yml",
+      "sha256": "b069c5114066c10a2f12a53839aed682307ed60a4eea75a3cfef99d2a696d284"
+    },
+    {
       "path": ".github/workflows/docker-rdp-vision-ladder.yml",
       "sha256": "dbcb47f6ba33b0932f9aa0d49a6b5f66170e20701d77581713d0dc5ec20e5dd1"
     },
@@ -422,6 +426,14 @@
     {
       "path": "benchmark/rdp_ladder/results.json",
       "sha256": "3b946dd098c4a4c2ca56c1ab531a2eaeeb37804aa10c440e576f7196a03ae37c"
+    },
+    {
+      "path": "benchmark/rdp_multiapp/campaign.json",
+      "sha256": "b63def3cfacf17ee438e9bee9fd3a6057ee387f40956ee1adc38175ddad0e0a6"
+    },
+    {
+      "path": "benchmark/rdp_multiapp/policy.yaml",
+      "sha256": "ff978d7755b24731c22f311b1791b4f9b70c8dd515c17e8beefb4d0e22f78c23"
     },
     {
       "path": "benchmark/reliability/summary.json",

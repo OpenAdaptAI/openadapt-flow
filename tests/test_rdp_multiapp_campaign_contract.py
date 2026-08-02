@@ -8,6 +8,43 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
+def test_failure_artifact_exports_only_exact_failed_step_frames(tmp_path: Path) -> None:
+    from benchmark.rdp_multiapp.run_qualification import _export_failed_step_frames
+
+    run_dir = tmp_path / "run-healthy-1"
+    steps = run_dir / "steps"
+    steps.mkdir(parents=True)
+    (steps / "step_008_before.png").write_bytes(b"before")
+    (steps / "step_008_after.png").write_bytes(b"after")
+    (steps / "step_007_before.png").write_bytes(b"unrelated")
+    (run_dir / "report.json").write_text('{"not": "exported"}', encoding="utf-8")
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    exported = _export_failed_step_frames(
+        artifact_root=artifact_root,
+        run_dir=run_dir,
+        failed_step_ids=["step_008"],
+    )
+
+    assert [item["kind"] for item in exported] == [
+        "failed_step_before_frame",
+        "failed_step_after_frame",
+    ]
+    assert [item["path"] for item in exported] == [
+        "failure/run-healthy-1/step_008_before.png",
+        "failure/run-healthy-1/step_008_after.png",
+    ]
+    assert sorted(
+        path.relative_to(artifact_root).as_posix()
+        for path in artifact_root.rglob("*")
+        if path.is_file()
+    ) == [
+        "failure/run-healthy-1/step_008_after.png",
+        "failure/run-healthy-1/step_008_before.png",
+    ]
+
+
 def test_visual_campaign_has_repeated_trials_and_business_oracles() -> None:
     campaign = json.loads(
         (ROOT / "benchmark/rdp_multiapp/campaign.json").read_text(encoding="utf-8")

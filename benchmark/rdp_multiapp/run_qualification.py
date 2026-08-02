@@ -13,6 +13,7 @@ import csv
 import hashlib
 import json
 import secrets
+import shutil
 import sqlite3
 import statistics
 import tempfile
@@ -75,6 +76,48 @@ WORKLIST_TARGET_REGION = (35, 455, 920, 70)
 TARGET_RECORD_REGION = (35, 123, 430, 68)
 
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
+
+
+def _export_failed_step_frames(
+    *,
+    artifact_root: Path,
+    run_dir: Path,
+    failed_step_ids: list[str],
+) -> list[dict[str, str]]:
+    """Export only the first failed step's exact before and after frames."""
+
+    if not failed_step_ids:
+        return []
+    step_id = failed_step_ids[0]
+    if Path(step_id).name != step_id or step_id in {"", ".", ".."}:
+        raise ValueError(f"unsafe failed step id: {step_id!r}")
+
+    artifact_root = artifact_root.resolve()
+    run_root = run_dir.resolve()
+    destination = artifact_root / "failure" / run_dir.name
+    destination.mkdir(parents=True, exist_ok=True)
+    destination.resolve().relative_to(artifact_root)
+
+    exported: list[dict[str, str]] = []
+    for phase in ("before", "after"):
+        source = run_dir / "steps" / f"{step_id}_{phase}.png"
+        if source.is_symlink():
+            raise ValueError(f"refusing linked failure frame: {source}")
+        resolved_source = source.resolve(strict=True)
+        resolved_source.relative_to(run_root)
+        if not resolved_source.is_file():
+            raise ValueError(f"failure frame is not a file: {source}")
+
+        target = destination / source.name
+        shutil.copyfile(resolved_source, target)
+        exported.append(
+            {
+                "kind": f"failed_step_{phase}_frame",
+                "path": target.relative_to(artifact_root).as_posix(),
+                "sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
+            }
+        )
+    return exported
 
 
 def _install_commit_then_timeout_fault(
@@ -924,6 +967,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
     stopped_early = False
     for condition in conditions:
         for index in range(1, TRIALS + 1):
+            trial_run_dir = work / f"run-{condition}-{index}"
             trial = _run_once(
                 container=container,
                 root=root,
@@ -931,11 +975,17 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
                 verifier=verifier,
                 gate=gate,
                 bundle_dir=bundle_dir,
-                run_dir=work / f"run-{condition}-{index}",
+                run_dir=trial_run_dir,
                 condition=condition,
                 save_pointer_acquisition=save_pointer_acquisition,
                 save_step_id=step_ids["save"],
             )
+            if not trial["passed"]:
+                trial["failure_artifacts"] = _export_failed_step_frames(
+                    artifact_root=out.parent,
+                    run_dir=trial_run_dir,
+                    failed_step_ids=trial["failed_step_ids"],
+                )
             trials.append(trial)
             if not trial["passed"]:
                 stopped_early = True

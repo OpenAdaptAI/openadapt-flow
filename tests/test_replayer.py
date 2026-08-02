@@ -1949,6 +1949,41 @@ def test_scroll_step_scrolls_backend(bundle, run_dir):
     assert report.heal_count == 0
 
 
+def test_remote_scroll_acquires_fresh_one_use_frame_before_input(bundle, run_dir):
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    workflow = Workflow(name="wf", steps=[scroll_step()])
+
+    report = Replayer(backend, vision=FakeVision()).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is True
+    assert backend.acquire_count == 1
+    assert backend.actions == [("scroll", 0, 400)]
+
+
+def test_remote_scroll_preflight_refusal_sends_no_input(bundle, run_dir):
+    class RefusingRemoteScrollBackend(RemoteLeaseBackend):
+        def acquire_actuation_frame(self):
+            self.acquire_count += 1
+            raise RuntimeError("remote session changed")
+
+    frame = make_png()
+    backend = RefusingRemoteScrollBackend(initial_frame=frame, fresh_frame=frame)
+    workflow = Workflow(name="wf", steps=[scroll_step()])
+
+    report = Replayer(backend, vision=FakeVision()).run(
+        workflow, bundle_dir=bundle, run_dir=run_dir
+    )
+
+    assert report.success is False
+    assert backend.acquire_count == 1
+    assert backend.actions == []
+    assert report.results[0].delivery_attempted is False
+    assert report.results[0].error is not None
+
+
 def scroll_step(step_id="sc1", dx=0, dy=400) -> Step:
     return Step(
         id=step_id,

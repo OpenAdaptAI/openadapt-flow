@@ -11792,6 +11792,9 @@ class Replayer:
             if refusal is not None:
                 return refusal
             self._require_qualification_environment_current()
+            remote_preflight_error = self._prepare_remote_scroll_input(step, result)
+            if remote_preflight_error is not None:
+                return remote_preflight_error
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),
@@ -11830,6 +11833,7 @@ class Replayer:
             # every wheel edge to a new exact remote frame and repeat the
             # context/identity checks after those callbacks.  This also avoids
             # reusing the one-shot lease consumed by the prior wheel edge.
+            remote_scroll_revalidated = False
             if self._step_needs_consequential_revalidation(step, workflow):
                 (
                     _scroll_resolution,
@@ -11851,12 +11855,19 @@ class Replayer:
                     return scroll_error
                 if readiness_holds(fresh_scroll_frame):
                     return None
+                remote_scroll_revalidated = isinstance(
+                    self.backend, RemoteActuationBackend
+                )
             refusal = self._delivery_authorization_refusal(
                 workflow, params, step, result
             )
             if refusal is not None:
                 return refusal
             self._require_qualification_environment_current()
+            if not remote_scroll_revalidated:
+                remote_preflight_error = self._prepare_remote_scroll_input(step, result)
+                if remote_preflight_error is not None:
+                    return remote_preflight_error
             self._deliver_backend_call(
                 result,
                 lambda: self.backend.scroll(dx, dy),
@@ -11893,6 +11904,34 @@ class Replayer:
             f"{SCROLL_BUDGET_FACTOR}x the recorded distance) without "
             f"{target_desc} resolving — target never came into view; run aborted"
         )
+
+    def _prepare_remote_scroll_input(
+        self,
+        step: Step,
+        result: StepResult,
+    ) -> Optional[str]:
+        """Bind one remote wheel edge to a fresh, one-use frame lease.
+
+        Target-readiness probes can take longer than a remote backend's frame
+        lease.  A wheel gesture has no coordinate to re-resolve, but it is
+        still real input into an opaque session.  Acquire the remote backend's
+        exact-content lease immediately before delivery instead of extending
+        the allowed frame age or reusing the observation from the probe.
+        """
+
+        if not isinstance(self.backend, RemoteActuationBackend):
+            return None
+        try:
+            self.backend.acquire_actuation_frame()
+        except Exception as exc:  # noqa: BLE001 - backend boundary must halt
+            if self.governed_authorization is not None:
+                result.safety_halt = True
+            detail = _scrub_phi(str(exc)) or type(exc).__name__
+            return (
+                "Remote scroll preflight HALTED before input for step "
+                f"'{step.id}' ({step.intent}): {detail}"
+            )
+        return None
 
     @staticmethod
     def _next_anchored_step(workflow: Workflow, step_index: int) -> Optional[Step]:

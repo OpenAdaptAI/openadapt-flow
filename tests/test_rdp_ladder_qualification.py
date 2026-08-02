@@ -315,6 +315,28 @@ def test_rdp_fixture_transport_uses_unambiguous_punctuation_keysyms(
     ]
 
 
+def test_rdp_fixture_transport_types_parameter_in_one_input_operation() -> None:
+    transport = qualification.DockerX11RdpTransport("synthetic-fixture")
+    commands: list[list[str]] = []
+    transport._exec = lambda args, **_kwargs: commands.append(args)  # type: ignore[method-assign]
+
+    value = "2026-08-14 10:45"
+    assert transport.supports_bulk_text(value)
+    transport.bulk_type_text(value)
+
+    assert commands == [
+        [
+            "xdotool",
+            "type",
+            "--clearmodifiers",
+            "--delay",
+            "35",
+            "--",
+            value,
+        ]
+    ]
+
+
 def test_recorded_identity_regions_cover_every_pointer_action(tmp_path: Path) -> None:
     recording = tmp_path / "recording"
     recording.mkdir()

@@ -270,6 +270,15 @@ class DockerX11RdpTransport:
             ]
         )
 
+    def focus_input_surface(self) -> None:
+        """Restore the outer FreeRDP window before keyboard delivery."""
+
+        self._focus_client()
+        # Let the window manager and FreeRDP restore the keyboard grab before
+        # the next XTest key event. This delay is outside the production RDP
+        # transport. It makes the two-Xvfb qualification fixture deterministic.
+        time.sleep(0.1)
+
     def _remote_pointer(self) -> Optional[tuple[int, int]]:
         """Return the fixture server's cursor as a delivery acknowledgement.
 
@@ -351,6 +360,31 @@ class DockerX11RdpTransport:
             return
         verb = "keydown" if down else "keyup"
         self._exec(["xdotool", verb, "--clearmodifiers", keysym])
+
+    @staticmethod
+    def supports_bulk_text(text: str) -> bool:
+        """Use one X11 client for printable ASCII fixture parameters."""
+
+        return (
+            bool(text) and text.isascii() and all(" " <= char <= "~" for char in text)
+        )
+
+    def bulk_type_text(self, text: str) -> None:
+        """Type one value without losing the FreeRDP grab between characters."""
+
+        if not self.supports_bulk_text(text):
+            raise ValueError("RDP fixture bulk text must be printable ASCII")
+        self._exec(
+            [
+                "xdotool",
+                "type",
+                "--clearmodifiers",
+                "--delay",
+                "35",
+                "--",
+                text,
+            ]
+        )
 
     def wheel(self, dx: int, dy: int) -> None:
         if not dy:

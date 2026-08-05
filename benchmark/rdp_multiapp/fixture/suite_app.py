@@ -186,6 +186,7 @@ class Suite:
         self._build_worklist()
         self._build_scheduler()
         self._build_launcher()
+        self._build_environment_banner()
         self.reset()
         self.root.after(250, lambda: self.show("Inbox"))
         self.root.after(100, self._poll_control)
@@ -208,6 +209,7 @@ class Suite:
         window.lift()
         window.focus_force()
         self.launcher.lift()
+        self.environment_banner.lift()
 
     def _build_launcher(self) -> None:
         launcher = tk.Toplevel(self.root)
@@ -265,6 +267,43 @@ class Suite:
                 font=("DejaVu Sans", 13, "bold"),
                 relief="flat",
             ).place(x=285 + index * 190, y=8, width=165, height=44)
+
+    def _build_environment_banner(self) -> None:
+        """Render PHI-free environment identity in a stable visible band.
+
+        The bottom launcher can sit outside a client viewport when a remote
+        client adds window chrome.  Keep the qualification-only markers in an
+        otherwise unused top-right band so the decoded RDP frame can always
+        prove the application, version, and fixture environment.
+        """
+
+        banner = tk.Toplevel(self.root)
+        banner.geometry("320x72+960+0")
+        banner.configure(bg="#172033")
+        banner.overrideredirect(True)
+        banner.attributes("-topmost", True)
+        self.environment_banner = banner
+        tk.Label(
+            banner,
+            text="app oa-rdp-fixture",
+            bg="#172033",
+            fg="#bfdbfe",
+            font=("DejaVu Sans", 11, "bold"),
+        ).place(x=14, y=5)
+        tk.Label(
+            banner,
+            text="oa-fixture-v1",
+            bg="#172033",
+            fg="#bfdbfe",
+            font=("DejaVu Sans", 10, "bold"),
+        ).place(x=14, y=31)
+        tk.Label(
+            banner,
+            text="oa-rdp-env",
+            bg="#172033",
+            fg="#bfdbfe",
+            font=("DejaVu Sans", 10, "bold"),
+        ).place(x=14, y=51)
 
     def _build_inbox(self) -> None:
         window = self._window("Inbox")

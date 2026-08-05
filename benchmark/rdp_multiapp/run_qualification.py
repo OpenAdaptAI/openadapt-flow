@@ -811,19 +811,16 @@ def _run_once(
     )
     transport = MultiappRdpTransport(container)
 
-    def application_marker_visible(png: bytes) -> bool:
-        # The returned native ID is ``oa-rdp-fixture``. The operator-facing
-        # frame deliberately renders it as a labeled value, so qualify against
-        # the complete visible text rather than an exact whole-line ID match.
+    def environment_marker_visible(marker: str, png: bytes) -> bool:
+        """Read a fixture's PHI-free marker from its stable top-right band."""
+
         from openadapt_flow import vision
 
         return (
             vision.find_text(
                 png,
-                "app oa-rdp-fixture",
-                # The fixture's PHI-free launcher occupies the bottom band of
-                # its 1280x800 remote framebuffer (not the client title bar).
-                region=(0, 760, 280, 40),
+                marker,
+                region=(960, 0, 320, 72),
                 min_ratio=1.0,
             )
             is not None
@@ -833,9 +830,17 @@ def _run_once(
         transport,
         connect=True,
         application_marker=APPLICATION_IDENTITY,
-        application_marker_probe=application_marker_visible,
+        application_marker_probe=lambda png: environment_marker_visible(
+            "app oa-rdp-fixture", png
+        ),
         application_version_marker=APPLICATION_VERSION,
+        application_version_marker_probe=lambda png: environment_marker_visible(
+            APPLICATION_VERSION, png
+        ),
         environment_marker=ENVIRONMENT_MARKER,
+        environment_marker_probe=lambda png: environment_marker_visible(
+            ENVIRONMENT_MARKER, png
+        ),
     )
     # FreeRDP can expose its client window before the first complete remote
     # paint arrives. Wait for one complete, atomic environment observation

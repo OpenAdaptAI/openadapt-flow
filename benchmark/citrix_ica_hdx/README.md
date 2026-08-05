@@ -117,3 +117,28 @@ python3 benchmark/citrix_ica_hdx/run_ica_hdx_qualification.py \
 
 python3 -m pytest tests/test_ica_hdx_qualification.py -q
 ```
+
+## Real ICA/HDX acceptance preflight
+
+`run_real_acceptance.py` is the public, cost-safe campaign mechanism. It does
+not start, stop, create, or delete infrastructure. A private configuration
+supplies the exact Workspace/application/session fingerprints, local runner
+commands, and the independent system-of-record oracle. Do not place an Accuro
+recipe, credentials, identifiers, screenshots, or customer data in this repo.
+
+The single deliberate command is:
+
+```bash
+python3 benchmark/citrix_ica_hdx/run_real_acceptance.py \
+  --config /secure/customer-boundary/citrix-acceptance.json \
+  --output /secure/customer-boundary/citrix-acceptance-report.json \
+  --execute
+```
+
+Without `--execute`, the command only validates the campaign contract and
+writes a preflight report. The configuration must fingerprint Citrix Workspace
+and ICA/HDX, the application version, session, display, runner, bundle,
+verifier, and environment. It must define at least three healthy trials and
+the wrong-session-or-entity, ambiguity, stale-state, display-drift,
+partial-effect, reconnect, and commit-timeout conditions. The runner accepts a
+consequential result only when the independent oracle reports `VERIFIED`.

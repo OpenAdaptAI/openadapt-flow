@@ -432,9 +432,11 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         EnvironmentBoundary,
         init_project,
         set_action_classification,
+        set_effect_policy,
     )
     from openadapt_flow.run_gate import evaluate_run_gate
     from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
+    from openadapt_flow.verification import VerificationTier
 
     if len(workflow.steps) != 22:
         raise RuntimeError(
@@ -548,6 +550,17 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
                 ),
                 operator_confirmed=True,
             ),
+        )
+
+    # Standard qualification binds the exact required verification tier for
+    # every consequential effect. Each reference verifier reads an independent
+    # persisted system surface (SQLite, CSV, or Maildir), so Tier 1 is correct.
+    for step in (save, reconcile, send):
+        set_effect_policy(
+            workflow,
+            step_id=step.id,
+            effect_index=0,
+            tier=VerificationTier.INDEPENDENT_SYSTEM,
         )
 
     bundle_key = secrets.token_urlsafe(32)

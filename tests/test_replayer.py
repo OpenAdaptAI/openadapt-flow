@@ -738,6 +738,40 @@ def test_consequential_click_uses_lease_when_backend_has_no_typed_receipt(
     assert report.results[0].delivery_receipt is None
 
 
+def test_identity_armed_remote_click_retains_closed_guarded_actuation(
+    bundle, run_dir, monkeypatch
+):
+    frame = make_png()
+    backend = RemoteLeaseBackend(initial_frame=frame, fresh_frame=frame)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
+    ]
+    step = click_step(risk="reversible")
+    step.identity_armed = True
+    assert step.anchor is not None
+    step.anchor.context_text = "Expected record"
+    workflow = Workflow(
+        name="wf", surface="rdp", execution_mode="external", steps=[step]
+    )
+    replayer = Replayer(backend, vision=vision)
+    monkeypatch.setattr(
+        replayer,
+        "_verify_identity",
+        lambda *args, **kwargs: IdentityCheck(
+            status="verified", expected="record", observed="record"
+        ),
+    )
+
+    report = replayer.run(workflow, bundle_dir=bundle, run_dir=run_dir)
+
+    assert report.success is True
+    assert report.results[0].actuation == "remote_guarded"
+    assert report.results[0].delivery_receipt is not None
+    assert backend.actions == [("click", 110, 105, False)]
+
+
 def test_consequential_lease_click_still_refuses_a_changed_frame(bundle, run_dir):
     """The lease is the safety property: a changed frame must stop delivery."""
     backend = PixelOnlyRemoteBackend()

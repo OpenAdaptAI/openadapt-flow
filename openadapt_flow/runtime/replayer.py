@@ -7412,9 +7412,13 @@ class Replayer:
 
     def _step_is_consequential(self, step: Step, workflow: Workflow) -> bool:
         authorization = self.governed_authorization
-        return is_consequential(step, workflow) or (
-            authorization is not None
-            and authorization.requires_verified_identity(step.id)
+        return (
+            step.identity_armed
+            or is_consequential(step, workflow)
+            or (
+                authorization is not None
+                and authorization.requires_verified_identity(step.id)
+            )
         )
 
     def _selection_contract_error(

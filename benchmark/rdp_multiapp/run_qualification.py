@@ -1336,7 +1336,34 @@ def main() -> int:
     parser.add_argument("--work-dir", type=Path)
     args = parser.parse_args()
     work = args.work_dir or Path(tempfile.mkdtemp(prefix="oaflow-rdp-multiapp-"))
-    result = run(args.container, args.oracle_root.resolve(), args.output, work)
+    try:
+        result = run(args.container, args.oracle_root.resolve(), args.output, work)
+    except Exception as exc:  # noqa: BLE001 - retain bounded harness failure
+        result = {
+            "schema_version": "openadapt.rdp-multiapp-results.v1",
+            "accepted_subset": False,
+            "full_campaign_complete": False,
+            "full_campaign_pending_conditions": [
+                condition["id"]
+                for condition in json.loads(
+                    Path(__file__)
+                    .with_name("campaign.json")
+                    .read_text(encoding="utf-8")
+                )["conditions"]
+            ],
+            "run_count": 0,
+            "stopped_early": True,
+            "harness_failure": {
+                "exception_type": type(exc).__name__,
+                "stage": "campaign_execution",
+            },
+            "trials": [],
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["accepted_subset"] else 1
 

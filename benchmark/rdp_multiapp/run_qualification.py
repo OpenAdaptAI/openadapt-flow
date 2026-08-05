@@ -89,6 +89,18 @@ def _export_failed_step_frames(
     if not failed_step_ids:
         return []
     step_id = failed_step_ids[0]
+    # Runtime pseudo-steps (for example ``<authorization>``) carry typed
+    # refusal evidence but never have a captured action frame. Preserve the
+    # typed result and record that no media exists. Do not manufacture a frame
+    # or let export hide the original qualification result.
+    if step_id.startswith("<") and step_id.endswith(">"):
+        return [
+            {
+                "kind": "failed_step_frame_unavailable",
+                "step_id": step_id,
+                "reason": "runtime_pseudo_step_has_no_retained_frame",
+            }
+        ]
     if Path(step_id).name != step_id or step_id in {"", ".", ".."}:
         raise ValueError(f"unsafe failed step id: {step_id!r}")
 
@@ -101,6 +113,16 @@ def _export_failed_step_frames(
     exported: list[dict[str, str]] = []
     for phase in ("before", "after"):
         source = run_dir / "steps" / f"{step_id}_{phase}.png"
+        if not source.exists():
+            exported.append(
+                {
+                    "kind": "failed_step_frame_unavailable",
+                    "step_id": step_id,
+                    "phase": phase,
+                    "reason": "retained_frame_not_found",
+                }
+            )
+            continue
         if source.is_symlink():
             raise ValueError(f"refusing linked failure frame: {source}")
         resolved_source = source.resolve(strict=True)

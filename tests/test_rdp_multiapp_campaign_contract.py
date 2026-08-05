@@ -45,6 +45,55 @@ def test_failure_artifact_exports_only_exact_failed_step_frames(tmp_path: Path) 
     ]
 
 
+def test_failure_artifact_omits_runtime_pseudo_steps_without_frames(
+    tmp_path: Path,
+) -> None:
+    from benchmark.rdp_multiapp.run_qualification import _export_failed_step_frames
+
+    run_dir = tmp_path / "run-authorization-refusal"
+    run_dir.mkdir()
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    assert _export_failed_step_frames(
+        artifact_root=artifact_root,
+        run_dir=run_dir,
+        failed_step_ids=["<authorization>"],
+    ) == [
+        {
+            "kind": "failed_step_frame_unavailable",
+            "step_id": "<authorization>",
+            "reason": "runtime_pseudo_step_has_no_retained_frame",
+        }
+    ]
+    assert list(artifact_root.iterdir()) == []
+
+
+def test_failure_artifact_records_missing_retained_action_frame(tmp_path: Path) -> None:
+    from benchmark.rdp_multiapp.run_qualification import _export_failed_step_frames
+
+    run_dir = tmp_path / "run-incomplete-media"
+    steps = run_dir / "steps"
+    steps.mkdir(parents=True)
+    (steps / "step_008_before.png").write_bytes(b"before")
+    artifact_root = tmp_path / "artifacts"
+    artifact_root.mkdir()
+
+    exported = _export_failed_step_frames(
+        artifact_root=artifact_root,
+        run_dir=run_dir,
+        failed_step_ids=["step_008"],
+    )
+
+    assert exported[0]["kind"] == "failed_step_before_frame"
+    assert exported[1] == {
+        "kind": "failed_step_frame_unavailable",
+        "step_id": "step_008",
+        "phase": "after",
+        "reason": "retained_frame_not_found",
+    }
+
+
 def test_visual_campaign_has_repeated_trials_and_business_oracles() -> None:
     campaign = json.loads(
         (ROOT / "benchmark/rdp_multiapp/campaign.json").read_text(encoding="utf-8")

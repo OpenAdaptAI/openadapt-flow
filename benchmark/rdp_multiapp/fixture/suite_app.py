@@ -288,22 +288,22 @@ class Suite:
             text="app oa-rdp-fixture",
             bg="#172033",
             fg="#bfdbfe",
-            font=("DejaVu Sans", 11, "bold"),
-        ).place(x=14, y=5)
+            font=("DejaVu Sans", 14, "bold"),
+        ).place(x=14, y=2)
         tk.Label(
             banner,
             text="oa-fixture-v1",
             bg="#172033",
             fg="#bfdbfe",
-            font=("DejaVu Sans", 10, "bold"),
-        ).place(x=14, y=31)
+            font=("DejaVu Sans", 12, "bold"),
+        ).place(x=14, y=28)
         tk.Label(
             banner,
             text="oa-rdp-env",
             bg="#172033",
             fg="#bfdbfe",
-            font=("DejaVu Sans", 10, "bold"),
-        ).place(x=14, y=51)
+            font=("DejaVu Sans", 12, "bold"),
+        ).place(x=14, y=49)
 
     def _build_inbox(self) -> None:
         window = self._window("Inbox")

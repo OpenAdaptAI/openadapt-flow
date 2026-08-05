@@ -821,7 +821,10 @@ def _run_once(
                 png,
                 marker,
                 region=(960, 0, 320, 72),
-                min_ratio=1.0,
+                # RDP codecs can alter a glyph edge. The dedicated band has
+                # exactly one expected, PHI-free marker, so tolerate only a
+                # near-exact OCR rendering of that fixed token.
+                min_ratio=0.95,
             )
             is not None
         )

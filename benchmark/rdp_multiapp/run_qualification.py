@@ -835,16 +835,31 @@ def _run_once(
         application_version_marker=APPLICATION_VERSION,
         environment_marker=ENVIRONMENT_MARKER,
     )
+    # FreeRDP can expose its client window before the first complete remote
+    # paint arrives. Wait for one complete, atomic environment observation
+    # before Replayer starts. This loop only captures frames; it sends no
+    # keyboard or pointer input. The run still refuses if the environment does
+    # not become complete within the bounded startup window.
+    environment_identity = None
+    environment_deadline = time.monotonic() + 5.0
+    while environment_identity is None:
+        environment_identity = backend.qualification_environment_identity()
+        if environment_identity is not None or time.monotonic() >= environment_deadline:
+            break
+        time.sleep(0.25)
+
     # These are only PHI-free qualification boundary signals. They make an
     # environment refusal diagnosable without exporting a screen image or an
     # application record.
     environment_preflight = {
-        "application_identity": backend.application_identity(),
-        "application_version": backend.application_version_identity(),
-        "session_identity_present": backend.session_identity() is not None,
-        "qualification_environment_present": (
-            backend.qualification_environment_identity() is not None
+        "application_identity": (
+            environment_identity[0] if environment_identity is not None else None
         ),
+        "application_version": (
+            environment_identity[1] if environment_identity is not None else None
+        ),
+        "session_identity_present": environment_identity is not None,
+        "qualification_environment_present": environment_identity is not None,
     }
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0

@@ -452,11 +452,17 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         ActionRiskClass,
         ActionRiskClassification,
         EnvironmentBoundary,
+        QualificationActionTarget,
+        QualificationCase,
+        QualificationCaseKind,
+        QualificationOutcome,
+        add_case,
         init_project,
         set_action_classification,
+        set_case_scope,
         set_effect_policy,
     )
-    from openadapt_flow.run_gate import evaluate_run_gate
+    from openadapt_flow.run_gate import evaluate_run_gate, runtime_inputs_digest
     from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
     from openadapt_flow.verification import VerificationTier
 
@@ -585,6 +591,31 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
             tier=VerificationTier.INDEPENDENT_SYSTEM,
         )
 
+    # The campaign executes from an exact qualification case authority, not a
+    # generic production authorization. Its scope binds the representative
+    # input digest and all three consequential GUI writes; each individual
+    # trial receives its own immutable run identifier below.
+    case_id = "rdp-multiapp-representative"
+    case_targets = [
+        QualificationActionTarget(step_id=step.id, actuation_path="gui")
+        for step in (save, reconcile, send)
+    ]
+    add_case(
+        workflow,
+        QualificationCase(
+            id=case_id,
+            kind=QualificationCaseKind.REPRESENTATIVE,
+            description="Real-RDP multi-window representative execution",
+            expected_outcome=QualificationOutcome.VERIFIED,
+        ),
+    )
+    set_case_scope(
+        workflow,
+        case_id=case_id,
+        runtime_input_sha256=runtime_inputs_digest(workflow, REPLAY_PARAMS, None),
+        action_targets=case_targets,
+    )
+
     bundle_key = secrets.token_urlsafe(32)
     checkpoint_key = secrets.token_urlsafe(32)
     workflow.save(bundle_dir, encrypt=True, key=bundle_key)
@@ -613,6 +644,7 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         verifier,
         gate,
         checkpoint_key,
+        case_id,
         {"save": save.id, "reconcile": reconcile.id, "send": send.id},
     )
 
@@ -727,13 +759,14 @@ def _run_once(
     gate: Any,
     bundle_dir: Path,
     checkpoint_key: str,
+    qualification_case_id: str,
     run_dir: Path,
     condition: str,
     save_pointer_acquisition: int,
     save_step_id: str,
 ) -> dict[str, Any]:
     from openadapt_flow.backends.rdp_backend import FreeRDPBackend
-    from openadapt_flow.run_gate import build_runtime_authorization
+    from openadapt_flow.run_gate import build_qualification_case_authorization
     from openadapt_flow.runtime.replayer import Replayer
 
     fixture_scenarios = {"row_reordered", "duplicate_save_control"}
@@ -744,11 +777,14 @@ def _run_once(
     )
     fault_ack = reset_ack
     params = dict(REPLAY_PARAMS)
-    authorization = build_runtime_authorization(
+    authorization = build_qualification_case_authorization(
         workflow,
         gate,
-        approval_source="rdp-multiapp-qualification",
+        case_id=qualification_case_id,
         params=params,
+        worklists=None,
+        campaign_id="rdp-multiapp-vision-v1",
+        run_id=run_dir.name,
     )
     transport = DockerX11RdpTransport(container)
     backend = FreeRDPBackend(transport, connect=True)
@@ -988,8 +1024,8 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
     _record(record_backend, recording_dir)
     _arm_recording(recording_dir)
     compiled = compile_recording(recording_dir, bundle_dir, name="rdp-multiapp-vision")
-    workflow, verifier, gate, checkpoint_key, step_ids = _qualify(
-        compiled, bundle_dir, root
+    workflow, verifier, gate, checkpoint_key, qualification_case_id, step_ids = (
+        _qualify(compiled, bundle_dir, root)
     )
     pointer_actions = {
         ActionKind.CLICK,
@@ -1025,6 +1061,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
                 gate=gate,
                 bundle_dir=bundle_dir,
                 checkpoint_key=checkpoint_key,
+                qualification_case_id=qualification_case_id,
                 run_dir=trial_run_dir,
                 condition=condition,
                 save_pointer_acquisition=save_pointer_acquisition,

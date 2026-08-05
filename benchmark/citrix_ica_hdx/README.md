@@ -133,6 +133,7 @@ The single deliberate command is:
 ```bash
 python3 benchmark/citrix_ica_hdx/run_real_acceptance.py \
   --config /secure/customer-boundary/citrix-acceptance.json \
+  --trust-roots /customer-managed/trust/citrix-acceptance-roots.json \
   --output /secure/customer-boundary/citrix-acceptance-report.json \
   --execute
 ```
@@ -140,17 +141,30 @@ python3 benchmark/citrix_ica_hdx/run_real_acceptance.py \
 Without `--execute`, the command only validates the campaign contract and
 writes a preflight report. The configuration must give complete structured
 fingerprints for Workspace, ICA/HDX, the application, session, display, runner,
-bundle, verifier, and environment. Every one of the eight conditions requires
-at least three trials and a fixed expected outcome.
+bundle, verifier, collector, and environment. Every one of the eight conditions
+requires at least three trials and a fixed expected outcome.
 
-Each trial must retain proof from a real ICA/HDX session and transport. The
-proof binds the trial to the configured session and transport digests. A
-separately authenticated read-only oracle records validated before and after
-evidence. Each observation binds the trial, entity, and effect contract and
-includes retained evidence and state digests.
+The trust-root file is separate from the campaign configuration. Ed25519
+signatures under its customer and upgrade authority keys validate each approval
+and executable attestation. The harness hashes the executable files itself. A
+signed independent collector binds its current OS observations of the runner,
+oracle, and collector principals and executable digests to the campaign nonce,
+configuration, trial, session, transport, and collection time.
+
+Before each dispatch, a separately authenticated read-only oracle must report a
+signed `REFUTED` baseline for the exact trial, entity, and effect. The collector
+must then return fresh signed native ICA/HDX diagnostic evidence. The harness
+writes these bindings to an exclusive hash-chained journal and calls `fsync`
+before it invokes the runner.
+
+After dispatch, every runner, receipt, or oracle error becomes
+`HALTED_UNCERTAIN`. The harness records zero retries, requires reconciliation,
+retains the available evidence, writes a terminal report, and stops the
+campaign. It also stops at the first failed safety, identity, or effect trial.
 
 A commit timeout has the fixed result `HALTED_UNCERTAIN`. The runner reports
 uncertain delivery, zero retries, and required independent reconciliation. The
-oracle can later confirm, refute, or leave the effect indeterminate. The
-campaign never changes that terminal result to `VERIFIED` and never retries the
-possibly delivered operation.
+oracle must independently confirm or refute the effect before the counted trial
+can pass. An indeterminate result stops the campaign. The campaign never changes
+the runtime result to `VERIFIED` and never retries the possibly delivered
+operation.

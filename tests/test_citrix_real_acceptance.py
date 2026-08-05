@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 REPO = Path(__file__).resolve().parents[1]
 PATH = REPO / "benchmark/citrix_ica_hdx/run_real_acceptance.py"
@@ -16,17 +21,40 @@ spec.loader.exec_module(mod)
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
+SHA_D = "d" * 64
 
 
-def _write(path: Path, value: str | dict) -> dict:
-    if isinstance(value, dict):
-        path.write_text(json.dumps(value, sort_keys=True))
-    else:
-        path.write_text(value)
+@dataclass
+class Campaign:
+    config: dict
+    trust_path: Path
+    trust_roots: dict
+    keys: dict[str, Ed25519PrivateKey]
+
+
+def _public_key(key: Ed25519PrivateKey) -> str:
+    raw = key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    return base64.b64encode(raw).decode()
+
+
+def _signed(key: Ed25519PrivateKey, payload: dict) -> dict:
+    signature = key.sign(mod._canonical_json(payload))
+    return {"payload": payload, "signature": base64.b64encode(signature).decode()}
+
+
+def _write(path: Path, value: str | dict, *, executable: bool = False) -> dict:
+    path.write_text(
+        json.dumps(value, sort_keys=True) if isinstance(value, dict) else value
+    )
+    if executable:
+        path.chmod(0o700)
     return {"path": str(path), "sha256": mod._sha256(path)}
 
 
-def _fingerprints(runner_sha: str, oracle_sha: str) -> dict:
+def _fingerprints(component_sha: dict[str, str]) -> dict:
     return {
         "citrix_workspace": {
             "product": "Citrix Workspace",
@@ -62,7 +90,8 @@ def _fingerprints(runner_sha: str, oracle_sha: str) -> dict:
         "runner": {
             "name": "OpenAdapt",
             "version": "1.0",
-            "binary_sha256": runner_sha,
+            "binary_sha256": component_sha["runner"],
+            "principal_sha256": SHA_A,
             "host_sha256": SHA_A,
         },
         "bundle": {
@@ -73,8 +102,14 @@ def _fingerprints(runner_sha: str, oracle_sha: str) -> dict:
         "verifier": {
             "name": "Customer Oracle",
             "version": "1",
-            "binary_sha256": oracle_sha,
+            "binary_sha256": component_sha["oracle"],
             "principal_sha256": SHA_C,
+        },
+        "collector": {
+            "name": "Independent ICA Collector",
+            "version": "1",
+            "binary_sha256": component_sha["collector"],
+            "principal_sha256": SHA_D,
         },
         "environment": {
             "environment_sha256": SHA_B,
@@ -84,40 +119,90 @@ def _fingerprints(runner_sha: str, oracle_sha: str) -> dict:
     }
 
 
-def _config(tmp_path: Path) -> dict:
-    runner_path = tmp_path / "approved-runner"
-    oracle_path = tmp_path / "read-only-oracle"
-    runner_path.write_text("runner")
-    oracle_path.write_text("oracle")
-    runner_path.chmod(0o700)
-    oracle_path.chmod(0o700)
-    runner_sha = mod._sha256(runner_path)
-    oracle_sha = mod._sha256(oracle_path)
-    fingerprints = _fingerprints(runner_sha, oracle_sha)
+def _campaign(tmp_path: Path) -> Campaign:
+    executables = {}
+    component_sha = {}
+    for name in ("runner", "oracle", "collector"):
+        path = tmp_path / name
+        _write(path, f"#!/bin/sh\n# {name}\n", executable=True)
+        executables[name] = path
+        component_sha[name] = mod._sha256(path)
+    keys = {
+        name: Ed25519PrivateKey.generate()
+        for name in ("customer", "upgrade", "collector", "oracle")
+    }
+    components = {
+        "runner": {
+            "executable_sha256": component_sha["runner"],
+            "principal_sha256": SHA_A,
+        },
+        "oracle": {
+            "executable_sha256": component_sha["oracle"],
+            "principal_sha256": SHA_C,
+        },
+        "collector": {
+            "executable_sha256": component_sha["collector"],
+            "principal_sha256": SHA_D,
+        },
+    }
+    trust = {
+        "schema_version": mod.TRUST_ROOT_SCHEMA,
+        "keys": {
+            "customer_authority": _public_key(keys["customer"]),
+            "upgrade_authority": _public_key(keys["upgrade"]),
+            "collector_authority": _public_key(keys["collector"]),
+            "oracle_authority": _public_key(keys["oracle"]),
+        },
+        "components": components,
+    }
+    trust_path = tmp_path / "external-trust-roots.json"
+    trust_path.write_text(json.dumps(trust))
+    trust_roots = mod.load_trust_roots(trust_path)
+    fingerprints = _fingerprints(component_sha)
+
+    def upgrade(name: str) -> dict:
+        return _write(
+            tmp_path / f"{name}-upgrade.json",
+            _signed(
+                keys["upgrade"],
+                {
+                    "schema_version": "openadapt.component-upgrade-attestation.v1",
+                    "component": name,
+                    **components[name],
+                },
+            ),
+        )
+
     runner_approval = _write(
         tmp_path / "runner-approval.json",
-        {
-            "schema_version": "openadapt.customer-runner-approval.v1",
-            "authority": "customer_approved",
-            "principal_sha256": SHA_A,
-            "executable_sha256": runner_sha,
-            "session_id_sha256": fingerprints["session"]["session_id_sha256"],
-            "allowed_operation": "citrix_acceptance_trial",
-            "infrastructure_lifecycle_authority": False,
-        },
+        _signed(
+            keys["customer"],
+            {
+                "schema_version": "openadapt.customer-runner-approval.v1",
+                "authority": "customer_approved",
+                "principal_sha256": SHA_A,
+                "executable_sha256": component_sha["runner"],
+                "session_id_sha256": fingerprints["session"]["session_id_sha256"],
+                "allowed_operation": "citrix_acceptance_trial",
+                "infrastructure_lifecycle_authority": False,
+            },
+        ),
     )
     oracle_approval = _write(
         tmp_path / "oracle-approval.json",
-        {
-            "schema_version": "openadapt.customer-oracle-approval.v1",
-            "authority": "customer_approved",
-            "principal_sha256": SHA_C,
-            "executable_sha256": oracle_sha,
-            "environment_sha256": fingerprints["environment"]["environment_sha256"],
-            "allowed_operation": "read_only_effect_observation",
-            "separately_authenticated": True,
-            "write_authority": False,
-        },
+        _signed(
+            keys["customer"],
+            {
+                "schema_version": "openadapt.customer-oracle-approval.v1",
+                "authority": "customer_approved",
+                "principal_sha256": SHA_C,
+                "executable_sha256": component_sha["oracle"],
+                "environment_sha256": fingerprints["environment"]["environment_sha256"],
+                "allowed_operation": "read_only_effect_observation",
+                "separately_authenticated": True,
+                "write_authority": False,
+            },
+        ),
     )
     trials = []
     for condition, expected in mod.EXPECTED_OUTCOMES.items():
@@ -131,94 +216,174 @@ def _config(tmp_path: Path) -> dict:
                     "effect_contract_sha256": SHA_B,
                 }
             )
-    return {
+    config = {
         "schema_version": mod.SCHEMA,
+        "campaign_nonce": "12" * 16,
         "fingerprints": fingerprints,
         "runner_authority": {
             "mode": "customer_approved_session_runner",
             "pre_existing_session": True,
             "infrastructure_lifecycle_authority": False,
-            "command": [str(runner_path)],
-            "executable_sha256": runner_sha,
+            "command": [str(executables["runner"])],
+            "executable_sha256": component_sha["runner"],
             "principal_sha256": SHA_A,
             "approval_artifact": runner_approval,
+            "upgrade_artifact": upgrade("runner"),
         },
         "independent_oracle": {
-            "command": [str(oracle_path)],
-            "executable_sha256": oracle_sha,
+            "command": [str(executables["oracle"])],
+            "executable_sha256": component_sha["oracle"],
             "authority": "authenticated_read_only",
             "principal_sha256": SHA_C,
             "approval_artifact": oracle_approval,
+            "upgrade_artifact": upgrade("oracle"),
+        },
+        "collector_authority": {
+            "command": [str(executables["collector"])],
+            "executable_sha256": component_sha["collector"],
+            "principal_sha256": SHA_D,
+            "upgrade_artifact": upgrade("collector"),
         },
         "trials": trials,
     }
+    return Campaign(config, trust_path, trust_roots, keys)
 
 
-def _load_from(tmp_path: Path, config: dict) -> dict:
+def _load(campaign: Campaign, tmp_path: Path) -> tuple[dict, Path]:
     path = tmp_path / "config.json"
-    path.write_text(json.dumps(config))
-    return mod.load_config(path)
+    path.write_text(json.dumps(campaign.config))
+    return mod.load_config(path, campaign.trust_roots), path
+
+
+def _evidence(tmp_path: Path, name: str) -> dict:
+    return _write(tmp_path / name, name)
+
+
+def _oracle(
+    campaign: Campaign,
+    tmp_path: Path,
+    trial: dict,
+    config_sha256: str,
+    phase: str,
+    *,
+    status: str = "REFUTED",
+    state_digest: str = SHA_A,
+) -> dict:
+    payload = {
+        "schema_version": "openadapt.citrix-oracle-observation.v1",
+        "campaign_nonce": campaign.config["campaign_nonce"],
+        "config_sha256": config_sha256,
+        "phase": phase,
+        "trial_id": trial["id"],
+        "entity_sha256": trial["entity_sha256"],
+        "effect_contract_sha256": trial["effect_contract_sha256"],
+        "principal_sha256": SHA_C,
+        "authority": "authenticated_read_only",
+        "effect_status": status,
+        "state_digest": state_digest,
+        "evidence": _evidence(tmp_path, f"oracle-{phase}-{trial['id']}.json"),
+    }
+    return _signed(campaign.keys["oracle"], payload)
+
+
+def _collector(
+    campaign: Campaign,
+    tmp_path: Path,
+    trial: dict,
+    config_sha256: str,
+    *,
+    captured_at: datetime | None = None,
+) -> dict:
+    payload = {
+        "schema_version": "openadapt.citrix-independent-collector.v1",
+        "campaign_nonce": campaign.config["campaign_nonce"],
+        "config_sha256": config_sha256,
+        "trial_id": trial["id"],
+        "protocol": "ICA/HDX",
+        "standin": False,
+        "session_id_sha256": SHA_A,
+        "transport_sha256": SHA_B,
+        "captured_at": (captured_at or datetime.now(timezone.utc)).isoformat(),
+        "observed_components": campaign.trust_roots["components"],
+        "diagnostic_evidence": _evidence(tmp_path, f"collector-{trial['id']}.json"),
+    }
+    return _signed(campaign.keys["collector"], payload)
+
+
+def _receipt(trial: dict, collector_sha256: str) -> dict:
+    delivery = {
+        "healthy": "dispatched",
+        "partial_effect": "dispatched",
+        "commit_timeout": "uncertain",
+    }.get(trial["condition"], "not_dispatched")
+    return {
+        "schema_version": "openadapt.citrix-trial-receipt.v1",
+        "trial_id": trial["id"],
+        "condition": trial["condition"],
+        "outcome": trial["expected"],
+        "delivery_state": delivery,
+        "retry_count": 0,
+        "reconciliation_required": trial["condition"] == "commit_timeout",
+        "collector_evidence_sha256": collector_sha256,
+    }
+
+
+def _result(value: dict, *, returncode: int = 0) -> dict:
+    return {"returncode": returncode, "stdout": json.dumps(value), "stderr": ""}
 
 
 def test_complete_campaign_contract_passes_preflight(tmp_path: Path) -> None:
-    assert len(_load_from(tmp_path, _config(tmp_path))["trials"]) == 24
+    campaign = _campaign(tmp_path)
+    config, _ = _load(campaign, tmp_path)
+    assert len(config["trials"]) == 24
 
 
-def test_requires_three_trials_for_every_condition(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    config["trials"] = [
-        trial
-        for trial in config["trials"]
-        if not (trial["condition"] == "ambiguity" and trial["id"].endswith("-2"))
-    ]
+def test_requires_three_trials_and_fixed_outcomes(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    campaign.config["trials"].pop()
     with pytest.raises(ValueError, match="three trials"):
-        _load_from(tmp_path, config)
-
-
-def test_fixed_expected_outcomes_cannot_be_weakened(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    row = next(t for t in config["trials"] if t["condition"] == "commit_timeout")
-    row["expected"] = "VERIFIED"
+        _load(campaign, tmp_path)
+    campaign = _campaign(tmp_path)
+    campaign.config["trials"][-1]["expected"] = "VERIFIED"
     with pytest.raises(ValueError, match="HALTED_UNCERTAIN"):
-        _load_from(tmp_path, config)
+        _load(campaign, tmp_path)
 
 
-def test_fingerprints_are_exact_complete_and_structured(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    del config["fingerprints"]["display"]["dpi_x"]
-    with pytest.raises(ValueError, match="display"):
-        _load_from(tmp_path, config)
+def test_external_trust_roots_reject_self_asserted_component(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    campaign.config["runner_authority"]["principal_sha256"] = SHA_B
+    campaign.config["fingerprints"]["runner"]["principal_sha256"] = SHA_B
+    with pytest.raises(ValueError, match="not trusted"):
+        _load(campaign, tmp_path)
 
 
-def test_rejects_arbitrary_per_trial_commands(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    config["trials"][0]["run_command"] = ["anything"]
-    with pytest.raises(ValueError, match="exact trial binding"):
-        _load_from(tmp_path, config)
-
-
-def test_runner_requires_preexisting_session_and_exact_customer_approval(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    config["runner_authority"]["pre_existing_session"] = False
-    with pytest.raises(ValueError, match="must exist"):
-        _load_from(tmp_path, config)
-
-    config = _config(tmp_path)
-    approval_path = Path(config["runner_authority"]["approval_artifact"]["path"])
-    approval = json.loads(approval_path.read_text())
-    approval["infrastructure_lifecycle_authority"] = True
-    approval_path.write_text(json.dumps(approval))
-    config["runner_authority"]["approval_artifact"]["sha256"] = mod._sha256(
-        approval_path
+def test_customer_and_upgrade_signatures_reject_tampering(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    approval = Path(campaign.config["runner_authority"]["approval_artifact"]["path"])
+    envelope = json.loads(approval.read_text())
+    envelope["payload"]["infrastructure_lifecycle_authority"] = True
+    approval.write_text(json.dumps(envelope))
+    campaign.config["runner_authority"]["approval_artifact"]["sha256"] = mod._sha256(
+        approval
     )
-    with pytest.raises(ValueError, match="approval"):
-        _load_from(tmp_path, config)
+    with pytest.raises(ValueError, match="signature"):
+        _load(campaign, tmp_path)
+
+    campaign = _campaign(tmp_path)
+    upgrade = Path(campaign.config["independent_oracle"]["upgrade_artifact"]["path"])
+    envelope = json.loads(upgrade.read_text())
+    envelope["payload"]["component"] = "runner"
+    upgrade.write_text(json.dumps(envelope))
+    campaign.config["independent_oracle"]["upgrade_artifact"]["sha256"] = mod._sha256(
+        upgrade
+    )
+    with pytest.raises(ValueError, match="signature"):
+        _load(campaign, tmp_path)
 
 
-def test_pinned_executable_change_after_preflight_is_refused(tmp_path: Path) -> None:
-    config = _load_from(tmp_path, _config(tmp_path))
+def test_observed_executable_is_rechecked_after_preflight(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    config, _ = _load(campaign, tmp_path)
     runner = Path(config["runner_authority"]["command"][0])
     runner.write_text("replaced")
     with pytest.raises(ValueError, match="changed after preflight"):
@@ -229,192 +394,264 @@ def test_pinned_executable_change_after_preflight_is_refused(tmp_path: Path) -> 
         )
 
 
-def test_oracle_requires_separate_read_only_identity_and_exact_approval(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    config["independent_oracle"]["principal_sha256"] = SHA_A
-    config["fingerprints"]["verifier"]["principal_sha256"] = SHA_A
-    with pytest.raises(ValueError, match="separate principals"):
-        _load_from(tmp_path, config)
-
-    config = _config(tmp_path)
-    config["independent_oracle"]["authority"] = "read_write"
-    with pytest.raises(ValueError, match="read-only"):
-        _load_from(tmp_path, config)
-
-
-def _evidence(tmp_path: Path, name: str) -> dict:
-    return _write(tmp_path / name, name)
-
-
-def _oracle_observation(tmp_path: Path, trial: dict, phase: str) -> dict:
-    return {
-        "schema_version": "openadapt.citrix-oracle-observation.v1",
-        "phase": phase,
-        "trial_id": trial["id"],
-        "entity_sha256": trial["entity_sha256"],
-        "effect_contract_sha256": trial["effect_contract_sha256"],
-        "principal_sha256": SHA_C,
-        "authority": "authenticated_read_only",
-        "effect_status": "REFUTED",
-        "state_digest": SHA_A,
-        "evidence": _evidence(tmp_path, f"oracle-{phase}.json"),
-    }
-
-
-def test_oracle_evidence_is_phase_trial_entity_effect_and_digest_bound(
-    tmp_path: Path,
-) -> None:
-    trial = _config(tmp_path)["trials"][0]
-    evidence = _oracle_observation(tmp_path, trial, "before")
-    result = {"returncode": 0, "stdout": json.dumps(evidence), "stderr": ""}
+def test_signed_oracle_is_bound_and_tamper_evident(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    config, path = _load(campaign, tmp_path)
+    trial = config["trials"][0]
+    digest = mod._sha256(path)
+    envelope = _oracle(campaign, tmp_path, trial, digest, "before")
+    result = _result(envelope)
     assert (
         mod._validate_oracle_evidence(
-            result, trial=trial, phase="before", oracle_principal_sha256=SHA_C
-        )["trial_id"]
-        == trial["id"]
+            result,
+            trial=trial,
+            phase="before",
+            oracle_principal_sha256=SHA_C,
+            oracle_public_key=campaign.trust_roots["decoded_keys"]["oracle_authority"],
+            campaign_nonce=config["campaign_nonce"],
+            config_sha256=digest,
+        )["payload"]["effect_status"]
+        == "REFUTED"
     )
-
-    evidence["entity_sha256"] = SHA_B
-    result["stdout"] = json.dumps(evidence)
-    with pytest.raises(ValueError, match="entity_sha256"):
+    envelope["payload"]["entity_sha256"] = SHA_B
+    with pytest.raises(ValueError, match="signature"):
         mod._validate_oracle_evidence(
-            result, trial=trial, phase="before", oracle_principal_sha256=SHA_C
+            _result(envelope),
+            trial=trial,
+            phase="before",
+            oracle_principal_sha256=SHA_C,
+            oracle_public_key=campaign.trust_roots["decoded_keys"]["oracle_authority"],
+            campaign_nonce=config["campaign_nonce"],
+            config_sha256=digest,
         )
 
-    evidence = _oracle_observation(tmp_path, trial, "before")
-    evidence["evidence"]["sha256"] = SHA_C
-    result["stdout"] = json.dumps(evidence)
-    with pytest.raises(ValueError, match="digest"):
-        mod._validate_oracle_evidence(
-            result, trial=trial, phase="before", oracle_principal_sha256=SHA_C
-        )
 
-
-def _receipt(tmp_path: Path, trial: dict, config: dict) -> dict:
-    is_timeout = trial["condition"] == "commit_timeout"
-    delivery_state = {
-        "healthy": "dispatched",
-        "partial_effect": "dispatched",
-        "commit_timeout": "uncertain",
-    }.get(trial["condition"], "not_dispatched")
-    transport_evidence = _write(
-        tmp_path / f"transport-{trial['id']}.json",
-        {
-            "schema_version": "openadapt.citrix-retained-transport-evidence.v1",
-            "proof_source": "native_workspace_session_diagnostics",
-            "protocol": "ICA/HDX",
-            "standin": False,
-            "trial_id": trial["id"],
-            "session_id_sha256": config["fingerprints"]["session"]["session_id_sha256"],
-            "transport_sha256": config["fingerprints"]["ica_hdx"]["transport_sha256"],
-            "workspace_version": config["fingerprints"]["citrix_workspace"]["version"],
-            "vda_version": config["fingerprints"]["ica_hdx"]["vda_version"],
-            "captured_at": "2026-08-06T12:00:00Z",
-        },
-    )
-    return {
-        "schema_version": "openadapt.citrix-trial-receipt.v1",
-        "trial_id": trial["id"],
-        "condition": trial["condition"],
-        "outcome": trial["expected"],
-        "delivery_state": delivery_state,
-        "retry_count": 0,
-        "reconciliation_required": is_timeout,
-        "session_transport_proof": {
-            "schema_version": "openadapt.citrix-session-transport-proof.v1",
-            "kind": "real_ica_hdx",
-            "trial_id": trial["id"],
-            "session_id_sha256": config["fingerprints"]["session"]["session_id_sha256"],
-            "transport_sha256": config["fingerprints"]["ica_hdx"]["transport_sha256"],
-            "evidence": transport_evidence,
-        },
-    }
-
-
-def test_each_receipt_requires_retained_real_ica_hdx_proof(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+def test_collector_is_signed_fresh_and_campaign_bound(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    config, path = _load(campaign, tmp_path)
     trial = config["trials"][0]
-    receipt = _receipt(tmp_path, trial, config)
-    result = {"returncode": 0, "stdout": json.dumps(receipt), "stderr": ""}
+    digest = mod._sha256(path)
+    envelope = _collector(campaign, tmp_path, trial, digest)
+    assert (
+        mod._validate_collector_evidence(
+            _result(envelope),
+            trial=trial,
+            config=config,
+            config_sha256=digest,
+            trust_roots=campaign.trust_roots,
+        )["payload"]["protocol"]
+        == "ICA/HDX"
+    )
+    stale = _collector(
+        campaign,
+        tmp_path,
+        trial,
+        digest,
+        captured_at=datetime.now(timezone.utc) - timedelta(hours=1),
+    )
+    with pytest.raises(ValueError, match="stale"):
+        mod._validate_collector_evidence(
+            _result(stale),
+            trial=trial,
+            config=config,
+            config_sha256=digest,
+            trust_roots=campaign.trust_roots,
+        )
+    wrong_campaign = _collector(campaign, tmp_path, trial, digest)
+    wrong_campaign["payload"]["campaign_nonce"] = "34" * 16
+    wrong_campaign = _signed(campaign.keys["collector"], wrong_campaign["payload"])
+    with pytest.raises(ValueError, match="campaign_nonce"):
+        mod._validate_collector_evidence(
+            _result(wrong_campaign),
+            trial=trial,
+            config=config,
+            config_sha256=digest,
+            trust_roots=campaign.trust_roots,
+        )
+
+
+def test_runner_receipt_binds_collector_and_never_retries(tmp_path: Path) -> None:
+    campaign = _campaign(tmp_path)
+    config, _ = _load(campaign, tmp_path)
+    trial = config["trials"][0]
+    receipt = _receipt(trial, SHA_C)
     assert (
         mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
-        )["session_transport_proof"]["kind"]
-        == "real_ica_hdx"
+            _result(receipt), trial=trial, collector_evidence_sha256=SHA_C
+        )["retry_count"]
+        == 0
     )
-
-    receipt["session_transport_proof"]["kind"] = "standin"
-    result["stdout"] = json.dumps(receipt)
-    with pytest.raises(ValueError, match="real ICA/HDX"):
-        mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
-        )
-
-
-def test_transport_evidence_cannot_be_a_relabelled_standin(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    trial = config["trials"][0]
-    receipt = _receipt(tmp_path, trial, config)
-    binding = receipt["session_transport_proof"]["evidence"]
-    evidence_path = Path(binding["path"])
-    evidence = json.loads(evidence_path.read_text())
-    evidence["standin"] = True
-    evidence_path.write_text(json.dumps(evidence))
-    binding["sha256"] = mod._sha256(evidence_path)
-    result = {"returncode": 0, "stdout": json.dumps(receipt), "stderr": ""}
-    with pytest.raises(ValueError, match="standin"):
-        mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
-        )
-
-
-def test_condition_delivery_state_is_fixed(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    trial = next(t for t in config["trials"] if t["condition"] == "ambiguity")
-    receipt = _receipt(tmp_path, trial, config)
-    receipt["delivery_state"] = "dispatched"
-    result = {"returncode": 0, "stdout": json.dumps(receipt), "stderr": ""}
-    with pytest.raises(ValueError, match="not_dispatched"):
-        mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
-        )
-
-
-def test_healthy_requires_refuted_before_confirmed_after_and_state_change(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    trial = config["trials"][0]
-    receipt = _receipt(tmp_path, trial, config)
-    receipt["delivery_state"] = "dispatched"
-    before = _oracle_observation(tmp_path, trial, "before")
-    after = _oracle_observation(tmp_path, trial, "after")
-    after["effect_status"] = "CONFIRMED"
-    after["state_digest"] = SHA_B
-    assert mod._trial_passed(trial, receipt, before, after)
-    before["effect_status"] = "CONFIRMED"
-    assert not mod._trial_passed(trial, receipt, before, after)
-
-
-def test_commit_timeout_stays_uncertain_never_retries_and_reconciles(
-    tmp_path: Path,
-) -> None:
-    config = _config(tmp_path)
-    trial = next(t for t in config["trials"] if t["condition"] == "commit_timeout")
-    receipt = _receipt(tmp_path, trial, config)
-    result = {"returncode": 0, "stdout": json.dumps(receipt), "stderr": ""}
-    assert (
-        mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
-        )["outcome"]
-        == "HALTED_UNCERTAIN"
-    )
-
     receipt["retry_count"] = 1
-    result["stdout"] = json.dumps(receipt)
     with pytest.raises(ValueError, match="must not retry"):
         mod._validate_runner_receipt(
-            result, trial=trial, fingerprints=config["fingerprints"]
+            _result(receipt), trial=trial, collector_evidence_sha256=SHA_C
         )
+
+
+def _scripted_run(
+    campaign: Campaign,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    before_status: str = "REFUTED",
+    runner_value: dict | None = None,
+    after_status: str = "CONFIRMED",
+    corrupt_after: bool = False,
+    corrupt_runner: str | None = None,
+    first_condition: str = "healthy",
+) -> tuple[dict, Path, list[str]]:
+    config, config_path = _load(campaign, tmp_path)
+    selected = next(
+        trial for trial in config["trials"] if trial["condition"] == first_condition
+    )
+    config["trials"].remove(selected)
+    config["trials"].insert(0, selected)
+    digest = mod._sha256(config_path)
+    trial = selected
+    collector = _collector(campaign, tmp_path, trial, digest)
+    receipt = runner_value or _receipt(trial, mod._object_sha256(collector))
+    calls = []
+
+    def fake_run(command, expected_sha256, args, timeout_s=300):
+        del command, expected_sha256, timeout_s
+        calls.append(args[0])
+        if args[0] == "collect":
+            return _result(collector)
+        if args[0] == "execute-trial":
+            if corrupt_runner == "command":
+                return {"returncode": 1, "stdout": "", "stderr": "failed"}
+            if corrupt_runner == "receipt":
+                return _result({"unexpected": True})
+            return _result(receipt)
+        phase = args[args.index("--phase") + 1]
+        if phase == "before":
+            return _result(
+                _oracle(
+                    campaign,
+                    tmp_path,
+                    trial,
+                    digest,
+                    "before",
+                    status=before_status,
+                )
+            )
+        if corrupt_after:
+            return {"returncode": 0, "stdout": "not-json", "stderr": ""}
+        return _result(
+            _oracle(
+                campaign,
+                tmp_path,
+                trial,
+                digest,
+                "after",
+                status=after_status,
+                state_digest=SHA_B,
+            )
+        )
+
+    monkeypatch.setattr(mod, "_run_pinned", fake_run)
+    output = tmp_path / "terminal-report.json"
+    report = mod.run_campaign(
+        config,
+        trust_roots=campaign.trust_roots,
+        config_sha256=digest,
+        output=output,
+    )
+    return report, output, calls
+
+
+def test_unsafe_baseline_stops_before_dispatch_and_retains_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = _campaign(tmp_path)
+    report, output, calls = _scripted_run(
+        campaign, tmp_path, monkeypatch, before_status="CONFIRMED"
+    )
+    assert calls == ["observe"]
+    assert report["trials"][0]["delivery_state"] == "not_dispatched"
+    assert report["terminal_reason"] == "pre_dispatch_safety_refusal"
+    assert output.is_file()
+
+
+def test_commit_timeout_also_requires_refuted_baseline_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = _campaign(tmp_path)
+    report, _, calls = _scripted_run(
+        campaign,
+        tmp_path,
+        monkeypatch,
+        before_status="INDETERMINATE",
+        first_condition="commit_timeout",
+    )
+    assert calls == ["observe"]
+    assert report["trials"][0]["outcome"] == "HALTED"
+    assert report["trials"][0]["delivery_state"] == "not_dispatched"
+
+
+def test_durable_journal_precedes_dispatch_and_is_nonce_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = _campaign(tmp_path)
+    report, output, _ = _scripted_run(campaign, tmp_path, monkeypatch)
+    records = [
+        json.loads(line)
+        for line in Path(report["journal"]["path"]).read_text().splitlines()
+    ]
+    events = [record["event"] for record in records]
+    assert events.index("PRE_DISPATCH_DURABLE") < events.index("DISPATCH_ATTEMPT")
+    assert mod._sha256(Path(report["journal"]["path"])) == report["journal"]["sha256"]
+    config, path = _load(campaign, tmp_path)
+    with pytest.raises(FileExistsError):
+        mod.run_campaign(
+            config,
+            trust_roots=campaign.trust_roots,
+            config_sha256=mod._sha256(path),
+            output=output,
+        )
+
+
+@pytest.mark.parametrize("failure", ["runner_command", "receipt", "oracle_after"])
+def test_every_post_dispatch_error_is_uncertain_and_stops_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    campaign = _campaign(tmp_path)
+    report, output, calls = _scripted_run(
+        campaign,
+        tmp_path,
+        monkeypatch,
+        corrupt_after=failure == "oracle_after",
+        corrupt_runner={"runner_command": "command", "receipt": "receipt"}.get(failure),
+    )
+    row = report["trials"][0]
+    assert row["outcome"] == "HALTED_UNCERTAIN"
+    assert row["retry_count"] == 0
+    assert row["reconciliation_required"] is True
+    assert len(report["trials"]) == 1
+    assert calls == ["observe", "collect", "execute-trial", "observe"]
+    assert Path(row["failure_evidence"]["path"]).is_file()
+    assert json.loads(output.read_text())["terminal"] is True
+
+
+def test_first_effect_failure_stops_campaign_and_retains_terminal_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    campaign = _campaign(tmp_path)
+    report, output, calls = _scripted_run(
+        campaign, tmp_path, monkeypatch, after_status="REFUTED"
+    )
+    assert report["terminal_reason"] == "first_failed_safety_identity_or_effect_trial"
+    assert len(report["trials"]) == 1
+    assert len(calls) == 4
+    assert json.loads(output.read_text())["accepted"] is False
+
+
+def test_commit_timeout_requires_conclusive_reconciliation() -> None:
+    trial = {
+        "condition": "commit_timeout",
+        "expected": "HALTED_UNCERTAIN",
+    }
+    receipt = {"delivery_state": "uncertain"}
+    before = {"payload": {"effect_status": "REFUTED", "state_digest": SHA_A}}
+    after = {"payload": {"effect_status": "INDETERMINATE", "state_digest": SHA_B}}
+    assert not mod._trial_passed(trial, receipt, before, after)

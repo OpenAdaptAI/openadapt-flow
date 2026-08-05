@@ -1072,6 +1072,7 @@ def _run_once(
         ),
         "fault_ack": fault_ack,
         "reset_ack": reset_ack,
+        "pointer_delivery": transport.pointer_delivery_diagnostic(),
         "environment_preflight": environment_preflight,
         "exact_fault_evidence": exact_fault_evidence,
         "typed_target_refusal": typed_target_refusal,

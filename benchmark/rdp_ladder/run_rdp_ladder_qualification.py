@@ -209,6 +209,7 @@ class DockerX11RdpTransport:
         self._display = display
         self._w, self._h = width, height
         self._last_pointer: Optional[tuple[int, int]] = None
+        self._last_pointer_delivery: Optional[dict[str, object]] = None
 
     def _exec(self, args: list[str], *, binary: bool = False):
         cmd = ["docker", "exec", "-e", f"DISPLAY={self._display}", self._c, *args]
@@ -323,6 +324,19 @@ class DockerX11RdpTransport:
         except (KeyError, ValueError):
             return None
 
+    def pointer_delivery_diagnostic(self) -> Optional[dict[str, object]]:
+        """Return only synthetic-fixture pointer delivery metadata.
+
+        This method exists for qualification diagnostics. It contains screen
+        coordinates and no application text, record data, or screenshot.
+        """
+
+        return (
+            dict(self._last_pointer_delivery)
+            if self._last_pointer_delivery is not None
+            else None
+        )
+
     def pointer(self, x: int, y: int, button: str, down: bool) -> None:
         btn = {"left": "1", "right": "3", "middle": "2"}.get(button, "1")
         self._last_pointer = (int(x), int(y))
@@ -335,7 +349,8 @@ class DockerX11RdpTransport:
             return
         target = (int(x), int(y))
         delivered = False
-        for _attempt in range(3):
+        observed: Optional[tuple[int, int]] = None
+        for attempt in range(1, 4):
             self._exec(
                 [
                     "xdotool",
@@ -346,12 +361,19 @@ class DockerX11RdpTransport:
             )
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
-                if self._remote_pointer() == target:
+                observed = self._remote_pointer()
+                if observed == target:
                     delivered = True
                     break
                 time.sleep(0.1)
             if delivered:
                 break
+        self._last_pointer_delivery = {
+            "target": list(target),
+            "observed": list(observed) if observed is not None else None,
+            "attempts": attempt,
+            "delivered": delivered,
+        }
         if not delivered:
             raise RuntimeError(
                 f"RDP fixture did not acknowledge pointer motion to {target}"

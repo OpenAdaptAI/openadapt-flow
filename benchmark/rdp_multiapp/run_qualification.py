@@ -19,6 +19,7 @@ import sqlite3
 import statistics
 import tempfile
 import time
+from difflib import SequenceMatcher
 from email import policy as email_policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -828,6 +829,31 @@ def _oracle_result(root: Path, params: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _campaign_coverage(
+    conditions: tuple[str, ...],
+    trials: list[dict[str, Any]],
+    *,
+    required_trials: int,
+) -> dict[str, Any]:
+    """Derive campaign completion from retained per-condition results."""
+
+    counts = {
+        condition: sum(trial.get("condition") == condition for trial in trials)
+        for condition in conditions
+    }
+    executed = [condition for condition in conditions if counts[condition] > 0]
+    pending = [
+        condition for condition in conditions if counts[condition] < required_trials
+    ]
+    return {
+        "configured_conditions": list(conditions),
+        "implemented_conditions": executed,
+        "condition_trial_counts": counts,
+        "full_campaign_complete": not pending,
+        "full_campaign_pending_conditions": pending,
+    }
+
+
 def _run_once(
     *,
     container: str,
@@ -866,6 +892,7 @@ def _run_once(
     )
     transport = DisplayDriftTransport(container)
     environment_probe_text: dict[str, list[str]] = {}
+    environment_ocr_cache: dict[str, list[str]] = {}
 
     def environment_marker_visible(marker: str, png: bytes) -> bool:
         """Read a fixture's PHI-free marker from its stable top-right band."""
@@ -873,26 +900,33 @@ def _run_once(
         from openadapt_flow import vision
 
         # This dedicated fixture region contains only static, PHI-free
-        # environment labels. Retain its OCR output in the campaign result so
-        # an environment refusal can be diagnosed without exporting a frame.
-        lines = vision.ocr(png, region=(960, 0, 320, 72))
-        environment_probe_text[marker] = [line.text for line in lines]
-        return (
-            vision.find_text(
-                png,
-                marker,
-                region=(960, 0, 320, 72),
-                # RDP codecs can alter a glyph edge. The dedicated band has
-                # exactly one expected, PHI-free marker, so permit bounded
-                # codec/OCR glyph variation for that fixed token.
-                min_ratio=0.9,
-            )
-            is not None
+        # environment labels. One exact frame supplies all three probes. Do
+        # not run OCR again for each marker: repeated OCR can consume the
+        # bounded actuation-frame lease before any input edge.
+        digest = hashlib.sha256(png).hexdigest()
+        texts = environment_ocr_cache.get(digest)
+        if texts is None:
+            texts = [
+                line.text.strip().casefold()
+                for line in vision.ocr(png, region=(960, 0, 320, 72))
+                if line.text.strip()
+            ]
+            environment_ocr_cache.clear()
+            environment_ocr_cache[digest] = texts
+        environment_probe_text[marker] = list(texts)
+        candidate = marker.strip().casefold()
+        return any(
+            SequenceMatcher(None, text, candidate).ratio() >= 0.9 for text in texts
         )
 
     backend = FreeRDPBackend(
         transport,
         connect=True,
+        # OCR identity checks can take longer on a shared CI runner. The
+        # backend still captures and compares exact canonical pixels again at
+        # the last common point before input, so this only bounds how long the
+        # resolver can work; it does not permit input on changed content.
+        max_frame_age_s=30.0,
         application_marker=APPLICATION_IDENTITY,
         application_marker_probe=lambda png: environment_marker_visible(
             APPLICATION_IDENTITY, png
@@ -1258,12 +1292,11 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         )
         return runtimes[index]
 
+    coverage = _campaign_coverage(conditions, trials, required_trials=TRIALS)
     result = {
         "schema_version": "openadapt.rdp-multiapp-results.v1",
         "campaign_contract": "benchmark/rdp_multiapp/campaign.json",
-        "implemented_conditions": list(conditions),
-        "full_campaign_complete": True,
-        "full_campaign_pending_conditions": [],
+        **coverage,
         "run_count": len(trials),
         "stopped_early": stopped_early,
         "accepted_subset": all(trial["passed"] for trial in trials),

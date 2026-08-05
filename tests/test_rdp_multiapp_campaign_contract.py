@@ -178,6 +178,35 @@ def test_visual_campaign_has_repeated_trials_and_business_oracles() -> None:
     assert by_id["commit_then_timeout"]["oracle"] == ["sqlite"]
 
 
+def test_campaign_completion_requires_every_trial_for_every_condition() -> None:
+    from benchmark.rdp_multiapp.run_qualification import _campaign_coverage
+
+    conditions = ("healthy", "drift")
+    incomplete = _campaign_coverage(
+        conditions,
+        [{"condition": "healthy"}],
+        required_trials=3,
+    )
+    assert incomplete == {
+        "configured_conditions": ["healthy", "drift"],
+        "implemented_conditions": ["healthy"],
+        "condition_trial_counts": {"healthy": 1, "drift": 0},
+        "full_campaign_complete": False,
+        "full_campaign_pending_conditions": ["healthy", "drift"],
+    }
+
+    complete = _campaign_coverage(
+        conditions,
+        [
+            *({"condition": "healthy"} for _ in range(3)),
+            *({"condition": "drift"} for _ in range(3)),
+        ],
+        required_trials=3,
+    )
+    assert complete["full_campaign_complete"] is True
+    assert complete["full_campaign_pending_conditions"] == []
+
+
 def test_commit_then_timeout_fault_raises_only_after_one_real_save_delivery() -> None:
     from benchmark.rdp_multiapp.run_qualification import (
         _install_commit_then_timeout_fault,

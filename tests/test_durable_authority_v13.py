@@ -388,6 +388,44 @@ def test_synthetic_marker_sink_failure_never_changes_a_permitted_delivery(
     assert authority.validate(manifest).delivery_sequence == 1
 
 
+def test_synthetic_marker_short_pipe_write_never_changes_a_permitted_delivery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A partial observer write is not part of the durable delivery contract."""
+
+    manifest, authority = _remote_initial_authority(
+        tmp_path,
+        monkeypatch,
+        _issued_permit_transport("permit-with-short-observer-write", "b" * 64),
+    )
+    _enable_synthetic_marker(monkeypatch, run_id=manifest.run_id)
+
+    class PipeStatus:
+        st_mode = stat.S_IFIFO
+
+    monkeypatch.setattr(
+        durable_authority_module.os,
+        "fstat",
+        lambda _fd: PipeStatus(),
+    )
+    monkeypatch.setattr(
+        durable_authority_module.os, "set_blocking", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        durable_authority_module.os,
+        "write",
+        lambda _fd, _payload: 1,  # Simulate a short non-blocking pipe write.
+    )
+    authority._synthetic_delivery_marker_sink = (
+        durable_authority_module._fixed_synthetic_delivery_marker_sink()
+    )
+
+    authority.before_initial_delivery(manifest)
+
+    # The exact permit transaction commits even when the observer drops a marker.
+    assert authority.validate(manifest).delivery_sequence == 1
+
+
 def test_synthetic_marker_uses_only_the_fixed_nonblocking_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -889,6 +927,18 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
     )
     monkeypatch.setenv(REMOTE_AUTHORITY_URL_ENV, "http://fake.test/permit")
     monkeypatch.setenv(REMOTE_AUTHORITY_TOKEN_ENV, "secret-token")
+    _enable_synthetic_marker(monkeypatch, run_id=manifest.run_id)
+    observed_markers: list[dict[str, object]] = []
+
+    def sink(payload: bytes) -> None:
+        marker = json.loads(payload)
+        # The observer runs after the authority transaction has committed.
+        assert (
+            authority.validate(manifest).delivery_sequence == marker["delivery_count"]
+        )
+        observed_markers.append(marker)
+
+    authority._synthetic_delivery_marker_sink = sink
 
     authority.before_delivery(
         manifest,
@@ -926,6 +976,7 @@ def test_remote_sequence_spans_verified_progress_in_one_continuation(
     assert observed[0][3] is None
     assert isinstance(observed[1][3], str) and len(observed[1][3]) == 64
     assert observed[0][1] != observed[1][1]
+    assert [marker["delivery_count"] for marker in observed_markers] == [1, 2]
 
 
 def test_lost_remote_response_leaves_stale_private_cursor_and_halts_retry(

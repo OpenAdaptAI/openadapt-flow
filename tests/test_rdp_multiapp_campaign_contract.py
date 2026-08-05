@@ -40,6 +40,21 @@ def test_campaign_native_application_identity_is_a_valid_environment_boundary() 
     assert boundary.expected_application_identity == APPLICATION_IDENTITY
 
 
+def test_campaign_session_identity_is_a_non_sensitive_client_window_digest() -> None:
+    from benchmark.rdp_multiapp.run_qualification import MultiappRdpTransport
+
+    class Transport(MultiappRdpTransport):
+        def _client_window_id(self) -> int:
+            return 4242
+
+    transport = Transport("fixture", display=":9")
+
+    observed = transport.session_identity()
+
+    assert len(observed) == 64
+    assert set(observed) <= set("0123456789abcdef")
+
+
 def test_failure_artifact_exports_only_exact_failed_step_frames(tmp_path: Path) -> None:
     from benchmark.rdp_multiapp.run_qualification import _export_failed_step_frames
 

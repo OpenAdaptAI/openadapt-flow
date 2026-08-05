@@ -81,6 +81,24 @@ TARGET_RECORD_REGION = (35, 123, 430, 68)
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
 
 
+class MultiappRdpTransport(DockerX11RdpTransport):
+    """Expose the live isolated FreeRDP client as a session-bound transport.
+
+    The fixture still verifies application, version, and environment from
+    rendered pixels. The client-window identifier is a stronger session signal
+    than OCR of a changing fixture label: it changes when the local RDP client
+    is replaced and it never contains application data.
+    """
+
+    def session_identity(self) -> str:
+        window_id = self._client_window_id()
+        payload = (
+            f"openadapt.rdp-multiapp-session.v1\\0{self._c}\\0"
+            f"{self._display}\\0{window_id}"
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+
 def _export_failed_step_frames(
     *,
     artifact_root: Path,
@@ -791,21 +809,13 @@ def _run_once(
         campaign_id="rdp-multiapp-vision-v1",
         run_id=run_dir.name,
     )
-    reset_token = fault_ack.get("reset_token")
-    if not isinstance(reset_token, str) or len(reset_token) < 8:
-        raise RuntimeError("fixture did not return a visible session marker")
-    # The fixture displays this fresh per-reset token outside all application
-    # windows. Its first 32 bits are enough to bind one short-lived synthetic
-    # session while remaining legible to the pixel-only OCR observer.
-    session_marker = f"oa-session-{reset_token[:8]}"
-    transport = DockerX11RdpTransport(container)
+    transport = MultiappRdpTransport(container)
     backend = FreeRDPBackend(
         transport,
         connect=True,
         application_marker=APPLICATION_IDENTITY,
         application_version_marker=APPLICATION_VERSION,
         environment_marker=ENVIRONMENT_MARKER,
-        session_marker=session_marker,
     )
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0

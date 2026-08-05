@@ -821,7 +821,9 @@ def _run_once(
             vision.find_text(
                 png,
                 "app oa-rdp-fixture",
-                region=(0, 28, 260, 32),
+                # The fixture's PHI-free launcher occupies the bottom band of
+                # its 1280x800 remote framebuffer (not the client title bar).
+                region=(0, 760, 280, 40),
                 min_ratio=1.0,
             )
             is not None

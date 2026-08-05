@@ -926,6 +926,7 @@ def _run_once(
         bundle_dir=bundle_dir,
         run_dir=run_dir,
         idempotency_key=f"{condition}-{run_dir.name}",
+        execution_target_kind="rdp",
     )
     oracle = _oracle_result(root, params)
     expected_halt = condition in {

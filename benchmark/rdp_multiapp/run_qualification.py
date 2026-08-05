@@ -810,12 +810,18 @@ def _run_once(
         run_id=run_dir.name,
     )
     transport = MultiappRdpTransport(container)
+    environment_probe_text: dict[str, list[str]] = {}
 
     def environment_marker_visible(marker: str, png: bytes) -> bool:
         """Read a fixture's PHI-free marker from its stable top-right band."""
 
         from openadapt_flow import vision
 
+        # This dedicated fixture region contains only static, PHI-free
+        # environment labels. Retain its OCR output in the campaign result so
+        # an environment refusal can be diagnosed without exporting a frame.
+        lines = vision.ocr(png, region=(960, 0, 320, 72))
+        environment_probe_text[marker] = [line.text for line in lines]
         return (
             vision.find_text(
                 png,
@@ -870,6 +876,7 @@ def _run_once(
         ),
         "session_identity_present": environment_identity is not None,
         "qualification_environment_present": environment_identity is not None,
+        "marker_probe_text": environment_probe_text,
     }
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0

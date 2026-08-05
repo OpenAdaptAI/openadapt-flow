@@ -219,11 +219,27 @@ class Suite:
         self.launcher = launcher
         tk.Label(
             launcher,
-            text="Remote workspace",
+            text="OpenAdapt RDP multiapp fixture",
             bg="#172033",
             fg="white",
-            font=("DejaVu Sans", 14, "bold"),
-        ).place(x=28, y=17)
+            font=("DejaVu Sans", 12, "bold"),
+        ).place(x=28, y=8)
+        self.environment_label = tk.Label(
+            launcher,
+            text="fixture-v1  ·  rdp-multiapp-x11-freerdp",
+            bg="#172033",
+            fg="#bfdbfe",
+            font=("DejaVu Sans", 9),
+        )
+        self.environment_label.place(x=28, y=32)
+        self.session_label = tk.Label(
+            launcher,
+            text="",
+            bg="#172033",
+            fg="#bfdbfe",
+            font=("DejaVu Sans", 8),
+        )
+        self.session_label.place(x=890, y=36)
         for index, title in enumerate(("Inbox", "Worklist", "Scheduler")):
             tk.Button(
                 launcher,
@@ -608,6 +624,7 @@ class Suite:
         self.last_fault_token = None
         self.selected_request = None
         self.active_record = None
+        self.session_label.config(text=f"session {self.last_reset_token or 'pending'}")
         self.inbox_detail.config(
             text="Select the request to review its structured details."
         )

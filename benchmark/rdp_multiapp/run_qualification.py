@@ -32,6 +32,9 @@ VIEWPORT = (1280, 800)
 TARGET_REQUEST = "REQ-LIVE-2048"
 TARGET_RECORD = "REC-2048"
 TARGET_NAME = "Jordan Lee"
+APPLICATION_IDENTITY = "OpenAdapt RDP multiapp fixture"
+APPLICATION_VERSION = "fixture-v1"
+ENVIRONMENT_MARKER = "rdp-multiapp-x11-freerdp"
 SLOT_PARAM = "appointment_slot"
 TYPE_PARAM = "appointment_type"
 REQUEST_PARAM = "request_id"
@@ -462,6 +465,9 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         set_case_scope,
         set_effect_policy,
     )
+    from openadapt_flow.qualification_environment import (
+        BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256,
+    )
     from openadapt_flow.run_gate import evaluate_run_gate, runtime_inputs_digest
     from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
     from openadapt_flow.verification import VerificationTier
@@ -533,23 +539,22 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         )
     ]
 
-    environment_payload = json.dumps(
-        {
-            "application": "rdp-multiapp-suite",
-            "policy_sha256": hashlib.sha256(POLICY_PATH.read_bytes()).hexdigest(),
-            "surface": "freerdp3-roundtrip",
-            "viewport": VIEWPORT,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
     init_project(
         workflow,
         environment=EnvironmentBoundary(
             target_kind="rdp",
             application="RDP multi-window synthetic suite",
-            application_version="v1",
-            environment_digest=hashlib.sha256(environment_payload).hexdigest(),
+            application_identity=APPLICATION_IDENTITY,
+            application_version=APPLICATION_VERSION,
+            environment_observer_id=(
+                "backend:openadapt_flow.backends.rdp_backend.FreeRDPBackend"
+            ),
+            environment_observer_contract_sha256=(
+                BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256
+            ),
+            environment_digest=hashlib.sha256(
+                f"rdp-environment-v1\0{ENVIRONMENT_MARKER}".encode("utf-8")
+            ).hexdigest(),
             runtime_version=__version__,
             required_capabilities=[
                 "vision-only-resolution",
@@ -786,8 +791,18 @@ def _run_once(
         campaign_id="rdp-multiapp-vision-v1",
         run_id=run_dir.name,
     )
+    session_marker = fault_ack.get("reset_token")
+    if not isinstance(session_marker, str) or not session_marker:
+        raise RuntimeError("fixture did not return a visible session marker")
     transport = DockerX11RdpTransport(container)
-    backend = FreeRDPBackend(transport, connect=True)
+    backend = FreeRDPBackend(
+        transport,
+        connect=True,
+        application_marker=APPLICATION_IDENTITY,
+        application_version_marker=APPLICATION_VERSION,
+        environment_marker=ENVIRONMENT_MARKER,
+        session_marker=session_marker,
+    )
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0
     injected = False

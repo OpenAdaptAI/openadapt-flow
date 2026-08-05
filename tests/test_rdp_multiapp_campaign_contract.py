@@ -8,6 +8,38 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 
 
+def test_campaign_native_application_identity_is_a_valid_environment_boundary() -> None:
+    """The qualified RDP application id must be executable, not display copy."""
+
+    from benchmark.rdp_multiapp.run_qualification import (
+        APPLICATION_IDENTITY,
+        APPLICATION_VERSION,
+        ENVIRONMENT_MARKER,
+    )
+    from openadapt_flow.qualification import EnvironmentBoundary
+    from openadapt_flow.qualification_environment import (
+        BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256,
+    )
+
+    boundary = EnvironmentBoundary(
+        target_kind="rdp",
+        application="RDP multi-window synthetic suite",
+        application_identity=APPLICATION_IDENTITY,
+        application_version=APPLICATION_VERSION,
+        environment_observer_id=(
+            "backend:openadapt_flow.backends.rdp_backend.FreeRDPBackend"
+        ),
+        environment_observer_contract_sha256=(
+            BACKEND_ENVIRONMENT_OBSERVER_CONTRACT_SHA256
+        ),
+        environment_digest="a" * 64,
+        runtime_version="test",
+        required_capabilities=[ENVIRONMENT_MARKER],
+    )
+
+    assert boundary.expected_application_identity == APPLICATION_IDENTITY
+
+
 def test_failure_artifact_exports_only_exact_failed_step_frames(tmp_path: Path) -> None:
     from benchmark.rdp_multiapp.run_qualification import _export_failed_step_frames
 

@@ -226,7 +226,10 @@ class Suite:
         ).place(x=28, y=8)
         self.environment_label = tk.Label(
             launcher,
-            text="fixture-v1  ·  rdp-multiapp-x11-freerdp",
+            text=(
+                "app openadapt-rdp-multiapp-fixture  ·  fixture-v1  ·  "
+                "rdp-multiapp-x11-freerdp"
+            ),
             bg="#172033",
             fg="#bfdbfe",
             font=("DejaVu Sans", 9),

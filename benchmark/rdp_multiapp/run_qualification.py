@@ -424,6 +424,7 @@ def _build_verifier(root: Path) -> SurfaceRoutedVerifier:
 def _qualify(workflow: Any, bundle_dir: Path, root: Path):
     from openadapt_flow import __version__
     from openadapt_flow.deployment import DeploymentConfig, PolicySection
+    from openadapt_flow.execution_profiles import execution_profile_contract
     from openadapt_flow.ir import Postcondition, PostconditionKind, Workflow
     from openadapt_flow.qualification import (
         ActionRiskClass,
@@ -549,9 +550,10 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
             ),
         )
 
-    key = secrets.token_urlsafe(32)
-    workflow.save(bundle_dir, encrypt=True, key=key)
-    workflow = Workflow.load(bundle_dir, key=key)
+    bundle_key = secrets.token_urlsafe(32)
+    checkpoint_key = secrets.token_urlsafe(32)
+    workflow.save(bundle_dir, encrypt=True, key=bundle_key)
+    workflow = Workflow.load(bundle_dir, key=bundle_key)
     verifier = _build_verifier(root)
     gate = evaluate_run_gate(
         workflow,
@@ -561,6 +563,13 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         policy_source=str(POLICY_PATH),
         strict_templates=True,
         require_encryption=True,
+        # This is a qualification campaign, not a production deployment.  It
+        # nevertheless exercises the Standard runtime contract so every trial
+        # receives the runtime's exact outcome and transaction classification.
+        profile_contract=execution_profile_contract("standard"),
+        effective_durable=True,
+        effective_require_settled=True,
+        qualification_evidence_only=True,
     )
     if not gate.passed:
         raise RuntimeError(gate.render())
@@ -568,6 +577,7 @@ def _qualify(workflow: Any, bundle_dir: Path, root: Path):
         workflow,
         verifier,
         gate,
+        checkpoint_key,
         {"save": save.id, "reconcile": reconcile.id, "send": send.id},
     )
 
@@ -681,6 +691,7 @@ def _run_once(
     verifier: Any,
     gate: Any,
     bundle_dir: Path,
+    checkpoint_key: str,
     run_dir: Path,
     condition: str,
     save_pointer_acquisition: int,
@@ -747,6 +758,7 @@ def _run_once(
         pixel_verify_enabled=True,
         durable=True,
         require_settled=True,
+        checkpoint_key=checkpoint_key,
     ).run(
         workflow,
         params=params,
@@ -941,7 +953,9 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
     _record(record_backend, recording_dir)
     _arm_recording(recording_dir)
     compiled = compile_recording(recording_dir, bundle_dir, name="rdp-multiapp-vision")
-    workflow, verifier, gate, step_ids = _qualify(compiled, bundle_dir, root)
+    workflow, verifier, gate, checkpoint_key, step_ids = _qualify(
+        compiled, bundle_dir, root
+    )
     pointer_actions = {
         ActionKind.CLICK,
         ActionKind.DOUBLE_CLICK,
@@ -975,6 +989,7 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
                 verifier=verifier,
                 gate=gate,
                 bundle_dir=bundle_dir,
+                checkpoint_key=checkpoint_key,
                 run_dir=trial_run_dir,
                 condition=condition,
                 save_pointer_acquisition=save_pointer_acquisition,

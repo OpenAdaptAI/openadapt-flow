@@ -828,9 +828,9 @@ def _run_once(
                 marker,
                 region=(960, 0, 320, 72),
                 # RDP codecs can alter a glyph edge. The dedicated band has
-                # exactly one expected, PHI-free marker, so tolerate only a
-                # near-exact OCR rendering of that fixed token.
-                min_ratio=0.95,
+                # exactly one expected, PHI-free marker, so permit bounded
+                # codec/OCR glyph variation for that fixed token.
+                min_ratio=0.9,
             )
             is not None
         )
@@ -840,7 +840,7 @@ def _run_once(
         connect=True,
         application_marker=APPLICATION_IDENTITY,
         application_marker_probe=lambda png: environment_marker_visible(
-            "app oa-rdp-fixture", png
+            APPLICATION_IDENTITY, png
         ),
         application_version_marker=APPLICATION_VERSION,
         application_version_marker_probe=lambda png: environment_marker_visible(

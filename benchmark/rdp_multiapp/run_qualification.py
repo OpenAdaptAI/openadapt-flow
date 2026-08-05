@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import json
 import secrets
 import shutil
@@ -22,6 +23,8 @@ from email import policy as email_policy
 from email.parser import BytesParser
 from pathlib import Path
 from typing import Any, Optional
+
+from PIL import Image, ImageEnhance, ImageOps
 
 from benchmark.multiapp_common import CsvRecordVerifier, SurfaceRoutedVerifier
 from benchmark.rdp_ladder.run_rdp_ladder_qualification import (
@@ -97,6 +100,58 @@ class MultiappRdpTransport(DockerX11RdpTransport):
             f"{self._display}\\0{window_id}"
         ).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
+
+
+class DisplayDriftTransport(MultiappRdpTransport):
+    """Inject rendered drift after a real RDP decode, before resolution.
+
+    The fixture and the input channel remain unchanged. This models the
+    customer-controlled viewer receiving a changed theme, scale, or lossy
+    remote frame. It is not a claim about a specific Citrix codec.
+    """
+
+    def __init__(self, container: str) -> None:
+        super().__init__(container)
+        self.display_drift: Optional[str] = None
+        self._drift_frames = 0
+
+    def framebuffer(self):
+        image, width, height = super().framebuffer()
+        mode = self.display_drift
+        if mode is None:
+            return image, width, height
+        if mode == "moderate_display_drift":
+            # A bounded scale/compression/theme change that keeps text legible.
+            image = image.resize(
+                (max(1, int(width * 0.92)), max(1, int(height * 0.92))),
+                Image.Resampling.BILINEAR,
+            ).resize((width, height), Image.Resampling.BILINEAR)
+            image = ImageEnhance.Contrast(image).enhance(0.88)
+            encoded = io.BytesIO()
+            image.save(encoded, format="JPEG", quality=72)
+            image = Image.open(io.BytesIO(encoded.getvalue())).convert("RGB")
+        elif mode == "severe_display_drift":
+            # A heavy scale/theme/compression fault removes reliable target
+            # detail. The visual ladder must halt before any effect.
+            image = image.resize(
+                (max(1, int(width * 0.35)), max(1, int(height * 0.35))),
+                Image.Resampling.BILINEAR,
+            ).resize((width, height), Image.Resampling.BILINEAR)
+            image = ImageOps.invert(image)
+            encoded = io.BytesIO()
+            image.save(encoded, format="JPEG", quality=8)
+            image = Image.open(io.BytesIO(encoded.getvalue())).convert("RGB")
+        else:
+            raise ValueError(f"unknown display drift mode: {mode}")
+        self._drift_frames += 1
+        return image, width, height
+
+    def display_drift_diagnostic(self) -> dict[str, Any]:
+        return {
+            "mode": self.display_drift,
+            "transformed_frames": self._drift_frames,
+            "source": "simulated-rendered-drift-on-real-rdp-session",
+        }
 
 
 def _export_failed_step_frames(
@@ -809,7 +864,7 @@ def _run_once(
         campaign_id="rdp-multiapp-vision-v1",
         run_id=run_dir.name,
     )
-    transport = MultiappRdpTransport(container)
+    transport = DisplayDriftTransport(container)
     environment_probe_text: dict[str, list[str]] = {}
 
     def environment_marker_visible(marker: str, png: bytes) -> bool:
@@ -878,6 +933,11 @@ def _run_once(
         "qualification_environment_present": environment_identity is not None,
         "marker_probe_text": environment_probe_text,
     }
+    if condition in {"moderate_display_drift", "severe_display_drift"}:
+        # Qualify the known environment first, then alter only the decoded
+        # observation stream used by the real RDP runner. This proves that a
+        # display change during execution cannot silently reuse old geometry.
+        transport.display_drift = condition
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0
     injected = False
@@ -934,6 +994,7 @@ def _run_once(
         "focus_theft_before_write",
         "duplicate_save_control",
         "partial_render",
+        "severe_display_drift",
     }
     errors = [result.error for result in report.results if result.error]
     refusal_evidence = [
@@ -981,7 +1042,20 @@ def _run_once(
         and oracle["mail"] == []
         and oracle["no_consequential_input"]
     )
-    if expected_halt:
+    drift_safe_halt = bool(
+        condition in {"moderate_display_drift", "severe_display_drift"}
+        and not report.success
+        and not oracle["database"]
+        and oracle["worklist_unchanged"]
+        and oracle["mail"] == []
+        and oracle["no_consequential_input"]
+        and transport.display_drift_diagnostic()["transformed_frames"] > 0
+    )
+    if condition == "moderate_display_drift":
+        passed = bool(drift_safe_halt or (report.success and oracle["all_effects_ok"]))
+    elif condition == "severe_display_drift":
+        passed = drift_safe_halt
+    elif expected_halt:
         injected_fault = (
             injected
             if condition in {"wrong_record_before_write", "focus_theft_before_write"}
@@ -1069,10 +1143,12 @@ def _run_once(
                 condition in {"duplicate_save_control", "partial_render"}
                 and exact_fault_evidence
             )
+            or transport.display_drift_diagnostic()["transformed_frames"] > 0
         ),
         "fault_ack": fault_ack,
         "reset_ack": reset_ack,
         "pointer_delivery": transport.pointer_delivery_diagnostic(),
+        "display_drift": transport.display_drift_diagnostic(),
         "environment_preflight": environment_preflight,
         "exact_fault_evidence": exact_fault_evidence,
         "typed_target_refusal": typed_target_refusal,
@@ -1085,7 +1161,7 @@ def _run_once(
         "transaction_outcome": (
             report.transaction_outcome if condition == "commit_then_timeout" else None
         ),
-        "safe_halt": safe_halt,
+        "safe_halt": safe_halt or drift_safe_halt,
         "silent_incorrect_success": bool(
             report.success and not oracle["all_effects_ok"]
         ),
@@ -1140,6 +1216,8 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "duplicate_save_control",
         "partial_render",
         "commit_then_timeout",
+        "moderate_display_drift",
+        "severe_display_drift",
     )
     trials: list[dict[str, Any]] = []
     stopped_early = False
@@ -1184,11 +1262,8 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
         "schema_version": "openadapt.rdp-multiapp-results.v1",
         "campaign_contract": "benchmark/rdp_multiapp/campaign.json",
         "implemented_conditions": list(conditions),
-        "full_campaign_complete": False,
-        "full_campaign_pending_conditions": [
-            "moderate_display_drift",
-            "severe_display_drift",
-        ],
+        "full_campaign_complete": True,
+        "full_campaign_pending_conditions": [],
         "run_count": len(trials),
         "stopped_early": stopped_early,
         "accepted_subset": all(trial["passed"] for trial in trials),

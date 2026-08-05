@@ -810,10 +810,28 @@ def _run_once(
         run_id=run_dir.name,
     )
     transport = MultiappRdpTransport(container)
+
+    def application_marker_visible(png: bytes) -> bool:
+        # The returned native ID is ``oa-rdp-fixture``. The operator-facing
+        # frame deliberately renders it as a labeled value, so qualify against
+        # the complete visible text rather than an exact whole-line ID match.
+        from openadapt_flow import vision
+
+        return (
+            vision.find_text(
+                png,
+                "app oa-rdp-fixture",
+                region=(0, 28, 260, 32),
+                min_ratio=1.0,
+            )
+            is not None
+        )
+
     backend = FreeRDPBackend(
         transport,
         connect=True,
         application_marker=APPLICATION_IDENTITY,
+        application_marker_probe=application_marker_visible,
         application_version_marker=APPLICATION_VERSION,
         environment_marker=ENVIRONMENT_MARKER,
     )

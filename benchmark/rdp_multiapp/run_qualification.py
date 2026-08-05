@@ -32,9 +32,9 @@ VIEWPORT = (1280, 800)
 TARGET_REQUEST = "REQ-LIVE-2048"
 TARGET_RECORD = "REC-2048"
 TARGET_NAME = "Jordan Lee"
-APPLICATION_IDENTITY = "openadapt-rdp-multiapp-fixture"
-APPLICATION_VERSION = "fixture-v1"
-ENVIRONMENT_MARKER = "rdp-multiapp-x11-freerdp"
+APPLICATION_IDENTITY = "oa-rdp-fixture"
+APPLICATION_VERSION = "oa-fixture-v1"
+ENVIRONMENT_MARKER = "oa-rdp-env"
 SLOT_PARAM = "appointment_slot"
 TYPE_PARAM = "appointment_type"
 REQUEST_PARAM = "request_id"
@@ -791,9 +791,13 @@ def _run_once(
         campaign_id="rdp-multiapp-vision-v1",
         run_id=run_dir.name,
     )
-    session_marker = fault_ack.get("reset_token")
-    if not isinstance(session_marker, str) or not session_marker:
+    reset_token = fault_ack.get("reset_token")
+    if not isinstance(reset_token, str) or len(reset_token) < 8:
         raise RuntimeError("fixture did not return a visible session marker")
+    # The fixture displays this fresh per-reset token outside all application
+    # windows. Its first 32 bits are enough to bind one short-lived synthetic
+    # session while remaining legible to the pixel-only OCR observer.
+    session_marker = f"oa-session-{reset_token[:8]}"
     transport = DockerX11RdpTransport(container)
     backend = FreeRDPBackend(
         transport,

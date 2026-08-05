@@ -120,10 +120,12 @@ python3 -m pytest tests/test_ica_hdx_qualification.py -q
 
 ## Real ICA/HDX acceptance preflight
 
-`run_real_acceptance.py` is the public, cost-safe campaign mechanism. It does
-not start, stop, create, or delete infrastructure. A private configuration
-supplies the exact Workspace/application/session fingerprints, local runner
-commands, and the independent system-of-record oracle. Do not place an Accuro
+`run_real_acceptance.py` is the public, cost-safe campaign mechanism. It has no
+infrastructure lifecycle operation. It invokes one digest-pinned executable
+only after a retained customer approval binds that executable and principal to
+a pre-existing Citrix session. That executable can actuate the bounded workflow
+inside its approved authority. A private configuration supplies the exact
+fingerprints and independent system-of-record oracle. Do not place an Accuro
 recipe, credentials, identifiers, screenshots, or customer data in this repo.
 
 The single deliberate command is:
@@ -136,9 +138,19 @@ python3 benchmark/citrix_ica_hdx/run_real_acceptance.py \
 ```
 
 Without `--execute`, the command only validates the campaign contract and
-writes a preflight report. The configuration must fingerprint Citrix Workspace
-and ICA/HDX, the application version, session, display, runner, bundle,
-verifier, and environment. It must define at least three healthy trials and
-the wrong-session-or-entity, ambiguity, stale-state, display-drift,
-partial-effect, reconnect, and commit-timeout conditions. The runner accepts a
-consequential result only when the independent oracle reports `VERIFIED`.
+writes a preflight report. The configuration must give complete structured
+fingerprints for Workspace, ICA/HDX, the application, session, display, runner,
+bundle, verifier, and environment. Every one of the eight conditions requires
+at least three trials and a fixed expected outcome.
+
+Each trial must retain proof from a real ICA/HDX session and transport. The
+proof binds the trial to the configured session and transport digests. A
+separately authenticated read-only oracle records validated before and after
+evidence. Each observation binds the trial, entity, and effect contract and
+includes retained evidence and state digests.
+
+A commit timeout has the fixed result `HALTED_UNCERTAIN`. The runner reports
+uncertain delivery, zero retries, and required independent reconciliation. The
+oracle can later confirm, refute, or leave the effect indeterminate. The
+campaign never changes that terminal result to `VERIFIED` and never retries the
+possibly delivered operation.

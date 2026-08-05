@@ -817,6 +817,17 @@ def _run_once(
         application_version_marker=APPLICATION_VERSION,
         environment_marker=ENVIRONMENT_MARKER,
     )
+    # These are only PHI-free qualification boundary signals. They make an
+    # environment refusal diagnosable without exporting a screen image or an
+    # application record.
+    environment_preflight = {
+        "application_identity": backend.application_identity(),
+        "application_version": backend.application_version_identity(),
+        "session_identity_present": backend.session_identity() is not None,
+        "qualification_environment_present": (
+            backend.qualification_environment_identity() is not None
+        ),
+    }
     original_acquire = backend.acquire_actuation_frame
     acquisitions = 0
     injected = False
@@ -1010,6 +1021,7 @@ def _run_once(
         ),
         "fault_ack": fault_ack,
         "reset_ack": reset_ack,
+        "environment_preflight": environment_preflight,
         "exact_fault_evidence": exact_fault_evidence,
         "typed_target_refusal": typed_target_refusal,
         "relevant_partial_refusal": relevant_partial_refusal,

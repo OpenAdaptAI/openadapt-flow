@@ -430,7 +430,7 @@ def _qualified_entity_v2_fields(
             return None
         from openadapt_flow.qualification import (
             current_certification_matches,
-            entity_label_options,
+            remote_entity_label,
             workflow_contract_sha256,
         )
 
@@ -450,13 +450,7 @@ def _qualified_entity_v2_fields(
         ):
             return None
         entity = project.entity_labels.get(step_id)
-        entity_payload = (
-            entity.model_dump(mode="json", exclude={"step_id"})
-            if entity is not None
-            else {"label": "record", "fallback": "record"}
-        )
-        if entity_payload not in entity_label_options():
-            return None
+        entity_payload = remote_entity_label(entity)
         return {
             "qualification_project_id": project.project_id,
             "qualification_revision_id": f"qualification_revision_{project.revision}",

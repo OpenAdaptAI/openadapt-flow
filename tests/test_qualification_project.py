@@ -227,9 +227,7 @@ def test_entity_label_is_optional_for_certification(tmp_path: Path) -> None:
     workflow = _workflow()
     bundle = tmp_path / "bundle"
     (bundle / "templates").mkdir(parents=True)
-    (bundle / "templates" / "save.png").write_bytes(
-        _qualification_visual_fixture()[1]
-    )
+    (bundle / "templates" / "save.png").write_bytes(_qualification_visual_fixture()[1])
     workflow.save(bundle)
     workflow = Workflow.load(bundle)
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
@@ -265,9 +263,13 @@ def test_entity_label_options_are_ordered_and_derive_every_public_label() -> Non
         {"label": "item", "fallback": "item"},
     ]
     assert REMOTE_SAFE_ENTITY_LABELS == tuple(option["label"] for option in options)
-    assert project_schema()["$defs"]["QualifiedEntityLabel"]["properties"]["label"][
-        "enum"
-    ] == list(REMOTE_SAFE_ENTITY_LABELS)
+    label_schema = project_schema()["$defs"]["QualifiedEntityLabel"]["properties"][
+        "label"
+    ]
+    assert "enum" not in label_schema
+    assert label_schema["x-openadapt-reviewed-remote-options"] == list(
+        REMOTE_SAFE_ENTITY_LABELS
+    )
 
 
 @pytest.mark.parametrize("option", entity_label_options())
@@ -283,14 +285,22 @@ def test_entity_label_refuses_a_noncanonical_fallback() -> None:
         QualifiedEntityLabel(step_id="save", label="insurance claim", fallback="record")
 
 
+def test_entity_label_accepts_a_custom_local_class() -> None:
+    entity = QualifiedEntityLabel(
+        step_id="save", label="appointment request", fallback="item"
+    )
+    assert entity.label == "appointment request"
+    assert entity.fallback == "item"
+
+
 @pytest.mark.parametrize(
     "label",
-    ("jane smith", "patient 004219", "account 1234", "unknown class"),
+    ("Patient Record", "record/class", "one two three four five"),
 )
-def test_entity_label_refuses_identity_identifier_and_unknown_classes(
+def test_entity_label_refuses_invalid_local_class_syntax(
     label: str,
 ) -> None:
-    with pytest.raises(ValueError, match="reviewed remote-safe class"):
+    with pytest.raises(ValueError, match="lowercase class name"):
         QualifiedEntityLabel(step_id="save", label=label, fallback="record")
 
 
@@ -3006,11 +3016,9 @@ def test_cli_entity_label_notice_tracks_real_mutations(
         "insurance claim",
     ]
     invalid_args = [*set_args]
-    invalid_args[invalid_args.index("insurance claim")] = "jane smith"
-    with pytest.raises(SystemExit):
+    invalid_args[invalid_args.index("insurance claim")] = "Patient Record"
+    with pytest.raises(SystemExit, match="invalid entity label"):
         main(invalid_args)
-    rejected = capsys.readouterr()
-    assert rejected.err
     assert Workflow.load(bundle).qualification.entity_labels == {}
 
     assert main(set_args) == 0
@@ -3022,6 +3030,32 @@ def test_cli_entity_label_notice_tracks_real_mutations(
     unchanged = capsys.readouterr()
     assert json.loads(unchanged.out)["entity_labels"]["save"]["fallback"] == "item"
     assert not unchanged.err
+
+    assert (
+        main(
+            [
+                "qualify",
+                "label",
+                "set",
+                str(bundle),
+                "--step",
+                "save",
+                "--label",
+                "appointment request",
+                "--fallback",
+                "item",
+            ]
+        )
+        == 0
+    )
+    custom = capsys.readouterr()
+    custom_payload = json.loads(custom.out)["entity_labels"]["save"]
+    assert custom_payload == {
+        "step_id": "save",
+        "label": "appointment request",
+        "fallback": "item",
+    }
+    assert custom.err
 
     assert main(["qualify", "label", "remove", str(bundle), "--step", "save"]) == 0
     removed = capsys.readouterr()

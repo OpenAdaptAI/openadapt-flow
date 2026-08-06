@@ -2507,14 +2507,29 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
             return 0
         changed = False
         if args.label_cmd == "set":
-            fallback = next(
-                option["fallback"]
-                for option in entity_label_options()
-                if option["label"] == args.label
+            reviewed_fallback = next(
+                (
+                    option["fallback"]
+                    for option in entity_label_options()
+                    if option["label"] == args.label
+                ),
+                None,
             )
-            label = QualifiedEntityLabel(
-                step_id=args.step, label=args.label, fallback=fallback
-            )
+            if (
+                reviewed_fallback is not None
+                and args.fallback is not None
+                and args.fallback != reviewed_fallback
+            ):
+                raise SystemExit(
+                    f"{args.label!r} uses the reviewed fallback {reviewed_fallback!r}"
+                )
+            fallback = reviewed_fallback or args.fallback or "record"
+            try:
+                label = QualifiedEntityLabel(
+                    step_id=args.step, label=args.label, fallback=fallback
+                )
+            except ValueError as exc:
+                raise SystemExit(f"invalid entity label: {exc}") from exc
             assert workflow.qualification is not None
             changed = workflow.qualification.entity_labels.get(args.step) != label
             set_entity_label(workflow, label)
@@ -4351,8 +4366,6 @@ def build_parser() -> argparse.ArgumentParser:
         "label",
         help="Optionally set, remove, or list presentation-only entity labels",
     )
-    from openadapt_flow.qualification import REMOTE_SAFE_ENTITY_LABELS
-
     label_sub = q.add_subparsers(dest="label_cmd", required=True)
     label = label_sub.add_parser(
         "set",
@@ -4363,8 +4376,19 @@ def build_parser() -> argparse.ArgumentParser:
     label.add_argument(
         "--label",
         required=True,
-        choices=REMOTE_SAFE_ENTITY_LABELS,
-        help="Qualification-approved class label, for example: insurance claim",
+        help=(
+            "Local class label, for example: insurance claim. Reviewed labels "
+            "can cross a remote boundary; other labels use the neutral fallback."
+        ),
+    )
+    label.add_argument(
+        "--fallback",
+        choices=("record", "item"),
+        default=None,
+        help=(
+            "Neutral remote label for a custom class (default: record). "
+            "Reviewed labels use their canonical fallback."
+        ),
     )
     label.set_defaults(func=_cmd_qualify)
     label = label_sub.add_parser("remove", help="Remove a step entity label")

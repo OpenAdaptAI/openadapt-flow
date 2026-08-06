@@ -64,15 +64,20 @@ hosted control plane enforces it a third time in Postgres, in the same style as
 
 ## V2: qualification-approved entity wording
 
-V1 uses only domain-neutral wording such as `record` or `item`. A later V2 task
-can carry one useful entity class that the exact qualification contract already
-approved. The remote emitter accepts only the reviewed remote-safe vocabulary.
+V1 uses only domain-neutral wording such as `record` or `item`. A negotiated V2
+task can carry one useful entity class that the exact qualification contract
+already approved. The remote emitter accepts only the reviewed remote-safe
+vocabulary.
 The canonical vocabulary and cross-vertical examples are in
 [Attended decisions and the halt-learn loop](https://docs.openadapt.ai/concepts/halt-learn-loop/#a-qualified-entity-label-not-a-guessed-domain).
 
-Qualification selects one class from the reviewed vocabulary. If no specific
-class fits, it selects the signed neutral `record` or `item` fallback. This
-release does not accept an arbitrary custom class for shared presentation.
+The entity class is optional. A person or a qualification agent can set it once
+for a workflow version. A reviewed class such as `insurance claim` can cross the
+remote boundary. A custom local class remains inside the bundle; the V2 task
+carries only its signed neutral `record` or `item` fallback. With no label, the
+task uses the signed neutral `record` class. This presentation choice does not
+block qualification, certification, or execution. A label change is a contract
+change and requires recertification before the new V2 task can be emitted.
 
 This is not runtime inference. The producer reads the label from the exact
 qualified step and binds the task to the qualification project, qualification
@@ -87,10 +92,9 @@ or `item`. Before any action continues, the customer-controlled runner reads
 the live application and revalidates the required identity and effect
 contracts.
 
-!!! note "Release dependency"
-    This V2 section documents a coordinated Flow, Desktop, Cloud, and Types
-    release. It must not be published as an available decision path before the
-    V2 producer, consumer, and negotiated capability are released together.
+The V2 producer uses the released `openadapt-types` 0.9 contract. A consumer
+must explicitly negotiate that schema. Otherwise, Flow emits the byte-compatible
+V1 task.
 
 The one thing this tier gives up is `target_label` — the target control's own
 accessible name, which `halt_detail._safe_target_label` releases locally after

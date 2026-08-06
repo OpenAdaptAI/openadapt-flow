@@ -3190,7 +3190,11 @@ def test_remote_projection_is_explicit_aal2_phi_free_and_exactly_bound(tmp_path)
         assert protected not in serialized
 
 
-def _v2_candidate_workflow(*, with_entity_label: bool = True) -> Workflow:
+def _v2_candidate_workflow(
+    *,
+    with_entity_label: bool = True,
+    entity_label: str = "patient record",
+) -> Workflow:
     workflow = Workflow(name="attended-v2", steps=[_step("humanstep", "A")])
     project = init_project(
         workflow,
@@ -3206,7 +3210,9 @@ def _v2_candidate_workflow(*, with_entity_label: bool = True) -> Workflow:
         set_entity_label(
             workflow,
             QualifiedEntityLabel(
-                step_id="humanstep", label="patient record", fallback="record"
+                step_id="humanstep",
+                label=entity_label,
+                fallback="record",
             ),
         )
     policy = load_policy("permissive")
@@ -3239,19 +3245,20 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(
 ):
     _accept_current_certification(monkeypatch)
     workflow = _v2_candidate_workflow()
-    workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
+    workflow, _bundle, run, _store, capability = _paused(tmp_path, workflow=workflow)
     item = attention_item(run.parent, run)
     assert item is not None
 
     v1 = portable_remote_decision_task(run, item, deployment=_remote_deployment())
     assert v1.task.schema_version == "openadapt.human-decision-task/v1"
 
+    deployment = _remote_deployment(
+        peer_task_schemas=["openadapt.human-decision-task/v2"]
+    )
     v2 = portable_remote_decision_task(
         run,
         item,
-        deployment=_remote_deployment(
-            peer_task_schemas=["openadapt.human-decision-task/v2"]
-        ),
+        deployment=deployment,
     )
     assert v2.task.schema_version == "openadapt.human-decision-task/v2"
     assert v2.task.entity.label == "patient record"
@@ -3261,6 +3268,18 @@ def test_remote_v2_requires_explicit_peer_negotiation_and_exact_label_binding(
     assert v2.task.qualification_contract_digest == (
         "sha256:" + workflow.qualification.contract_sha256()
     )
+    decision = execute_remote_attended_action(
+        run,
+        item,
+        _remote_request(v2, capability).model_copy(
+            update={"action": "escalate", "disposition": "needs_assistance"}
+        ),
+        deployment=deployment,
+        principal=_remote_principal(),
+        executor=_ResultExecutor(),
+    )
+    assert decision.status == "escalated"
+    assert decision.decided_by == "human"
 
 
 def test_remote_v2_uses_neutral_entity_when_optional_label_is_absent(
@@ -3360,21 +3379,10 @@ def test_remote_v2_falls_back_when_a_current_certification_has_new_bundle_bytes(
     assert projection.task.schema_version == "openadapt.human-decision-task/v1"
 
 
-def test_remote_v2_falls_back_for_a_legacy_unreviewed_entity_label(
-    tmp_path, monkeypatch
-):
+def test_remote_v2_keeps_a_custom_entity_label_local(tmp_path, monkeypatch):
     _accept_current_certification(monkeypatch)
-    workflow = _v2_candidate_workflow()
+    workflow = _v2_candidate_workflow(entity_label="appointment request")
     workflow, _bundle, run, _store, _capability = _paused(tmp_path, workflow=workflow)
-    assert workflow.qualification is not None
-    entity = workflow.qualification.entity_labels["humanstep"]
-    # Simulate a pre-vocabulary project object that bypassed current model
-    # validation. The persisted bundle remains valid for the version check.
-    object.__setattr__(entity, "label", "legacy unknown")
-    monkeypatch.setattr(
-        "openadapt_flow.console.human_decisions.data.load_workflow_safe",
-        lambda _bundle: (workflow, None),
-    )
     item = attention_item(run.parent, run)
     assert item is not None
     projection = portable_remote_decision_task(
@@ -3384,7 +3392,10 @@ def test_remote_v2_falls_back_for_a_legacy_unreviewed_entity_label(
             peer_task_schemas=["openadapt.human-decision-task/v2"]
         ),
     )
-    assert projection.task.schema_version == "openadapt.human-decision-task/v1"
+    assert projection.task.schema_version == "openadapt.human-decision-task/v2"
+    assert projection.task.entity.label == "record"
+    assert projection.task.entity.fallback.value == "record"
+    assert projection.task.qualification_step_id == "humanstep"
 
 
 def test_remote_v2_falls_back_when_report_step_differs_from_capability(tmp_path):

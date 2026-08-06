@@ -763,10 +763,11 @@ def _default_fault_cases() -> list[QualificationCase]:
 
 
 class QualifiedEntityLabel(BaseModel):
-    """An optional safe presentation label for one qualified step.
+    """An optional local presentation label for one qualified step.
 
-    Qualification and execution do not require this label.  A consumer uses
-    the neutral ``record`` or ``item`` presentation when it is absent.
+    Qualification and execution do not require this label. Reviewed labels can
+    cross a remote boundary. A custom label remains local and remote consumers
+    receive its signed neutral ``record`` or ``item`` fallback.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -775,7 +776,10 @@ class QualifiedEntityLabel(BaseModel):
     label: str = Field(
         min_length=1,
         max_length=63,
-        json_schema_extra={"enum": list(REMOTE_SAFE_ENTITY_LABELS)},
+        json_schema_extra={
+            "examples": ["patient record", "insurance claim", "record"],
+            "x-openadapt-reviewed-remote-options": list(REMOTE_SAFE_ENTITY_LABELS),
+        },
     )
     fallback: Literal["record", "item"]
 
@@ -784,10 +788,8 @@ class QualifiedEntityLabel(BaseModel):
     def _safe_label(cls, value: str) -> str:
         if _QUALIFIED_ENTITY_LABEL_RE.fullmatch(value) is None:
             raise ValueError(
-                "entity label must use the qualified neutral-label vocabulary"
+                "entity label must be a lowercase class name of at most four words"
             )
-        if value not in REMOTE_SAFE_ENTITY_LABELS:
-            raise ValueError("entity label is not a reviewed remote-safe class")
         return value
 
     @model_validator(mode="after")
@@ -800,9 +802,27 @@ class QualifiedEntityLabel(BaseModel):
             ),
             None,
         )
-        if self.fallback != expected:
+        if expected is not None and self.fallback != expected:
             raise ValueError("entity fallback must match the reviewed class mapping")
         return self
+
+
+def remote_entity_label(
+    entity: Optional[QualifiedEntityLabel],
+) -> dict[str, str]:
+    """Return the reviewed entity label that a remote V2 task can carry.
+
+    Custom qualification labels remain inside the local bundle. Their signed
+    neutral fallback crosses the remote boundary instead. A missing optional
+    label uses ``record`` without weakening any other V2 binding.
+    """
+
+    if entity is None:
+        return {"label": "record", "fallback": "record"}
+    payload = entity.model_dump(mode="json", exclude={"step_id"})
+    if payload in entity_label_options():
+        return payload
+    return {"label": entity.fallback, "fallback": entity.fallback}
 
 
 class QualificationProject(BaseModel):

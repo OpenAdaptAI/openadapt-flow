@@ -19,6 +19,7 @@ import sqlite3
 import statistics
 import tempfile
 import time
+import traceback
 from difflib import SequenceMatcher
 from email import policy as email_policy
 from email.parser import BytesParser
@@ -1342,6 +1343,9 @@ def main() -> int:
     try:
         result = run(args.container, args.oracle_root.resolve(), args.output, work)
     except Exception as exc:  # noqa: BLE001 - retain bounded harness failure
+        traceback.print_exc()
+        extracted = traceback.extract_tb(exc.__traceback__)
+        failure_frame = extracted[-1] if extracted else None
         result = {
             "schema_version": "openadapt.rdp-multiapp-results.v1",
             "accepted_subset": False,
@@ -1359,6 +1363,12 @@ def main() -> int:
             "harness_failure": {
                 "exception_type": type(exc).__name__,
                 "stage": "campaign_execution",
+                "source": (
+                    f"{Path(failure_frame.filename).name}:{failure_frame.lineno}"
+                    if failure_frame is not None
+                    else None
+                ),
+                "function": failure_frame.name if failure_frame is not None else None,
             },
             "trials": [],
         }

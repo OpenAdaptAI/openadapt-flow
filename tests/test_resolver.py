@@ -131,6 +131,58 @@ def test_template_rung_hit_uses_padded_search_region(screen, anchor):
     assert vision.template_calls == [(70, 70, 110, 80)]
 
 
+def test_identity_armed_template_snaps_to_unique_landmark_point(screen):
+    """A flat field match cannot move its separate identity window."""
+
+    anchor = _icon_anchor().model_copy(update={"identifier_region": (20, 20, 80, 20)})
+    vision = FakeVision()
+    # The template slides inside a repeated blank field. The retained
+    # label still establishes the demonstrated action point at (110, 105).
+    vision.template_results = [
+        Match(point=(125, 110), region=(105, 100, 50, 20), confidence=1.0)
+    ]
+    vision.text_results = {
+        "Messages": Match(point=(50, 105), region=(20, 95, 60, 20), confidence=0.98)
+    }
+
+    resolution, matched = resolve(
+        anchor,
+        screen,
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+    )
+
+    assert resolution.rung == "template"
+    assert resolution.point == (110, 105)
+    assert matched == (105, 100, 50, 20)
+
+
+def test_identity_armed_template_rejects_landmark_contradiction(screen):
+    """A nearby look-alike cannot outrank the qualified field relation."""
+
+    anchor = _icon_anchor().model_copy(update={"identifier_region": (20, 20, 80, 20)})
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(200, 110), region=(175, 100, 50, 20), confidence=1.0),
+        None,
+    ]
+    vision.text_results = {
+        "Messages": Match(point=(50, 105), region=(20, 95, 60, 20), confidence=0.98)
+    }
+
+    resolution, _matched = resolve(
+        anchor,
+        screen,
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+    )
+
+    assert resolution.rung == "geometry"
+    assert resolution.point == (110, 105)
+
+
 def test_search_region_clamped_to_viewport(screen):
     anchor = Anchor(
         template="templates/a.png",

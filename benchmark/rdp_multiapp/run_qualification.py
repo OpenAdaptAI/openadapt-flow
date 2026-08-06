@@ -1142,6 +1142,9 @@ def _run_once(
             "resolution_rung": (
                 result.resolution.rung if result.resolution is not None else None
             ),
+            "resolution_point": (
+                list(result.resolution.point) if result.resolution is not None else None
+            ),
             "error": result.error,
             "delivery_uncertainty": (
                 result.delivery_uncertainty.model_dump(

@@ -668,6 +668,11 @@ def resolve(
             return candidate
         evidence = identity_landmark_evidence()
         if evidence is None:
+            if ambiguous_landmark:
+                raise AmbiguousOcrMatchError(
+                    "OCR landmark evidence did not uniquely establish an "
+                    "identity-armed template target"
+                )
             return candidate
         landmark_point, _confidence = evidence
         if (

@@ -18,6 +18,7 @@ from openadapt_flow.bundle_validation import validate_workflow
 from openadapt_flow.execution_profiles import _program_action_trace
 from openadapt_flow.ir import (
     ActionKind,
+    Anchor,
     BusinessDecisionEvidenceRequirement,
     BusinessDecisionOption,
     BusinessDecisionSpec,
@@ -605,6 +606,98 @@ def test_learned_repair_cannot_reroute_authorized_branch_after_action():
         "business decision semantics changed" in failure
         for failure in report.semantic_failures
     )
+
+
+def test_learned_repair_cannot_change_drag_destination_identity():
+    active = _decision_program_with_predecessor()
+    source = Anchor(
+        template="templates/source.png",
+        region=(10, 10, 20, 20),
+        click_point=(20, 20),
+        ocr_text="Source record",
+        context_text="Source record",
+    )
+    destination = Anchor(
+        template="templates/approved.png",
+        region=(100, 10, 20, 20),
+        click_point=(110, 20),
+        ocr_text="Approved queue",
+        context_text="Approved queue",
+    )
+    old_step = active.states["accepted_action"].step
+    assert old_step is not None
+    active.states["accepted_action"].step = old_step.model_copy(
+        update={
+            "action": ActionKind.DRAG,
+            "key": None,
+            "anchor": source,
+            "drag_end_anchor": destination,
+        }
+    )
+    candidate = active.model_copy(deep=True)
+    candidate_step = candidate.states["accepted_action"].step
+    assert candidate_step is not None
+    assert candidate_step.drag_end_anchor is not None
+    candidate.states["accepted_action"].step = candidate_step.model_copy(
+        update={
+            "drag_end_anchor": candidate_step.drag_end_anchor.model_copy(
+                update={
+                    "ocr_text": "Delete area",
+                    "context_text": "Delete area",
+                }
+            )
+        }
+    )
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is False
+    assert any("drag destination" in failure for failure in report.failures)
+
+
+def test_learned_repair_can_relocate_same_drag_destination():
+    active = _decision_program_with_predecessor()
+    source = Anchor(
+        template="templates/source.png",
+        region=(10, 10, 20, 20),
+        click_point=(20, 20),
+        context_text="Source record",
+    )
+    destination = Anchor(
+        template="templates/approved.png",
+        region=(100, 10, 20, 20),
+        click_point=(110, 20),
+        context_text="Approved queue",
+    )
+    old_step = active.states["accepted_action"].step
+    assert old_step is not None
+    active.states["accepted_action"].step = old_step.model_copy(
+        update={
+            "action": ActionKind.DRAG,
+            "key": None,
+            "anchor": source,
+            "drag_end_anchor": destination,
+        }
+    )
+    candidate = active.model_copy(deep=True)
+    candidate_step = candidate.states["accepted_action"].step
+    assert candidate_step is not None
+    assert candidate_step.drag_end_anchor is not None
+    candidate.states["accepted_action"].step = candidate_step.model_copy(
+        update={
+            "drag_end_anchor": candidate_step.drag_end_anchor.model_copy(
+                update={
+                    "template": "templates/approved-v2.png",
+                    "region": (140, 30, 20, 20),
+                    "click_point": (150, 40),
+                }
+            )
+        }
+    )
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is True
 
 
 def test_decision_refuses_wrong_role_and_non_exact_evidence(tmp_path):

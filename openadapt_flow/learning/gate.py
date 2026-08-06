@@ -1025,6 +1025,42 @@ def program_regression_gate(
         )
         if not result.passed:
             failures.append(f"step '{step_id}': " + "; ".join(result.failures))
+        old_drag_end = old_step.drag_end_anchor
+        new_drag_end = new_step.drag_end_anchor
+        if (old_drag_end is None) != (new_drag_end is None):
+            failures.append(
+                f"step '{step_id}': drag destination was added or removed; "
+                "this changes action semantics and requires requalification"
+            )
+        elif old_drag_end is not None and new_drag_end is not None:
+            if old_drag_end.ocr_text != new_drag_end.ocr_text:
+                failures.append(
+                    f"step '{step_id}' drag destination: target label changed; "
+                    "this changes action semantics and requires requalification"
+                )
+            destination_patch = HealPatch.from_event(
+                HealEvent(
+                    step_id=step_id,
+                    rung_used="template",
+                    old_anchor=old_drag_end,
+                    new_anchor=new_drag_end,
+                )
+            )
+            destination_result = gate.evaluate(
+                destination_patch,
+                old_drag_end,
+                new_drag_end,
+                old_step=old_step,
+                new_step=new_step,
+                band_verifier=band_verifier,
+                effect_baseline=effect_baseline,
+                effect_now=effect_now,  # type: ignore[arg-type]
+            )
+            if not destination_result.passed:
+                failures.append(
+                    f"step '{step_id}' drag destination: "
+                    + "; ".join(destination_result.failures)
+                )
 
     removed = [sid for sid in active_steps if sid not in cand_steps]
     armed_removed = [

@@ -34,6 +34,7 @@ an action, loop, subflow, terminal result, or exception route.
 Governed repair cannot change the decision contract or route around it. The
 regression gate requires the decision to remain reachable and to continue to
 dominate every certified option target and downstream state that it protected.
+It also refuses a new decision that was not in the active qualified program.
 Changing that control boundary requires a new qualification; it is not a heal.
 
 The decision output has frame scope. A subflow can inherit a parent value. A

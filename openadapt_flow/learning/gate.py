@@ -467,6 +467,13 @@ def _semantic_failures(
         if message not in failures:
             failures.append(message)
 
+    for location in sorted(candidate_decisions.keys() - active_decisions.keys()):
+        _append_once(
+            "business decision policy added at "
+            f"{location[0]!r}/{location[1]!r}: learned repair cannot invent "
+            "new normative human authority; qualify the changed workflow"
+        )
+
     for location, contract in active_decisions.items():
         if candidate_decisions.get(location) != contract:
             _append_once(

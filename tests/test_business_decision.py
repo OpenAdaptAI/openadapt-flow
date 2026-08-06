@@ -404,6 +404,22 @@ def test_learned_repair_cannot_add_success_exit_before_required_decision():
     )
 
 
+def test_learned_repair_cannot_invent_new_business_decision_policy():
+    candidate = _decision_program_with_predecessor()
+    active = candidate.model_copy(deep=True)
+    active.entry = "prepare"
+    active.states["prepare"].transitions = [Transition(target="accepted_action")]
+    del active.states["review"]
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is False
+    assert any(
+        "learned repair cannot invent new normative human authority" in failure
+        for failure in report.semantic_failures
+    )
+
+
 def test_decision_refuses_wrong_role_and_non_exact_evidence(tmp_path):
     _workflow, store, _backend, request = _pause(tmp_path)
     submission = _submission(store, request)

@@ -17,6 +17,8 @@ import json
 import os
 import platform
 import re
+import secrets
+import stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -79,6 +81,20 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _require_secure_regular_file(
+    path: Path,
+    label: str,
+    *,
+    executable: bool = False,
+) -> None:
+    if not path.is_absolute() or not path.is_file() or path.is_symlink():
+        raise ValueError(f"{label} must be an existing absolute regular file")
+    if path.stat().st_mode & stat.S_IWOTH:
+        raise ValueError(f"{label} must not be world-writable")
+    if executable and not os.access(path, os.X_OK):
+        raise ValueError(f"{label} must be executable")
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -116,8 +132,7 @@ def _verify_signed_envelope(
 
 
 def load_trust_roots(path: Path) -> dict:
-    if not path.is_absolute() or not path.is_file() or path.is_symlink():
-        raise ValueError("trust roots must be an existing absolute regular file")
+    _require_secure_regular_file(path, "trust roots")
     data = json.loads(path.read_text())
     if not isinstance(data, dict) or set(data) != {
         "schema_version",
@@ -135,6 +150,8 @@ def load_trust_roots(path: Path) -> dict:
     }
     if not isinstance(data["keys"], dict) or set(data["keys"]) != required_keys:
         raise ValueError("trust roots must contain the exact authority key set")
+    if len(set(data["keys"].values())) != len(required_keys):
+        raise ValueError("all authority public keys must be distinct")
     decoded_keys = {
         name: _decode_public_key(value, f"trust roots {name}")
         for name, value in data["keys"].items()
@@ -201,8 +218,7 @@ def _validate_file_binding(binding: Any, label: str) -> Path:
     if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}:
         raise ValueError(f"{label} must contain only path and sha256")
     path = Path(binding["path"])
-    if not path.is_absolute() or not path.is_file() or path.is_symlink():
-        raise ValueError(f"{label}.path must be an existing absolute regular file")
+    _require_secure_regular_file(path, f"{label}.path")
     _require_sha256(binding["sha256"], f"{label}.sha256")
     if _sha256(path) != binding["sha256"]:
         raise ValueError(f"{label} digest does not match its retained file")
@@ -299,13 +315,7 @@ def _validate_authorities(data: dict, trust_roots: dict) -> None:
             "runner command must be one approved executable without arguments"
         )
     executable = Path(command[0])
-    if (
-        not executable.is_absolute()
-        or not executable.is_file()
-        or executable.is_symlink()
-        or not os.access(executable, os.X_OK)
-    ):
-        raise ValueError("runner executable must be an existing absolute regular file")
+    _require_secure_regular_file(executable, "runner executable", executable=True)
     _require_sha256(boundary["executable_sha256"], "runner executable_sha256")
     _require_sha256(boundary["principal_sha256"], "runner principal_sha256")
     expected_runner_approval = {
@@ -314,6 +324,7 @@ def _validate_authorities(data: dict, trust_roots: dict) -> None:
         "principal_sha256": boundary["principal_sha256"],
         "executable_sha256": boundary["executable_sha256"],
         "session_id_sha256": data["fingerprints"]["session"]["session_id_sha256"],
+        "campaign_nonce": data["campaign_nonce"],
         "allowed_operation": "citrix_acceptance_trial",
         "infrastructure_lifecycle_authority": False,
     }
@@ -348,13 +359,9 @@ def _validate_authorities(data: dict, trust_roots: dict) -> None:
             "oracle command must be one approved executable without arguments"
         )
     oracle_executable = Path(oracle_command[0])
-    if (
-        not oracle_executable.is_absolute()
-        or not oracle_executable.is_file()
-        or oracle_executable.is_symlink()
-        or not os.access(oracle_executable, os.X_OK)
-    ):
-        raise ValueError("oracle executable must be an existing absolute regular file")
+    _require_secure_regular_file(
+        oracle_executable, "oracle executable", executable=True
+    )
     _require_sha256(oracle["executable_sha256"], "oracle executable_sha256")
     _require_sha256(oracle["principal_sha256"], "oracle principal_sha256")
     expected_oracle_approval = {
@@ -390,13 +397,9 @@ def _validate_authorities(data: dict, trust_roots: dict) -> None:
     if not isinstance(collector_command, list) or len(collector_command) != 1:
         raise ValueError("collector command must be one approved executable")
     collector_executable = Path(collector_command[0])
-    if (
-        not collector_executable.is_absolute()
-        or not collector_executable.is_file()
-        or collector_executable.is_symlink()
-        or not os.access(collector_executable, os.X_OK)
-    ):
-        raise ValueError("collector executable must be an absolute regular file")
+    _require_secure_regular_file(
+        collector_executable, "collector executable", executable=True
+    )
     _require_sha256(collector["executable_sha256"], "collector executable_sha256")
     _require_sha256(collector["principal_sha256"], "collector principal_sha256")
     if (
@@ -510,11 +513,12 @@ def _run_pinned(
     timeout_s: int = 300,
 ) -> dict:
     executable = Path(command[0])
-    if (
-        not executable.is_file()
-        or executable.is_symlink()
-        or _sha256(executable) != expected_sha256
-    ):
+    _require_secure_regular_file(
+        executable,
+        "approved executable",
+        executable=True,
+    )
+    if _sha256(executable) != expected_sha256:
         raise ValueError("approved executable changed after preflight")
     return _run(command, args, timeout_s=timeout_s)
 
@@ -540,6 +544,10 @@ def _validate_oracle_evidence(
     oracle_public_key: Ed25519PublicKey,
     campaign_nonce: str,
     config_sha256: str,
+    execution_challenge: str,
+    observation_challenge: str,
+    consumed_challenges: set[str],
+    now: datetime | None = None,
 ) -> dict:
     envelope = _load_command_json(result, f"oracle {phase}")
     evidence = _verify_signed_envelope(
@@ -551,6 +559,9 @@ def _validate_oracle_evidence(
         "schema_version",
         "campaign_nonce",
         "config_sha256",
+        "execution_challenge",
+        "observation_challenge",
+        "observed_at",
         "phase",
         "trial_id",
         "entity_sha256",
@@ -567,6 +578,8 @@ def _validate_oracle_evidence(
         "schema_version": "openadapt.citrix-oracle-observation.v1",
         "campaign_nonce": campaign_nonce,
         "config_sha256": config_sha256,
+        "execution_challenge": execution_challenge,
+        "observation_challenge": observation_challenge,
         "phase": phase,
         "trial_id": trial["id"],
         "entity_sha256": trial["entity_sha256"],
@@ -581,6 +594,13 @@ def _validate_oracle_evidence(
         raise ValueError(f"oracle {phase} effect_status is invalid")
     _require_sha256(evidence["state_digest"], f"oracle {phase} state_digest")
     _validate_file_binding(evidence["evidence"], f"oracle {phase} evidence")
+    _consume_fresh_challenge(
+        observation_challenge,
+        evidence["observed_at"],
+        consumed_challenges=consumed_challenges,
+        label=f"oracle {phase}",
+        now=now,
+    )
     return envelope
 
 
@@ -596,6 +616,25 @@ def _parse_timestamp(value: Any, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _consume_fresh_challenge(
+    challenge: str,
+    observed_at: Any,
+    *,
+    consumed_challenges: set[str],
+    label: str,
+    now: datetime | None = None,
+) -> None:
+    if SHA256_RE.fullmatch(challenge) is None:
+        raise ValueError(f"{label} challenge must be 32 random bytes in lowercase hex")
+    if challenge in consumed_challenges:
+        raise ValueError(f"{label} challenge was already consumed")
+    captured = _parse_timestamp(observed_at, f"{label} observed_at")
+    reference = now or datetime.now(timezone.utc)
+    if abs((reference - captured).total_seconds()) > MAX_COLLECTOR_AGE_S:
+        raise ValueError(f"{label} evidence is stale or from the future")
+    consumed_challenges.add(challenge)
+
+
 def _validate_collector_evidence(
     result: dict,
     *,
@@ -603,6 +642,9 @@ def _validate_collector_evidence(
     config: dict,
     config_sha256: str,
     trust_roots: dict,
+    execution_challenge: str,
+    observation_challenge: str,
+    consumed_challenges: set[str],
     now: datetime | None = None,
 ) -> dict:
     envelope = _load_command_json(result, "independent ICA/HDX collector")
@@ -615,12 +657,14 @@ def _validate_collector_evidence(
         "schema_version",
         "campaign_nonce",
         "config_sha256",
+        "execution_challenge",
+        "observation_challenge",
         "trial_id",
         "protocol",
         "standin",
         "session_id_sha256",
         "transport_sha256",
-        "captured_at",
+        "observed_at",
         "observed_components",
         "diagnostic_evidence",
     }
@@ -630,6 +674,8 @@ def _validate_collector_evidence(
         "schema_version": "openadapt.citrix-independent-collector.v1",
         "campaign_nonce": config["campaign_nonce"],
         "config_sha256": config_sha256,
+        "execution_challenge": execution_challenge,
+        "observation_challenge": observation_challenge,
         "trial_id": trial["id"],
         "protocol": "ICA/HDX",
         "standin": False,
@@ -644,12 +690,15 @@ def _validate_collector_evidence(
         raise ValueError(
             "collector did not observe the trusted principals and executables"
         )
-    captured_at = _parse_timestamp(proof["captured_at"], "collector captured_at")
-    reference = now or datetime.now(timezone.utc)
-    if abs((reference - captured_at).total_seconds()) > MAX_COLLECTOR_AGE_S:
-        raise ValueError("collector evidence is stale or from the future")
     _validate_file_binding(
         proof["diagnostic_evidence"], "collector diagnostic evidence"
+    )
+    _consume_fresh_challenge(
+        observation_challenge,
+        proof["observed_at"],
+        consumed_challenges=consumed_challenges,
+        label="collector",
+        now=now,
     )
     return envelope
 
@@ -665,7 +714,6 @@ def _validate_runner_receipt(
         "schema_version",
         "trial_id",
         "condition",
-        "outcome",
         "delivery_state",
         "retry_count",
         "collector_evidence_sha256",
@@ -677,10 +725,6 @@ def _validate_runner_receipt(
         raise ValueError("session runner receipt schema is invalid")
     if receipt["trial_id"] != trial["id"] or receipt["condition"] != trial["condition"]:
         raise ValueError("session runner receipt is not bound to the trial")
-    if receipt["outcome"] != trial["expected"]:
-        raise ValueError(
-            "session runner receipt does not match the fixed expected outcome"
-        )
     if receipt["retry_count"] != 0:
         raise ValueError("a counted acceptance trial must not retry")
     if receipt["collector_evidence_sha256"] != collector_evidence_sha256:
@@ -730,6 +774,14 @@ def _trial_passed(trial: dict, receipt: dict, before: dict, after: dict) -> bool
     )
 
 
+def _authoritative_outcome(trial: dict, *, passed: bool) -> str:
+    if trial["condition"] == "commit_timeout":
+        return "HALTED_UNCERTAIN"
+    if trial["condition"] == "healthy" and passed:
+        return "VERIFIED"
+    return "HALTED"
+
+
 def _fsync_directory(path: Path) -> None:
     if not hasattr(os, "O_DIRECTORY"):
         return
@@ -743,11 +795,16 @@ def _fsync_directory(path: Path) -> None:
 def _atomic_write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    with temporary.open("x", encoding="utf-8") as stream:
-        stream.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(value, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     _fsync_directory(path.parent)
 
 
@@ -757,7 +814,10 @@ class DurableJournal:
     def __init__(self, path: Path, *, campaign_nonce: str, config_sha256: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._stream = path.open("x", encoding="utf-8")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.flush()
+            os.fsync(stream.fileno())
         self._sequence = 0
         self._previous_sha256 = "0" * 64
         self.append(
@@ -765,6 +825,44 @@ class DurableJournal:
             {"campaign_nonce": campaign_nonce, "config_sha256": config_sha256},
         )
         _fsync_directory(path.parent)
+
+    @classmethod
+    def reopen(cls, path: Path) -> tuple[DurableJournal, list[dict]]:
+        _require_secure_regular_file(path, "campaign journal")
+        records = cls.read_verified(path)
+        journal = cls.__new__(cls)
+        journal.path = path
+        journal._sequence = len(records)
+        journal._previous_sha256 = records[-1]["record_sha256"]
+        return journal, records
+
+    @staticmethod
+    def read_verified(path: Path) -> list[dict]:
+        records: list[dict] = []
+        previous = "0" * 64
+        for sequence, line in enumerate(path.read_text().splitlines()):
+            record = json.loads(line)
+            if not isinstance(record, dict) or set(record) != {
+                "sequence",
+                "recorded_at",
+                "event",
+                "previous_sha256",
+                "payload",
+                "record_sha256",
+            }:
+                raise ValueError("journal record has an invalid field set")
+            unsigned = {
+                key: value for key, value in record.items() if key != "record_sha256"
+            }
+            if record["sequence"] != sequence or record["previous_sha256"] != previous:
+                raise ValueError("journal sequence or hash chain is invalid")
+            if record["record_sha256"] != _object_sha256(unsigned):
+                raise ValueError("journal record digest is invalid")
+            records.append(record)
+            previous = record["record_sha256"]
+        if not records:
+            raise ValueError("journal is empty")
+        return records
 
     def append(self, event: str, payload: dict) -> dict:
         unsigned = {
@@ -776,16 +874,94 @@ class DurableJournal:
         }
         record_sha256 = _object_sha256(unsigned)
         record = {**unsigned, "record_sha256": record_sha256}
-        self._stream.write(json.dumps(record, sort_keys=True) + "\n")
-        self._stream.flush()
-        os.fsync(self._stream.fileno())
+        flags = os.O_WRONLY | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(self.path, flags)
+        mode = os.fstat(descriptor).st_mode
+        if not stat.S_ISREG(mode) or mode & stat.S_IWOTH:
+            os.close(descriptor)
+            raise ValueError("campaign journal changed to an unsafe file")
+        with os.fdopen(descriptor, "a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         self._sequence += 1
         self._previous_sha256 = record_sha256
         return record
 
     def close(self) -> None:
-        if not self._stream.closed:
-            self._stream.close()
+        return None
+
+
+def _require_secure_directory(path: Path, label: str) -> None:
+    if not path.is_absolute() or not path.is_dir() or path.is_symlink():
+        raise ValueError(f"{label} must be an existing absolute directory")
+    if path.stat().st_mode & stat.S_IWOTH:
+        raise ValueError(f"{label} must not be world-writable")
+
+
+def _reserve_campaign_nonce(
+    registry: Path,
+    *,
+    campaign_nonce: str,
+    config_sha256: str,
+    trust_roots_sha256: str,
+    output: Path,
+    execution_challenge: str,
+) -> tuple[dict, bool]:
+    _require_secure_directory(registry, "nonce registry")
+    if not output.is_absolute():
+        raise ValueError("output must be an absolute path")
+    resolved_output = str(output.resolve(strict=False))
+    binding_path = registry / f"{campaign_nonce}.binding.json"
+    journal_path = registry / f"{campaign_nonce}.journal.jsonl"
+    fallback_path = registry / f"{campaign_nonce}.terminal.json"
+    expected = {
+        "schema_version": "openadapt.citrix-campaign-binding.v1",
+        "campaign_nonce": campaign_nonce,
+        "config_sha256": config_sha256,
+        "trust_roots_sha256": trust_roots_sha256,
+        "output": resolved_output,
+        "journal": str(journal_path),
+        "terminal_fallback": str(fallback_path),
+        "execution_challenge": execution_challenge,
+    }
+    try:
+        descriptor = os.open(
+            binding_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        _fsync_directory(registry)
+        return expected, True
+    except FileExistsError:
+        _require_secure_regular_file(binding_path, "campaign nonce binding")
+        existing = json.loads(binding_path.read_text())
+        immutable = {
+            key: value
+            for key, value in expected.items()
+            if key != "execution_challenge"
+        }
+        observed = {
+            key: value
+            for key, value in existing.items()
+            if key != "execution_challenge"
+        }
+        if observed != immutable:
+            raise ValueError(
+                "campaign nonce is already bound to another config, trust root, output, or journal"
+            )
+        if (
+            not isinstance(existing.get("execution_challenge"), str)
+            or SHA256_RE.fullmatch(existing["execution_challenge"]) is None
+        ):
+            raise ValueError("campaign binding has no valid execution challenge")
+        return existing, False
 
 
 def _retain_failure_evidence(output: Path, trial_id: str, value: dict) -> dict:
@@ -797,14 +973,135 @@ def _retain_failure_evidence(output: Path, trial_id: str, value: dict) -> dict:
 
 def _write_terminal_report(
     output: Path,
+    fallback: Path,
     report: dict,
     journal: DurableJournal,
+    *,
+    require_primary: bool = False,
 ) -> None:
     report["journal"] = {
         "path": str(journal.path),
         "sha256": _sha256(journal.path),
     }
-    _atomic_write_json(output, report)
+    _atomic_write_json(fallback, report)
+    try:
+        _atomic_write_json(output, report)
+    except OSError as exc:
+        report["primary_report_error"] = str(exc)
+        _atomic_write_json(fallback, report)
+        if require_primary:
+            raise
+
+
+def _recover_reserved_campaign(binding: dict) -> dict:
+    output = Path(binding["output"])
+    fallback = Path(binding["terminal_fallback"])
+    journal_path = Path(binding["journal"])
+    if journal_path.exists():
+        journal, records = DurableJournal.reopen(journal_path)
+    else:
+        journal = DurableJournal(
+            journal_path,
+            campaign_nonce=binding["campaign_nonce"],
+            config_sha256=binding["config_sha256"],
+        )
+        records = DurableJournal.read_verified(journal_path)
+    report: dict = {}
+    for candidate in (fallback, output):
+        if candidate.is_file():
+            try:
+                value = json.loads(candidate.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            expected_binding = {
+                "schema_version": REPORT_SCHEMA,
+                "campaign_nonce": binding["campaign_nonce"],
+                "config_sha256": binding["config_sha256"],
+                "trust_roots_sha256": binding["trust_roots_sha256"],
+            }
+            if all(
+                value.get(key) == expected for key, expected in expected_binding.items()
+            ):
+                report = value
+                break
+    last = records[-1]
+    if last["event"] in {"CAMPAIGN_COMPLETE", "CAMPAIGN_TERMINAL"}:
+        report.update(
+            {
+                "schema_version": REPORT_SCHEMA,
+                "campaign_nonce": binding["campaign_nonce"],
+                "config_sha256": binding["config_sha256"],
+                "trust_roots_sha256": binding["trust_roots_sha256"],
+                "accepted": last["event"] == "CAMPAIGN_COMPLETE",
+                "terminal": True,
+                "recovered": True,
+            }
+        )
+        report.setdefault("trials", [])
+        if last["event"] == "CAMPAIGN_COMPLETE":
+            report.setdefault("terminal_reason", "campaign_complete")
+        else:
+            report.setdefault("terminal_reason", last["payload"].get("reason"))
+            terminal_trial_id = str(last["payload"].get("trial_id", "unknown"))
+            if not any(
+                isinstance(row, dict) and row.get("id") == terminal_trial_id
+                for row in report["trials"]
+            ):
+                report["trials"].append(
+                    {
+                        "id": terminal_trial_id,
+                        "outcome": last["payload"].get("outcome", "HALTED"),
+                        "passed": False,
+                        "recovered_from_journal": True,
+                    }
+                )
+        _write_terminal_report(output, fallback, report, journal)
+        journal.close()
+        return report
+    report.update(
+        {
+            "schema_version": REPORT_SCHEMA,
+            "campaign_nonce": binding["campaign_nonce"],
+            "config_sha256": binding["config_sha256"],
+            "trust_roots_sha256": binding["trust_roots_sha256"],
+            "accepted": False,
+            "terminal": True,
+            "recovered": True,
+        }
+    )
+    report.setdefault("trials", [])
+    trial_id = str(last["payload"].get("trial_id", "unknown"))
+    if last["event"] == "DISPATCH_ATTEMPT":
+        row = {
+            "id": trial_id,
+            "outcome": "HALTED_UNCERTAIN",
+            "delivery_state": "uncertain",
+            "retry_count": 0,
+            "reconciliation_required": True,
+            "passed": False,
+        }
+        reason = "recovered_dispatch_attempt"
+    else:
+        row = {
+            "id": trial_id,
+            "outcome": "HALTED",
+            "delivery_state": "not_dispatched",
+            "retry_count": 0,
+            "reconciliation_required": False,
+            "passed": False,
+        }
+        reason = "recovered_before_dispatch"
+    report["trials"].append(row)
+    report["terminal_reason"] = reason
+    journal.append(
+        "CAMPAIGN_TERMINAL",
+        {"trial_id": trial_id, "reason": reason, "outcome": row["outcome"]},
+    )
+    _write_terminal_report(output, fallback, report, journal)
+    journal.close()
+    return report
 
 
 def run_campaign(
@@ -813,7 +1110,21 @@ def run_campaign(
     trust_roots: dict,
     config_sha256: str,
     output: Path,
+    nonce_registry: Path,
 ) -> dict:
+    proposed_execution_challenge = secrets.token_hex(32)
+    binding, reserved = _reserve_campaign_nonce(
+        nonce_registry,
+        campaign_nonce=config["campaign_nonce"],
+        config_sha256=config_sha256,
+        trust_roots_sha256=trust_roots["path_sha256"],
+        output=output,
+        execution_challenge=proposed_execution_challenge,
+    )
+    if not reserved:
+        return _recover_reserved_campaign(binding)
+    execution_challenge = binding["execution_challenge"]
+    fallback = Path(binding["terminal_fallback"])
     report = {
         "schema_version": REPORT_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -822,6 +1133,7 @@ def run_campaign(
         "trust_roots_sha256": trust_roots["path_sha256"],
         "preflight": "passed",
         "executed": True,
+        "execution_challenge": execution_challenge,
         "host": {"platform": platform.platform(), "python": sys.version.split()[0]},
         "fingerprints": config["fingerprints"],
         "accepted": False,
@@ -836,12 +1148,20 @@ def run_campaign(
     oracle_public_key = trust_roots["decoded_keys"]["oracle_authority"]
     collector = config["collector_authority"]["command"]
     collector_sha256 = config["collector_authority"]["executable_sha256"]
-    journal_path = output.with_name(f"{output.name}.journal.jsonl")
+    journal_path = Path(binding["journal"])
     journal = DurableJournal(
         journal_path,
         campaign_nonce=config["campaign_nonce"],
         config_sha256=config_sha256,
     )
+    _write_terminal_report(
+        output,
+        fallback,
+        report,
+        journal,
+        require_primary=True,
+    )
+    consumed_challenges: set[str] = set()
 
     def terminate(row: dict, reason: str) -> dict:
         report["trials"].append(row)
@@ -852,7 +1172,7 @@ def run_campaign(
             "CAMPAIGN_TERMINAL",
             {"trial_id": row["id"], "reason": reason, "outcome": row["outcome"]},
         )
-        _write_terminal_report(output, report, journal)
+        _write_terminal_report(output, fallback, report, journal)
         journal.close()
         return report
 
@@ -862,6 +1182,8 @@ def run_campaign(
             config["campaign_nonce"],
             "--config-sha256",
             config_sha256,
+            "--execution-challenge",
+            execution_challenge,
             "--trial-id",
             trial["id"],
             "--entity-sha256",
@@ -873,11 +1195,20 @@ def run_campaign(
         collector_result: dict | None = None
         runner_result: dict | None = None
         after_result: dict | None = None
+        before_challenge = secrets.token_hex(32)
+        collector_challenge = secrets.token_hex(32)
         try:
             before_result = _run_pinned(
                 oracle,
                 oracle_sha256,
-                ["observe", "--phase", "before", *binding_args],
+                [
+                    "observe",
+                    "--phase",
+                    "before",
+                    "--observation-challenge",
+                    before_challenge,
+                    *binding_args,
+                ],
             )
             before = _validate_oracle_evidence(
                 before_result,
@@ -887,13 +1218,21 @@ def run_campaign(
                 oracle_public_key=oracle_public_key,
                 campaign_nonce=config["campaign_nonce"],
                 config_sha256=config_sha256,
+                execution_challenge=execution_challenge,
+                observation_challenge=before_challenge,
+                consumed_challenges=consumed_challenges,
             )
             if before["payload"]["effect_status"] != "REFUTED":
                 raise ValueError("safe REFUTED effect baseline is required")
             collector_result = _run_pinned(
                 collector,
                 collector_sha256,
-                ["collect", *binding_args],
+                [
+                    "collect",
+                    "--observation-challenge",
+                    collector_challenge,
+                    *binding_args,
+                ],
             )
             collector_evidence = _validate_collector_evidence(
                 collector_result,
@@ -901,6 +1240,9 @@ def run_campaign(
                 config=config,
                 config_sha256=config_sha256,
                 trust_roots=trust_roots,
+                execution_challenge=execution_challenge,
+                observation_challenge=collector_challenge,
+                consumed_challenges=consumed_challenges,
             )
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             retained = _retain_failure_evidence(
@@ -942,6 +1284,9 @@ def run_campaign(
                 "effect_contract_sha256": trial["effect_contract_sha256"],
                 "oracle_before_sha256": _object_sha256(before),
                 "collector_evidence_sha256": collector_evidence_sha256,
+                "execution_challenge": execution_challenge,
+                "before_challenge": before_challenge,
+                "collector_challenge": collector_challenge,
             },
         )
         journal.append(
@@ -950,6 +1295,7 @@ def run_campaign(
         )
         receipt: dict | None = None
         after: dict | None = None
+        after_challenge = secrets.token_hex(32)
         post_dispatch_error: Exception | None = None
         try:
             runner_result = _run_pinned(
@@ -969,7 +1315,14 @@ def run_campaign(
             after_result = _run_pinned(
                 oracle,
                 oracle_sha256,
-                ["observe", "--phase", "after", *binding_args],
+                [
+                    "observe",
+                    "--phase",
+                    "after",
+                    "--observation-challenge",
+                    after_challenge,
+                    *binding_args,
+                ],
             )
             after = _validate_oracle_evidence(
                 after_result,
@@ -979,6 +1332,9 @@ def run_campaign(
                 oracle_public_key=oracle_public_key,
                 campaign_nonce=config["campaign_nonce"],
                 config_sha256=config_sha256,
+                execution_challenge=execution_challenge,
+                observation_challenge=after_challenge,
+                consumed_challenges=consumed_challenges,
             )
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             if post_dispatch_error is None:
@@ -1022,11 +1378,12 @@ def run_campaign(
 
         assert receipt is not None and after is not None
         passed = _trial_passed(trial, receipt, before, after)
+        outcome = _authoritative_outcome(trial, passed=passed)
         row = {
             "id": trial["id"],
             "condition": trial["condition"],
             "expected": trial["expected"],
-            "outcome": receipt["outcome"],
+            "outcome": outcome,
             "passed": passed,
             "receipt": receipt,
             "collector_evidence": collector_evidence,
@@ -1036,12 +1393,12 @@ def run_campaign(
         report["trials"].append(row)
         journal.append(
             "TRIAL_TERMINAL",
-            {"trial_id": trial["id"], "outcome": receipt["outcome"], "passed": passed},
+            {"trial_id": trial["id"], "outcome": outcome, "passed": passed},
         )
         if not passed:
             report["trials"].pop()
             return terminate(row, "first_failed_safety_identity_or_effect_trial")
-        _write_terminal_report(output, report, journal)
+        _write_terminal_report(output, fallback, report, journal)
 
     report["accepted"] = True
     report["terminal"] = True
@@ -1050,7 +1407,7 @@ def run_campaign(
         "CAMPAIGN_COMPLETE",
         {"trial_count": len(report["trials"]), "accepted": True},
     )
-    _write_terminal_report(output, report, journal)
+    _write_terminal_report(output, fallback, report, journal)
     journal.close()
     return report
 
@@ -1064,6 +1421,12 @@ def main() -> int:
         required=True,
         help="absolute trust-root file provisioned outside the campaign config",
     )
+    parser.add_argument(
+        "--nonce-registry",
+        type=Path,
+        required=True,
+        help="secure customer registry that gives each campaign nonce one output",
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--execute",
@@ -1073,6 +1436,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         trust_roots = load_trust_roots(args.trust_roots)
+        _require_secure_directory(args.nonce_registry, "nonce registry")
         config = load_config(args.config, trust_roots)
         config_sha256 = hashlib.sha256(args.config.read_bytes()).hexdigest()
         report = {
@@ -1092,6 +1456,7 @@ def main() -> int:
                 trust_roots=trust_roots,
                 config_sha256=config_sha256,
                 output=args.output,
+                nonce_registry=args.nonce_registry,
             )
             report["preflight"] = "passed"
             report["executed"] = True

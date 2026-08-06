@@ -134,6 +134,7 @@ The single deliberate command is:
 python3 benchmark/citrix_ica_hdx/run_real_acceptance.py \
   --config /secure/customer-boundary/citrix-acceptance.json \
   --trust-roots /customer-managed/trust/citrix-acceptance-roots.json \
+  --nonce-registry /customer-managed/state/citrix-acceptance-nonces \
   --output /secure/customer-boundary/citrix-acceptance-report.json \
   --execute
 ```
@@ -144,12 +145,28 @@ fingerprints for Workspace, ICA/HDX, the application, session, display, runner,
 bundle, verifier, collector, and environment. Every one of the eight conditions
 requires at least three trials and a fixed expected outcome.
 
-The trust-root file is separate from the campaign configuration. Ed25519
-signatures under its customer and upgrade authority keys validate each approval
-and executable attestation. The harness hashes the executable files itself. A
-signed independent collector binds its current OS observations of the runner,
-oracle, and collector principals and executable digests to the campaign nonce,
-configuration, trial, session, transport, and collection time.
+The trust-root file is separate from the campaign configuration. Its customer,
+upgrade, collector, and oracle Ed25519 public keys must all be distinct.
+Signatures under the customer and upgrade keys validate each approval and
+executable attestation. The harness hashes the executable files itself. It
+rejects a symbolic link or world-writable trust-root or executable file. It
+also rechecks each executable and its mode immediately before use.
+
+The customer-signed runner approval binds the campaign nonce. The nonce
+registry is a durable customer-controlled directory independent of the report
+path. On first use, the harness binds one nonce to one configuration, trust-root
+file, absolute report path, hash-chained journal, fallback report, and generated
+execution challenge. A second use with another report path or configuration is
+rejected. A second use of the same binding recovers or returns its terminal
+state and never dispatches the trial again.
+
+The harness generates an unpredictable execution challenge for the campaign
+and a new observation challenge for each oracle and collector call. Each signed
+observation must return both challenges and a signed `observed_at` timestamp.
+The harness accepts the observation challenge once and rejects a stale, future,
+or replayed observation. A signed independent collector also binds its current
+OS observations of the runner, oracle, and collector principals and executable
+digests to the configuration, trial, session, and transport.
 
 Before each dispatch, a separately authenticated read-only oracle must report a
 signed `REFUTED` baseline for the exact trial, entity, and effect. The collector
@@ -157,10 +174,24 @@ must then return fresh signed native ICA/HDX diagnostic evidence. The harness
 writes these bindings to an exclusive hash-chained journal and calls `fsync`
 before it invokes the runner.
 
+Before any dispatch, the harness creates and synchronizes the nonce binding,
+journal, primary report, and registry fallback report. It closes each journal
+write before it continues. If a process stops after a durable
+`DISPATCH_ATTEMPT`, the next use verifies the complete hash chain and records
+`HALTED_UNCERTAIN`, zero retries, and required reconciliation. It does not
+dispatch again. A stop before dispatch recovers as `HALTED` and
+`not_dispatched`.
+
 After dispatch, every runner, receipt, or oracle error becomes
 `HALTED_UNCERTAIN`. The harness records zero retries, requires reconciliation,
 retains the available evidence, writes a terminal report, and stops the
 campaign. It also stops at the first failed safety, identity, or effect trial.
+
+The runner receipt supplies delivery metadata. It cannot supply the trial
+outcome. The harness derives the outcome only from validated oracle evidence
+and the fixed condition contract. It emits `VERIFIED` only for a healthy trial
+whose complete oracle checks pass. A trial with `passed: false` is always
+`HALTED` or `HALTED_UNCERTAIN`; it is never `VERIFIED`.
 
 A commit timeout has the fixed result `HALTED_UNCERTAIN`. The runner reports
 uncertain delivery, zero retries, and required independent reconciliation. The

@@ -1223,6 +1223,23 @@ class BusinessDecisionSpec(BaseModel):
                 raise ValueError(
                     f"business decision option {option.id!r} names unknown evidence"
                 )
+        if not any(
+            (
+                predicate.kind is PredicateKind.TEXT_PRESENT
+                and bool(predicate.text)
+            )
+            or (
+                predicate.kind is PredicateKind.ANCHOR_RESOLVES
+                and predicate.anchor is not None
+            )
+            for predicate in self.revalidation
+        ):
+            raise ValueError(
+                "business decision revalidation requires an affirmative live "
+                "frame predicate (TEXT_PRESENT or ANCHOR_RESOLVES); parameters, "
+                "the retained answer, absence checks, negation, and tautological "
+                "boolean expressions cannot authorize continuation"
+            )
         return self
 
     def contract_sha256(self) -> str:

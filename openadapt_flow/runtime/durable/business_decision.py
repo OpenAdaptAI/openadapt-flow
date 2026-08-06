@@ -364,30 +364,71 @@ class BusinessDecisionStore:
 
     @contextmanager
     def _lock(self, timeout_s: float = 5.0) -> Iterator[None]:
+        """Serialize submissions with a crash-released operating-system lock."""
+
         self._assert_managed_path(self.lock_path)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        flags = os.O_CREAT | os.O_RDWR
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(self.lock_path, flags, 0o600)
+        except OSError as exc:
+            raise BusinessDecisionRefused(
+                "the business decision lock cannot be opened safely"
+            ) from exc
+        try:
+            if os.name != "nt":
+                os.fchmod(descriptor, 0o600)
+            elif os.fstat(descriptor).st_size == 0:
+                # Windows locks a byte range. The byte has no authority or
+                # sensitive content. It only provides a stable lock range.
+                os.write(descriptor, b"\0")
+                os.fsync(descriptor)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+        except Exception:
+            os.close(descriptor)
+            raise
+
         deadline = time.monotonic() + timeout_s
         while True:
             try:
-                descriptor = os.open(
-                    self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(  # type: ignore[attr-defined]
+                        descriptor, msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
+                    )
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except FileExistsError:
+            except (BlockingIOError, OSError):
                 if time.monotonic() >= deadline:
+                    os.close(descriptor)
                     raise BusinessDecisionRefused(
                         "another business decision submission is active"
                     ) from None
                 time.sleep(0.01)
         try:
-            os.close(descriptor)
             yield
         finally:
             try:
-                self.lock_path.unlink()
-                self._fsync_parent(self.lock_path)
-            except FileNotFoundError:
-                pass
+                if os.name == "nt":
+                    import msvcrt
+
+                    os.lseek(descriptor, 0, os.SEEK_SET)
+                    msvcrt.locking(  # type: ignore[attr-defined]
+                        descriptor, msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                    )
+                else:
+                    import fcntl
+
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
     def _request_path(self, sha256: str) -> Path:
         return self.requests_dir / f"{_sha256_value(sha256)}.json"

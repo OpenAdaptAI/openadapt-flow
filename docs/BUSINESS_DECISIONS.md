@@ -24,11 +24,17 @@ the reviewed contract before production use.
 - one exact successor for each option;
 - optional local evidence requirements for each option;
 - one expiry interval;
-- one or more deterministic live-state revalidation predicates.
+- one or more deterministic live-state revalidation predicates, including at
+  least one direct affirmative frame check.
 
 Bundle validation requires the output parameter to exist. It also requires the
 state transitions to equal the option mapping. A decision state cannot contain
 an action, loop, subflow, terminal result, or exception route.
+
+Governed repair cannot change the decision contract or route around it. The
+regression gate requires the decision to remain reachable and to continue to
+dominate every certified option target and downstream state that it protected.
+Changing that control boundary requires a new qualification; it is not a heal.
 
 The decision output has frame scope. A subflow can inherit a parent value. A
 loop row can override it. A loop-local answer does not leak into another row or
@@ -51,7 +57,10 @@ the parent frame.
 7. Resume authenticates the request and receipt. Flow binds the finite output
    in the current frame only.
 8. Flow captures a fresh settled frame and evaluates the option's compiled
-   revalidation predicates.
+   revalidation predicates. A direct `TEXT_PRESENT` or `ANCHOR_RESOLVES`
+   predicate must pass. A parameter, the retained answer, an absence check, or
+   a Boolean expression that can be true without affirmative live evidence
+   cannot authorize continuation.
 9. Flow continues only to the successor bound into the signed receipt.
 10. A successor action still runs all normal target, identity, policy,
     postcondition, effect, and durable-execution gates.

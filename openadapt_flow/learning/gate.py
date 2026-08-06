@@ -136,6 +136,22 @@ def _effect_baseline_and_now(
 _MAIN = "__main__"
 
 
+def _node_id(graph_name: str, state_id: str) -> str:
+    """Stable union-graph identity for one program state."""
+
+    return f"{graph_name}\x00{state_id}"
+
+
+def _business_decision_token(
+    graph_name: str,
+    state_id: str,
+    contract_sha256: str,
+) -> str:
+    """Must-analysis token established only by traversing a decision node."""
+
+    return f"decision::{graph_name}::{state_id}::{contract_sha256}"
+
+
 def _norm_intent(intent: str) -> str:
     return " ".join((intent or "").split()).casefold()
 
@@ -203,10 +219,10 @@ class _MustAnalysis(BaseModel):
 
     ``reachable`` is the set of union-graph node ids reachable from the entry;
     ``must_in`` maps each reachable node -> the set of guard TOKENS that hold on
-    EVERY path from entry into it (identity-guard tokens ``id::<role>`` and
-    branch/precondition tokens ``cond::<pred>``); ``step_node`` maps a step id to
-    its node; ``role_to_id`` maps an armed step's role token back to a step id
-    (for readable failure messages)."""
+    EVERY path from entry into it (identity-guard tokens ``id::<role>``,
+    branch/precondition tokens ``cond::<pred>``, and typed business-decision
+    tokens); ``step_node`` maps a step id to its node; ``role_to_id`` maps an
+    armed step's role token back to a step id (for readable failure messages)."""
 
     reachable: set[str] = Field(default_factory=set)
     must_in: dict[str, set[str]] = Field(default_factory=dict)
@@ -244,9 +260,6 @@ def _analyze(
     for name, g in (subflows or {}).items():
         graphs[name] = g
 
-    def nid(gname: str, sid: str) -> str:
-        return f"{gname}\x00{sid}"
-
     node_step: dict[str, Optional[Step]] = {}
     # adjacency: node -> list of (successor_node, edge_contribution_tokens)
     adj: dict[str, list[tuple[str, set[str]]]] = {}
@@ -254,36 +267,52 @@ def _analyze(
 
     for gname, g in graphs.items():
         for sid, st in g.states.items():
-            n = nid(gname, sid)
+            n = _node_id(gname, sid)
             step = st.step if st.kind is StateKind.ACTION else None
             node_step[n] = step
             if step is not None and _step_armed(step):
                 role_to_id.setdefault("id::" + _role_str(step), step.id)
             base_gen = _gen(step)
+            if st.kind is StateKind.BUSINESS_DECISION and st.decision is not None:
+                base_gen.add(
+                    _business_decision_token(
+                        gname,
+                        st.id,
+                        st.decision.contract_sha256(),
+                    )
+                )
             outs: list[tuple[str, set[str]]] = []
             for t in st.transitions:
                 if t.target in g.states:
                     contrib = set(base_gen)
                     if t.guard is not None:
                         contrib.add("cond::" + _predicate_key(t.guard))
-                    outs.append((nid(gname, t.target), contrib))
+                    outs.append((_node_id(gname, t.target), contrib))
             if (
                 st.kind is StateKind.SUBFLOW_CALL
                 and st.subflow is not None
                 and st.subflow in graphs
             ):
-                outs.append((nid(st.subflow, graphs[st.subflow].entry), set(base_gen)))
+                outs.append(
+                    (
+                        _node_id(st.subflow, graphs[st.subflow].entry),
+                        set(base_gen),
+                    )
+                )
             if (
                 st.kind is StateKind.LOOP
                 and st.loop is not None
                 and st.loop.body in graphs
             ):
                 outs.append(
-                    (nid(st.loop.body, graphs[st.loop.body].entry), set(base_gen))
+                    (
+                        _node_id(st.loop.body, graphs[st.loop.body].entry),
+                        set(base_gen),
+                    )
                 )
             adj[n] = outs
 
-    entry = nid(_MAIN, main.entry)
+    entry = _node_id(_MAIN, main.entry)
     if entry not in node_step:
         return _MustAnalysis()
 
@@ -431,14 +460,121 @@ def _semantic_failures(
 
     active_decisions = _business_contracts(active, active_subflows)
     candidate_decisions = _business_contracts(candidate, candidate_subflows)
+    active_graphs = {_MAIN: active, **(active_subflows or {})}
+    candidate_graphs = {_MAIN: candidate, **(candidate_subflows or {})}
+
+    def _append_once(message: str) -> None:
+        if message not in failures:
+            failures.append(message)
+
     for location, contract in active_decisions.items():
         if candidate_decisions.get(location) != contract:
-            failures.append(
+            _append_once(
                 "business decision contract changed at "
                 f"{location[0]!r}/{location[1]!r}: roles, finite answers, "
                 "required evidence, expiry, output binding, live revalidation, "
                 "and branch targets must remain exact during learned repair"
             )
+        active_graph = active_graphs.get(location[0])
+        candidate_graph = candidate_graphs.get(location[0])
+        if active_graph is None:
+            continue
+        active_state = active_graph.states.get(location[1])
+        active_node = _node_id(*location)
+        if (
+            active_state is None
+            or active_state.decision is None
+            or active_node not in a_an.reachable
+        ):
+            continue
+        candidate_node = _node_id(*location)
+        if candidate_graph is None or candidate_node not in c_an.reachable:
+            _append_once(
+                "business decision topology weakened at "
+                f"{location[0]!r}/{location[1]!r}: the certified decision is "
+                "no longer reachable from the graph entry"
+            )
+            continue
+        candidate_state = candidate_graph.states.get(location[1])
+        if (
+            candidate_state is None
+            or candidate_state.transitions != active_state.transitions
+        ):
+            _append_once(
+                "business decision topology weakened at "
+                f"{location[0]!r}/{location[1]!r}: the signed option-to-branch "
+                "mapping changed during learned repair"
+            )
+
+        token = _business_decision_token(location[0], location[1], contract)
+        for option in active_state.decision.options:
+            target_node = _node_id(location[0], option.target)
+            if target_node not in c_an.reachable:
+                _append_once(
+                    "business decision topology weakened at "
+                    f"{location[0]!r}/{location[1]!r}: option "
+                    f"{option.id!r} no longer reaches its certified target "
+                    f"{option.target!r}"
+                )
+            elif token not in c_an.must_in.get(target_node, set()):
+                _append_once(
+                    "business decision topology weakened at "
+                    f"{location[0]!r}/{location[1]!r}: the certified decision "
+                    f"no longer dominates option {option.id!r} target "
+                    f"{option.target!r}; an incoming path can bypass the "
+                    "signed answer"
+                )
+
+        # Preserve every state that was control-dependent on this decision in
+        # the active program. This catches bypasses to a downstream action or
+        # merge state even when each direct option target still has its exact
+        # signed edge.
+        protected_nodes = {
+            node
+            for node in a_an.reachable
+            if token in a_an.must_in.get(node, set())
+        }
+        for protected_node in sorted(protected_nodes):
+            if (
+                protected_node not in c_an.reachable
+                or token not in c_an.must_in.get(protected_node, set())
+            ):
+                graph_name, state_id = protected_node.split("\x00", 1)
+                _append_once(
+                    "business decision topology weakened at "
+                    f"{location[0]!r}/{location[1]!r}: protected state "
+                    f"{graph_name!r}/{state_id!r} is missing, unreachable, or "
+                    "can be reached without the signed decision"
+                )
+
+        # If every successful terminal was decision-controlled before repair,
+        # a candidate cannot add a new success exit that skips the decision.
+        active_success = {
+            _node_id(graph_name, state.id)
+            for graph_name, graph in active_graphs.items()
+            for state in graph.states.values()
+            if state.kind is StateKind.TERMINAL
+            and (state.outcome or "success") == "success"
+            and _node_id(graph_name, state.id) in a_an.reachable
+        }
+        if active_success and all(
+            token in a_an.must_in.get(node, set()) for node in active_success
+        ):
+            for graph_name, graph in candidate_graphs.items():
+                for state in graph.states.values():
+                    terminal_node = _node_id(graph_name, state.id)
+                    if (
+                        state.kind is StateKind.TERMINAL
+                        and (state.outcome or "success") == "success"
+                        and terminal_node in c_an.reachable
+                        and token not in c_an.must_in.get(terminal_node, set())
+                    ):
+                        _append_once(
+                            "business decision topology weakened at "
+                            f"{location[0]!r}/{location[1]!r}: successful "
+                            f"terminal {graph_name!r}/{state.id!r} can be "
+                            "reached without the signed decision"
+                        )
 
     def _label(step: Step) -> str:
         return f"{step.id!r} ({step.intent!r})"

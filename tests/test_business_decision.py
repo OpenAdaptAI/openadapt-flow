@@ -6,6 +6,10 @@ operator-facing copy or component markup.
 
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
+import sys
 from datetime import datetime, timedelta
 
 import pytest
@@ -136,6 +140,24 @@ def _decision_workflow(*, required_evidence: bool = True) -> Workflow:
     )
 
 
+def _decision_program_with_predecessor() -> ProgramGraph:
+    workflow = _decision_workflow()
+    assert workflow.program is not None
+    program = workflow.program.model_copy(deep=True)
+    program.states["prepare"] = State(
+        id="prepare",
+        kind=StateKind.ACTION,
+        step=Step(
+            id="prepare",
+            intent="prepare the reviewed decision",
+            action=ActionKind.WAIT,
+        ),
+        transitions=[Transition(target="review")],
+    )
+    program.entry = "prepare"
+    return program
+
+
 def _principal(*roles: str) -> BusinessDecisionPrincipal:
     return BusinessDecisionPrincipal(
         operator_ref="operator:alice",
@@ -210,6 +232,37 @@ def test_business_decision_contract_is_closed_and_legacy_state_stays_compatible(
     assert "decision" not in legacy.model_dump(mode="json")
 
 
+@pytest.mark.parametrize(
+    "weak_revalidation",
+    [
+        Predicate(
+            kind=PredicateKind.PARAM_EQUALS,
+            param="ready",
+            value="yes",
+        ),
+        Predicate(
+            kind=PredicateKind.PARAM_EQUALS,
+            param="review_outcome",
+            value="accepted",
+        ),
+        Predicate(
+            kind=PredicateKind.OR,
+            operands=[
+                Predicate(kind=PredicateKind.TEXT_PRESENT, text="Ready"),
+                Predicate(kind=PredicateKind.TEXT_ABSENT, text="Ready"),
+            ],
+        ),
+    ],
+)
+def test_decision_contract_refuses_non_affirmative_live_revalidation(
+    weak_revalidation,
+):
+    payload = _decision_spec().model_dump(mode="json")
+    payload["revalidation"] = [weak_revalidation.model_dump(mode="json")]
+    with pytest.raises(ValueError, match="affirmative live frame predicate"):
+        BusinessDecisionSpec.model_validate(payload)
+
+
 def test_bundle_requires_declared_output_and_exact_option_branch_mapping():
     workflow = _decision_workflow()
     report = validate_workflow(workflow)
@@ -247,6 +300,106 @@ def test_learned_repair_cannot_change_certified_decision_contract():
     assert report.passed is False
     assert any(
         "business decision contract changed" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_replace_decision_entry_with_answer_branch():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.entry = "accepted_action"
+
+    report = program_regression_gate(active, candidate)
+    assert report.passed is False
+    assert any(
+        "certified decision is no longer reachable" in failure
+        for failure in report.semantic_failures
+    )
+
+
+@pytest.mark.parametrize(
+    ("bypass_target", "failure_fragment"),
+    [
+        ("accepted_action", "incoming path can bypass the signed answer"),
+        ("done", "protected state"),
+    ],
+)
+def test_learned_repair_cannot_add_bypass_edge_into_decision_region(
+    bypass_target,
+    failure_fragment,
+):
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.states["prepare"].transitions.append(
+        Transition(
+            target=bypass_target,
+            guard=Predicate(
+                kind=PredicateKind.PARAM_EQUALS,
+                param="unsafe_bypass",
+                value="yes",
+            ),
+        )
+    )
+
+    report = program_regression_gate(active, candidate)
+    assert report.passed is False
+    assert any(
+        failure_fragment in failure for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_rewrite_decision_predecessor_to_answer_branch():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.states["prepare"].transitions = [
+        Transition(target="rejected_action")
+    ]
+
+    report = program_regression_gate(active, candidate)
+    assert report.passed is False
+    assert any(
+        "certified decision is no longer reachable" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_rewrite_signed_option_transition():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.states["review"].transitions[0].target = "rejected_action"
+
+    report = program_regression_gate(active, candidate)
+    assert report.passed is False
+    assert any(
+        "signed option-to-branch mapping changed" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_add_success_exit_before_required_decision():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.states["shortcut_done"] = State(
+        id="shortcut_done",
+        kind=StateKind.TERMINAL,
+        outcome="success",
+    )
+    candidate.states["prepare"].transitions.append(
+        Transition(
+            target="shortcut_done",
+            guard=Predicate(
+                kind=PredicateKind.PARAM_EQUALS,
+                param="unsafe_shortcut",
+                value="yes",
+            ),
+        )
+    )
+
+    report = program_regression_gate(active, candidate)
+    assert report.passed is False
+    assert any(
+        "successful terminal" in failure
+        and "without the signed decision" in failure
         for failure in report.semantic_failures
     )
 
@@ -385,6 +538,65 @@ def test_submission_recovers_after_receipt_before_approval(tmp_path, monkeypatch
     pending = CheckpointStore(tmp_path / "run").read_pending()
     assert pending is not None
     assert pending.status == "approved"
+
+
+def test_submission_reuses_stale_lock_file_from_interrupted_legacy_writer(tmp_path):
+    _workflow, store, _backend, request = _pause(tmp_path)
+    store.lock_path.write_bytes(b"")
+
+    receipt = store.submit(
+        _submission(store, request),
+        principal=_principal("operator"),
+    )
+
+    assert receipt.option_id == "accept"
+    assert store.lock_path.is_file()
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not hasattr(signal, "SIGKILL"),
+    reason="SIGKILL and POSIX flock are required for this restart test",
+)
+def test_submission_recovers_advisory_lock_after_sigkill(tmp_path):
+    _workflow, store, _backend, request = _pause(tmp_path)
+    store.lock_path.parent.mkdir(parents=True, exist_ok=True)
+    child_code = """
+import fcntl
+import os
+import sys
+import time
+
+descriptor = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(descriptor, fcntl.LOCK_EX)
+print("locked", flush=True)
+while True:
+    time.sleep(60)
+"""
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code, str(store.lock_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "locked"
+        with pytest.raises(BusinessDecisionRefused, match="submission is active"):
+            with store._lock(timeout_s=0.05):
+                pass
+
+        os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+
+        receipt = store.submit(
+            _submission(store, request),
+            principal=_principal("operator"),
+        )
+        assert receipt.option_id == "accept"
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
 
 
 def test_signed_decision_selects_one_branch_then_normal_action_gates_run(tmp_path):

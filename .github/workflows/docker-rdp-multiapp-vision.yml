@@ -22,7 +22,11 @@ concurrency:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # The acceptance contract runs 9 conditions x 3 trials through a real
+    # FreeRDP round trip. Keep one sequential job so conditions share the same
+    # qualified bundle and fixture lineage; 60 minutes cannot contain the full
+    # campaign on a shared hosted runner.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

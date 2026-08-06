@@ -855,6 +855,26 @@ def _campaign_coverage(
     }
 
 
+def _compile_campaign_recording(
+    compile_recording: Any,
+    recording_dir: Path,
+    bundle_dir: Path,
+) -> Any:
+    """Compile the fixture into its exact external-RDP execution boundary."""
+
+    workflow = compile_recording(
+        recording_dir,
+        bundle_dir,
+        name="rdp-multiapp-vision",
+        target_surface="rdp",
+    )
+    if workflow.surface != "rdp" or workflow.execution_mode != "external":
+        raise RuntimeError(
+            "RDP campaign compilation did not retain its external surface binding"
+        )
+    return workflow
+
+
 def _run_once(
     *,
     container: str,
@@ -1230,7 +1250,11 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
     bundle_dir = work / "bundle"
     _record(record_backend, recording_dir)
     _arm_recording(recording_dir)
-    compiled = compile_recording(recording_dir, bundle_dir, name="rdp-multiapp-vision")
+    compiled = _compile_campaign_recording(
+        compile_recording,
+        recording_dir,
+        bundle_dir,
+    )
     workflow, verifier, gate, checkpoint_key, qualification_case_id, step_ids = (
         _qualify(compiled, bundle_dir, root)
     )

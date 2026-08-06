@@ -207,6 +207,42 @@ def test_campaign_completion_requires_every_trial_for_every_condition() -> None:
     assert complete["full_campaign_pending_conditions"] == []
 
 
+def test_campaign_compilation_is_bound_to_external_rdp(tmp_path: Path) -> None:
+    from benchmark.rdp_multiapp.run_qualification import _compile_campaign_recording
+    from openadapt_flow.ir import Workflow
+
+    observed: dict[str, object] = {}
+
+    def compile_recording(recording_dir, bundle_dir, **kwargs):
+        observed.update(
+            recording_dir=recording_dir,
+            bundle_dir=bundle_dir,
+            **kwargs,
+        )
+        return Workflow(
+            name=kwargs["name"],
+            surface=kwargs["target_surface"],
+            execution_mode="external",
+        )
+
+    recording_dir = tmp_path / "recording"
+    bundle_dir = tmp_path / "bundle"
+    workflow = _compile_campaign_recording(
+        compile_recording,
+        recording_dir,
+        bundle_dir,
+    )
+
+    assert workflow.surface == "rdp"
+    assert workflow.execution_mode == "external"
+    assert observed == {
+        "recording_dir": recording_dir,
+        "bundle_dir": bundle_dir,
+        "name": "rdp-multiapp-vision",
+        "target_surface": "rdp",
+    }
+
+
 def test_commit_then_timeout_fault_raises_only_after_one_real_save_delivery() -> None:
     from benchmark.rdp_multiapp.run_qualification import (
         _install_commit_then_timeout_fault,

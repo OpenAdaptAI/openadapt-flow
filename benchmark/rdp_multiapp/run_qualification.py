@@ -13,13 +13,16 @@ import csv
 import hashlib
 import io
 import json
+import os
 import secrets
 import shutil
+import signal
 import sqlite3
 import statistics
 import tempfile
 import time
 import traceback
+from contextlib import contextmanager
 from difflib import SequenceMatcher
 from email import policy as email_policy
 from email.parser import BytesParser
@@ -54,6 +57,7 @@ REPLAY_PARAMS = {
     REQUEST_PARAM: TARGET_REQUEST,
 }
 TRIALS = 3
+TRIAL_DEADLINE_S = 10 * 60
 
 # Stable synthetic-fixture geometry. Runtime replay resolves visual anchors
 # from the recording; these points are used only to make the demonstration.
@@ -84,6 +88,42 @@ WORKLIST_TARGET_REGION = (35, 455, 920, 70)
 TARGET_RECORD_REGION = (35, 123, 430, 68)
 
 POLICY_PATH = Path(__file__).with_name("policy.yaml")
+
+
+class CampaignTrialDeadlineExceeded(BaseException):
+    """Stop one non-terminating trial without accepting its outcome."""
+
+
+@contextmanager
+def _trial_watchdog(timeout_s: float):
+    """Bound one campaign trial on the Linux hosted acceptance runner."""
+
+    if timeout_s <= 0:
+        raise ValueError("campaign trial deadline must be positive")
+    if not hasattr(signal, "SIGALRM") or not hasattr(signal, "setitimer"):
+        raise RuntimeError("the RDP campaign requires a POSIX trial watchdog")
+
+    def raise_deadline(_signum, _frame) -> None:
+        raise CampaignTrialDeadlineExceeded(
+            f"RDP campaign trial exceeded {timeout_s:g} seconds"
+        )
+
+    started = time.monotonic()
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+    if 0 < previous_timer[0] <= timeout_s:
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        raise RuntimeError("an earlier process deadline is already active")
+    signal.signal(signal.SIGALRM, raise_deadline)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            remaining = max(0.001, previous_timer[0] - (time.monotonic() - started))
+            signal.setitimer(signal.ITIMER_REAL, remaining, previous_timer[1])
 
 
 class MultiappRdpTransport(DockerX11RdpTransport):
@@ -875,6 +915,148 @@ def _compile_campaign_recording(
     return workflow
 
 
+def _deadline_trial(
+    *,
+    root: Path,
+    condition: str,
+    runtime_s: float,
+    timeout_s: float,
+) -> dict[str, Any]:
+    """Retain a fail-closed result when one trial exceeds its deadline."""
+
+    oracle = _oracle_result(root, dict(REPLAY_PARAMS))
+    return {
+        "condition": condition,
+        "passed": False,
+        "runtime_s": round(runtime_s, 3),
+        "runtime_success": False,
+        "model_calls": 0,
+        "fault_injected": False,
+        "fault_ack": {},
+        "reset_ack": {},
+        "pointer_delivery": {},
+        "display_drift": {},
+        "environment_preflight": {},
+        "exact_fault_evidence": False,
+        "typed_target_refusal": False,
+        "relevant_partial_refusal": False,
+        "safety_refusal_evidence": [],
+        "commit_timeout_injected": False,
+        "save_delivery_calls": int(oracle["input_counts"].get("save_appointment", 0)),
+        # The watchdog can fire after an RDP input edge crossed the transport
+        # but before the fixture processed or logged it. Ledger absence cannot
+        # prove non-delivery, so every deadline requires reconciliation.
+        "transaction_outcome": "RECONCILIATION_REQUIRED",
+        "safe_halt": False,
+        "silent_incorrect_success": False,
+        "over_halt": condition in {"healthy", "row_reordered"},
+        "oracle": oracle,
+        "rung_counts": {},
+        "errors": [f"campaign trial exceeded {timeout_s:g} seconds"],
+        "failed_step_ids": [],
+        "step_diagnostics": [],
+        "trial_deadline_exceeded": True,
+    }
+
+
+def _campaign_result(
+    conditions: tuple[str, ...],
+    trials: list[dict[str, Any]],
+    *,
+    stopped_early: bool,
+) -> dict[str, Any]:
+    """Build one complete or resumable campaign result from retained trials."""
+
+    coverage = _campaign_coverage(conditions, trials, required_trials=TRIALS)
+    runtimes = sorted(float(trial["runtime_s"]) for trial in trials)
+
+    def nearest_rank(percentile: float) -> Optional[float]:
+        if not runtimes:
+            return None
+        index = max(
+            0,
+            min(len(runtimes) - 1, int(len(runtimes) * percentile + 0.999999) - 1),
+        )
+        return runtimes[index]
+
+    p95 = nearest_rank(0.95)
+    return {
+        "schema_version": "openadapt.rdp-multiapp-results.v1",
+        "campaign_contract": "benchmark/rdp_multiapp/campaign.json",
+        **coverage,
+        "run_count": len(trials),
+        "stopped_early": stopped_early,
+        # A checkpoint with passing work so far is not acceptance evidence.
+        "accepted_subset": bool(
+            coverage["full_campaign_complete"]
+            and not stopped_early
+            and all(trial["passed"] for trial in trials)
+        ),
+        "verified_outcomes": sum(
+            bool(trial["runtime_success"] and trial["oracle"]["all_effects_ok"])
+            for trial in trials
+        ),
+        "safe_halts": sum(bool(trial["safe_halt"]) for trial in trials),
+        "silent_incorrect_successes": sum(
+            bool(trial["silent_incorrect_success"]) for trial in trials
+        ),
+        "over_halts": sum(bool(trial["over_halt"]) for trial in trials),
+        "wrong_record_writes": sum(
+            bool(trial["oracle"]["wrong_record_write"]) for trial in trials
+        ),
+        "duplicate_effects": sum(
+            bool(trial["oracle"]["duplicate_effect"]) for trial in trials
+        ),
+        "model_calls": sum(int(trial["model_calls"]) for trial in trials),
+        "p50_runtime_s": (round(statistics.median(runtimes), 3) if runtimes else None),
+        "p95_runtime_s": round(p95, 3) if p95 is not None else None,
+        "trials": trials,
+    }
+
+
+def _write_campaign_result(out: Path, result: dict[str, Any]) -> None:
+    """Atomically retain the latest completed campaign trial."""
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    temporary = out.with_name(f".{out.name}.{os.getpid()}.tmp")
+    temporary.write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, out)
+
+
+def _retain_harness_failure(out: Path, exc: Exception) -> dict[str, Any]:
+    """Add a bounded harness failure without discarding prior trial evidence."""
+
+    extracted = traceback.extract_tb(exc.__traceback__)
+    failure_frame = extracted[-1] if extracted else None
+    try:
+        result = json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        conditions = tuple(
+            condition["id"]
+            for condition in json.loads(
+                Path(__file__).with_name("campaign.json").read_text(encoding="utf-8")
+            )["conditions"]
+        )
+        result = _campaign_result(conditions, [], stopped_early=True)
+    result["accepted_subset"] = False
+    result["stopped_early"] = True
+    result["harness_failure"] = {
+        "exception_type": type(exc).__name__,
+        "stage": "campaign_execution",
+        "source": (
+            f"{Path(failure_frame.filename).name}:{failure_frame.lineno}"
+            if failure_frame is not None
+            else None
+        ),
+        "function": failure_frame.name if failure_frame is not None else None,
+    }
+    _write_campaign_result(out, result)
+    return result
+
+
 def _run_once(
     *,
     container: str,
@@ -1026,23 +1208,28 @@ def _run_once(
         save_region=SAVE_APPOINTMENT_REGION,
     )
     started = time.monotonic()
-    report = Replayer(
-        backend,
-        poll_interval_s=0.3,
-        effect_verifier=verifier,
-        governed_authorization=authorization,
-        pixel_verify_enabled=True,
-        durable=True,
-        require_settled=True,
-        checkpoint_key=checkpoint_key,
-    ).run(
-        workflow,
-        params=params,
-        bundle_dir=bundle_dir,
-        run_dir=run_dir,
-        idempotency_key=f"{condition}-{run_dir.name}",
-        execution_target_kind="rdp",
-    )
+    try:
+        report = Replayer(
+            backend,
+            poll_interval_s=0.3,
+            effect_verifier=verifier,
+            governed_authorization=authorization,
+            pixel_verify_enabled=True,
+            durable=True,
+            require_settled=True,
+            checkpoint_key=checkpoint_key,
+        ).run(
+            workflow,
+            params=params,
+            bundle_dir=bundle_dir,
+            run_dir=run_dir,
+            idempotency_key=f"{condition}-{run_dir.name}",
+            execution_target_kind="rdp",
+        )
+    finally:
+        # A trial creates a fresh backend binding. Always release it before the
+        # next trial, including when the watchdog interrupts a blocked run.
+        backend.close()
     oracle = _oracle_result(root, params)
     expected_halt = condition in {
         "wrong_record_before_write",
@@ -1283,23 +1470,37 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
     )
     trials: list[dict[str, Any]] = []
     stopped_early = False
+    _write_campaign_result(
+        out,
+        _campaign_result(conditions, trials, stopped_early=False),
+    )
     for condition in conditions:
         for index in range(1, TRIALS + 1):
             trial_run_dir = work / f"run-{condition}-{index}"
-            trial = _run_once(
-                container=container,
-                root=root,
-                workflow=workflow,
-                verifier=verifier,
-                gate=gate,
-                bundle_dir=bundle_dir,
-                checkpoint_key=checkpoint_key,
-                qualification_case_id=qualification_case_id,
-                run_dir=trial_run_dir,
-                condition=condition,
-                save_pointer_acquisition=save_pointer_acquisition,
-                save_step_id=step_ids["save"],
-            )
+            trial_started = time.monotonic()
+            try:
+                with _trial_watchdog(TRIAL_DEADLINE_S):
+                    trial = _run_once(
+                        container=container,
+                        root=root,
+                        workflow=workflow,
+                        verifier=verifier,
+                        gate=gate,
+                        bundle_dir=bundle_dir,
+                        checkpoint_key=checkpoint_key,
+                        qualification_case_id=qualification_case_id,
+                        run_dir=trial_run_dir,
+                        condition=condition,
+                        save_pointer_acquisition=save_pointer_acquisition,
+                        save_step_id=step_ids["save"],
+                    )
+            except CampaignTrialDeadlineExceeded:
+                trial = _deadline_trial(
+                    root=root,
+                    condition=condition,
+                    runtime_s=time.monotonic() - trial_started,
+                    timeout_s=TRIAL_DEADLINE_S,
+                )
             if not trial["passed"]:
                 trial["failure_artifacts"] = _export_failed_step_frames(
                     artifact_root=out.parent,
@@ -1309,48 +1510,37 @@ def run(container: str, root: Path, out: Path, work: Path) -> dict[str, Any]:
             trials.append(trial)
             if not trial["passed"]:
                 stopped_early = True
+            checkpoint = _campaign_result(
+                conditions,
+                trials,
+                stopped_early=stopped_early,
+            )
+            _write_campaign_result(out, checkpoint)
+            print(
+                json.dumps(
+                    {
+                        "campaign_progress": {
+                            "condition": condition,
+                            "trial": index,
+                            "passed": bool(trial["passed"]),
+                            "runtime_s": trial["runtime_s"],
+                            "run_count": len(trials),
+                        }
+                    },
+                    sort_keys=True,
+                ),
+                flush=True,
+            )
+            if stopped_early:
                 break
         if stopped_early:
             break
-    runtimes = sorted(float(trial["runtime_s"]) for trial in trials)
-
-    def nearest_rank(percentile: float) -> float:
-        index = max(
-            0, min(len(runtimes) - 1, int(len(runtimes) * percentile + 0.999999) - 1)
-        )
-        return runtimes[index]
-
-    coverage = _campaign_coverage(conditions, trials, required_trials=TRIALS)
-    result = {
-        "schema_version": "openadapt.rdp-multiapp-results.v1",
-        "campaign_contract": "benchmark/rdp_multiapp/campaign.json",
-        **coverage,
-        "run_count": len(trials),
-        "stopped_early": stopped_early,
-        "accepted_subset": all(trial["passed"] for trial in trials),
-        "verified_outcomes": sum(
-            bool(trial["runtime_success"] and trial["oracle"]["all_effects_ok"])
-            for trial in trials
-        ),
-        "safe_halts": sum(bool(trial["safe_halt"]) for trial in trials),
-        "silent_incorrect_successes": sum(
-            bool(trial["silent_incorrect_success"]) for trial in trials
-        ),
-        "over_halts": sum(bool(trial["over_halt"]) for trial in trials),
-        "wrong_record_writes": sum(
-            bool(trial["oracle"]["wrong_record_write"]) for trial in trials
-        ),
-        "duplicate_effects": sum(
-            bool(trial["oracle"]["duplicate_effect"]) for trial in trials
-        ),
-        "model_calls": sum(int(trial["model_calls"]) for trial in trials),
-        "p50_runtime_s": round(statistics.median(runtimes), 3),
-        "p95_runtime_s": round(nearest_rank(0.95), 3),
-        "trials": trials,
-    }
-    out.write_text(
-        json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    result = _campaign_result(
+        conditions,
+        trials,
+        stopped_early=stopped_early,
     )
+    _write_campaign_result(out, result)
     return result
 
 
@@ -1368,39 +1558,7 @@ def main() -> int:
         result = run(args.container, args.oracle_root.resolve(), args.output, work)
     except Exception as exc:  # noqa: BLE001 - retain bounded harness failure
         traceback.print_exc()
-        extracted = traceback.extract_tb(exc.__traceback__)
-        failure_frame = extracted[-1] if extracted else None
-        result = {
-            "schema_version": "openadapt.rdp-multiapp-results.v1",
-            "accepted_subset": False,
-            "full_campaign_complete": False,
-            "full_campaign_pending_conditions": [
-                condition["id"]
-                for condition in json.loads(
-                    Path(__file__)
-                    .with_name("campaign.json")
-                    .read_text(encoding="utf-8")
-                )["conditions"]
-            ],
-            "run_count": 0,
-            "stopped_early": True,
-            "harness_failure": {
-                "exception_type": type(exc).__name__,
-                "stage": "campaign_execution",
-                "source": (
-                    f"{Path(failure_frame.filename).name}:{failure_frame.lineno}"
-                    if failure_frame is not None
-                    else None
-                ),
-                "function": failure_frame.name if failure_frame is not None else None,
-            },
-            "trials": [],
-        }
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(
-            json.dumps(result, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
+        result = _retain_harness_failure(args.output, exc)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if result["accepted_subset"] else 1
 

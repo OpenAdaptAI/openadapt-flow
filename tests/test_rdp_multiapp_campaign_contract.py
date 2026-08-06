@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).parents[1]
 
@@ -205,6 +208,148 @@ def test_campaign_completion_requires_every_trial_for_every_condition() -> None:
     )
     assert complete["full_campaign_complete"] is True
     assert complete["full_campaign_pending_conditions"] == []
+
+
+def test_partial_campaign_checkpoint_cannot_be_accepted(tmp_path: Path) -> None:
+    from benchmark.rdp_multiapp.run_qualification import (
+        _campaign_result,
+        _write_campaign_result,
+    )
+
+    trial = {
+        "condition": "healthy",
+        "passed": True,
+        "runtime_s": 1.25,
+        "runtime_success": True,
+        "model_calls": 0,
+        "safe_halt": False,
+        "silent_incorrect_success": False,
+        "over_halt": False,
+        "oracle": {
+            "all_effects_ok": True,
+            "wrong_record_write": False,
+            "duplicate_effect": False,
+        },
+    }
+    result = _campaign_result(
+        ("healthy", "drift"),
+        [trial],
+        stopped_early=False,
+    )
+    out = tmp_path / "results.json"
+    _write_campaign_result(out, result)
+
+    retained = json.loads(out.read_text(encoding="utf-8"))
+    assert retained["run_count"] == 1
+    assert retained["verified_outcomes"] == 1
+    assert retained["accepted_subset"] is False
+    assert retained["full_campaign_pending_conditions"] == ["healthy", "drift"]
+
+
+def test_campaign_trial_watchdog_interrupts_a_blocked_trial() -> None:
+    from benchmark.rdp_multiapp.run_qualification import (
+        CampaignTrialDeadlineExceeded,
+        _trial_watchdog,
+    )
+
+    with pytest.raises(CampaignTrialDeadlineExceeded):
+        with _trial_watchdog(0.01):
+            time.sleep(0.2)
+
+
+def test_trial_deadline_after_input_requires_reconciliation(monkeypatch) -> None:
+    from benchmark.rdp_multiapp import run_qualification as campaign
+
+    oracle = {
+        "no_consequential_input": False,
+        "input_counts": {"save_appointment": 1},
+        "all_effects_ok": False,
+        "wrong_record_write": False,
+        "duplicate_effect": False,
+    }
+    monkeypatch.setattr(campaign, "_oracle_result", lambda _root, _params: oracle)
+
+    trial = campaign._deadline_trial(
+        root=Path("/unused"),
+        condition="commit_then_timeout",
+        runtime_s=600.0,
+        timeout_s=600.0,
+    )
+
+    assert trial["passed"] is False
+    assert trial["runtime_success"] is False
+    assert trial["transaction_outcome"] == "RECONCILIATION_REQUIRED"
+    assert trial["save_delivery_calls"] == 1
+
+
+def test_trial_deadline_without_ledger_entry_still_requires_reconciliation(
+    monkeypatch,
+) -> None:
+    from benchmark.rdp_multiapp import run_qualification as campaign
+
+    oracle = {
+        "no_consequential_input": True,
+        "input_counts": {"save_appointment": 0},
+        "all_effects_ok": False,
+        "wrong_record_write": False,
+        "duplicate_effect": False,
+    }
+    monkeypatch.setattr(campaign, "_oracle_result", lambda _root, _params: oracle)
+
+    trial = campaign._deadline_trial(
+        root=Path("/unused"),
+        condition="healthy",
+        runtime_s=600.0,
+        timeout_s=600.0,
+    )
+
+    assert trial["passed"] is False
+    assert trial["transaction_outcome"] == "RECONCILIATION_REQUIRED"
+    assert trial["save_delivery_calls"] == 0
+
+
+def test_later_harness_failure_preserves_prior_trial_evidence(tmp_path: Path) -> None:
+    from benchmark.rdp_multiapp.run_qualification import (
+        _campaign_result,
+        _retain_harness_failure,
+        _write_campaign_result,
+    )
+
+    trial = {
+        "condition": "healthy",
+        "passed": True,
+        "runtime_s": 1.25,
+        "runtime_success": True,
+        "model_calls": 0,
+        "safe_halt": False,
+        "silent_incorrect_success": False,
+        "over_halt": False,
+        "oracle": {
+            "all_effects_ok": True,
+            "wrong_record_write": False,
+            "duplicate_effect": False,
+        },
+    }
+    checkpoint = _campaign_result(
+        ("healthy",),
+        [dict(trial) for _ in range(3)],
+        stopped_early=False,
+    )
+    assert checkpoint["accepted_subset"] is True
+    out = tmp_path / "results.json"
+    _write_campaign_result(out, checkpoint)
+
+    try:
+        raise RuntimeError("later campaign failure")
+    except RuntimeError as exc:
+        retained = _retain_harness_failure(out, exc)
+
+    assert retained["run_count"] == 3
+    assert len(retained["trials"]) == 3
+    assert retained["accepted_subset"] is False
+    assert retained["stopped_early"] is True
+    assert retained["harness_failure"]["exception_type"] == "RuntimeError"
+    assert json.loads(out.read_text(encoding="utf-8")) == retained
 
 
 def test_campaign_compilation_is_bound_to_external_rdp(tmp_path: Path) -> None:

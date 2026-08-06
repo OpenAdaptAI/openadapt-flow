@@ -772,6 +772,21 @@ def test_identity_armed_remote_click_retains_closed_guarded_actuation(
     assert backend.actions == [("click", 110, 105, False)]
 
 
+def test_identity_armed_browser_step_does_not_change_business_risk():
+    """Identity metadata alone must not make a reversible browser step a write."""
+
+    step = click_step(risk="reversible", ocr_text="Details")
+    step.identity_armed = True
+    assert step.anchor is not None
+    step.anchor.context_text = "Expected record"
+    workflow = Workflow(name="wf", surface="web", steps=[step])
+    replayer = Replayer(FakeBackend(), vision=FakeVision())
+
+    assert replayer._step_is_consequential(step, workflow) is False
+    assert replayer._step_needs_consequential_revalidation(step, workflow) is False
+    assert replayer._requires_atomic_identity_pointer(step, workflow) is False
+
+
 def test_consequential_lease_click_still_refuses_a_changed_frame(bundle, run_dir):
     """The lease is the safety property: a changed frame must stop delivery."""
     backend = PixelOnlyRemoteBackend()

@@ -7412,13 +7412,38 @@ class Replayer:
 
     def _step_is_consequential(self, step: Step, workflow: Workflow) -> bool:
         authorization = self.governed_authorization
+        return is_consequential(step, workflow) or (
+            authorization is not None
+            and authorization.requires_verified_identity(step.id)
+        )
+
+    def _step_requires_remote_identity_binding(
+        self, step: Step, workflow: Workflow
+    ) -> bool:
+        """Whether an external opaque-remote step needs an identity lease.
+
+        ``identity_armed`` says that the remote action must remain bound to the
+        identity that was verified on the exact live frame. It does not change
+        the business-risk classification of the action on browser or native
+        surfaces.
+        """
+
         return (
-            step.identity_armed
-            or is_consequential(step, workflow)
-            or (
-                authorization is not None
-                and authorization.requires_verified_identity(step.id)
-            )
+            step.identity_armed is True
+            and workflow.surface in ("rdp", "citrix")
+            and workflow.execution_mode == "external"
+            and isinstance(self.backend, RemoteActuationBackend)
+        )
+
+    def _step_requires_remote_guarded_actuation(
+        self, step: Step, workflow: Workflow
+    ) -> bool:
+        """Whether a remote input edge must use the fresh-frame guard path."""
+
+        return isinstance(self.backend, RemoteActuationBackend) and (
+            self._step_is_consequential(step, workflow)
+            or self._step_requires_remote_identity_binding(step, workflow)
+            or self.qualification_fault_driver is not None
         )
 
     def _selection_contract_error(
@@ -7504,10 +7529,11 @@ class Replayer:
             # fresh remote lease for those actions only during the fault run,
             # so ordinary demo replay keeps its reversible fast path.
             return True
-        return self._step_is_consequential(step, workflow) and (
-            isinstance(self.backend, RemoteActuationBackend)
-            or self._step_has_identity_contract(step, workflow)
-        )
+        if self._step_requires_remote_guarded_actuation(step, workflow):
+            return True
+        return self._step_is_consequential(
+            step, workflow
+        ) and self._step_has_identity_contract(step, workflow)
 
     def _requires_atomic_identity_pointer(self, step: Step, workflow: Workflow) -> bool:
         """Whether a pointer edge may not cross an unleased identity boundary.
@@ -7528,7 +7554,10 @@ class Replayer:
                 ActionKind.TYPE,
                 ActionKind.SELECT_OPTION,
             )
-            and self._step_is_consequential(step, workflow)
+            and (
+                self._step_is_consequential(step, workflow)
+                or self._step_requires_remote_identity_binding(step, workflow)
+            )
             and self._step_has_identity_contract(step, workflow)
         )
 
@@ -7545,7 +7574,10 @@ class Replayer:
                 ActionKind.TYPE,
                 ActionKind.SELECT_OPTION,
             )
-            and self._step_is_consequential(step, workflow)
+            and (
+                self._step_is_consequential(step, workflow)
+                or self._step_requires_remote_identity_binding(step, workflow)
+            )
             and self._step_has_identity_contract(step, workflow)
         )
 
@@ -7732,7 +7764,10 @@ class Replayer:
         )
         focused_element_backend = (
             arm_keyboard
-            and self._step_is_consequential(step, workflow)
+            and (
+                self._step_is_consequential(step, workflow)
+                or self._step_requires_remote_identity_binding(step, workflow)
+            )
             and isinstance(self.backend, RemoteActuationBackend)
             and isinstance(self.backend, FocusedElementActuationLeaseBackend)
         )
@@ -8615,11 +8650,8 @@ class Replayer:
                 result.delivery_receipt = delivery_receipt
                 result.actuation = "uia" if delivery_receipt.native else "dom"
             else:
-                remote_consequential = isinstance(
-                    self.backend, RemoteActuationBackend
-                ) and (
-                    self._step_is_consequential(step, workflow)
-                    or self.qualification_fault_driver is not None
+                remote_consequential = self._step_requires_remote_guarded_actuation(
+                    step, workflow
                 )
                 typed_remote = isinstance(
                     self.backend,
@@ -8740,11 +8772,8 @@ class Replayer:
             requires_atomic_identity = self._requires_atomic_identity_pointer(
                 step, workflow
             )
-            remote_consequential = isinstance(
-                self.backend, RemoteActuationBackend
-            ) and (
-                self._step_is_consequential(step, workflow)
-                or self.qualification_fault_driver is not None
+            remote_consequential = self._step_requires_remote_guarded_actuation(
+                step, workflow
             )
             if remote_consequential and not isinstance(
                 self.backend,
@@ -8911,16 +8940,9 @@ class Replayer:
                     ),
                 )
                 result.actuation = "dom"
-            elif (
-                isinstance(self.backend, RemoteActuationBackend)
-                and (
-                    self._step_is_consequential(step, workflow)
-                    or self.qualification_fault_driver is not None
-                )
-                and (
-                    isinstance(self.backend, GuardedRemotePointerActionBackend)
-                    or self._typed_remote_receipt_required()
-                )
+            elif self._step_requires_remote_guarded_actuation(step, workflow) and (
+                isinstance(self.backend, GuardedRemotePointerActionBackend)
+                or self._typed_remote_receipt_required()
             ):
                 if not isinstance(
                     self.backend,

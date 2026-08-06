@@ -35,7 +35,7 @@ docker run --rm --name oaflow-rdp-multiapp \
   oaflow-rdp-multiapp:latest
 ```
 
-Run the implemented subset after the container is ready:
+Run the complete campaign after the container is ready:
 
 ```bash
 python benchmark/rdp_multiapp/run_qualification.py \
@@ -44,6 +44,6 @@ python benchmark/rdp_multiapp/run_qualification.py \
 ```
 
 The runner uses the same `DockerX11RdpTransport` and `FreeRDPBackend` contract
-as `benchmark/rdp_ladder`. The first subset runs healthy, row-reordered,
-wrong-record, and focus-theft conditions. The result cannot describe the full
-campaign as complete until every condition in `campaign.json` has run.
+as `benchmark/rdp_ladder`. It runs all nine conditions in `campaign.json` three
+times. The result cannot describe the campaign as complete unless all 27 trials
+run and the aggregate acceptance contract passes.

@@ -167,6 +167,22 @@ def _principal(*roles: str) -> BusinessDecisionPrincipal:
     )
 
 
+@pytest.mark.parametrize(
+    "principal_update",
+    [
+        {"operator_ref": "   "},
+        {"operator_ref": " operator:alice "},
+        {"authenticated_by": "   "},
+        {"authenticated_by": " test-aal2-route "},
+    ],
+)
+def test_business_decision_principal_requires_exact_attribution(principal_update):
+    payload = _principal("operator").model_dump(mode="json")
+    payload.update(principal_update)
+    with pytest.raises(ValueError, match="principal attribution"):
+        BusinessDecisionPrincipal.model_validate(payload)
+
+
 def _pause(
     tmp_path,
     *,
@@ -233,6 +249,48 @@ def test_business_decision_contract_is_closed_and_legacy_state_stays_compatible(
 
 
 @pytest.mark.parametrize(
+    "contract_update",
+    [
+        {"question": "   "},
+        {
+            "options": (
+                BusinessDecisionOption(
+                    id="one", label="Approve", value="one", target="a"
+                ),
+                BusinessDecisionOption(
+                    id="two", label=" approve ", value="two", target="b"
+                ),
+            )
+        },
+        {
+            "options": (
+                BusinessDecisionOption(
+                    id="one", label="Approve", value=" ", target="a"
+                ),
+                BusinessDecisionOption(
+                    id="two", label="Reject", value="two", target="b"
+                ),
+            )
+        },
+    ],
+)
+def test_decision_contract_refuses_blank_or_indistinguishable_choices(
+    contract_update,
+):
+    payload = _decision_spec(required_evidence=False).model_dump(mode="json")
+    payload.update(contract_update)
+    with pytest.raises(ValueError):
+        BusinessDecisionSpec.model_validate(payload)
+
+
+def test_decision_contract_refuses_role_that_cannot_fit_signed_receipt():
+    payload = _decision_spec(required_evidence=False).model_dump(mode="json")
+    payload["authorized_roles"] = ["r" * 129]
+    with pytest.raises(ValueError, match="at most 128"):
+        BusinessDecisionSpec.model_validate(payload)
+
+
+@pytest.mark.parametrize(
     "weak_revalidation",
     [
         Predicate(
@@ -284,6 +342,31 @@ def test_bundle_requires_declared_output_and_exact_option_branch_mapping():
     )
     mismatch_codes = {issue.code for issue in validate_workflow(mismatched).issues}
     assert "business_decision_output_choices_mismatch" in mismatch_codes
+
+
+def test_bundle_rejects_decision_ids_that_cannot_fit_runtime_request():
+    workflow = _decision_workflow()
+    assert workflow.program is not None
+    long_id = "d" * 129
+    decision = workflow.program.states.pop("review")
+    decision.id = long_id
+    workflow.program.states[long_id] = decision
+    workflow.program.entry = long_id
+
+    issue_codes = {issue.code for issue in validate_workflow(workflow).issues}
+
+    assert "business_decision_state_id_too_long" in issue_codes
+
+
+def test_bundle_rejects_subflow_id_that_cannot_fit_decision_scope():
+    workflow = _decision_workflow()
+    assert workflow.program is not None
+    long_name = "g" * 129
+    workflow.subflows[long_name] = workflow.program
+
+    issue_codes = {issue.code for issue in validate_workflow(workflow).issues}
+
+    assert "business_decision_graph_id_too_long" in issue_codes
 
 
 def test_learned_repair_cannot_change_certified_decision_contract():
@@ -343,17 +426,13 @@ def test_learned_repair_cannot_add_bypass_edge_into_decision_region(
 
     report = program_regression_gate(active, candidate)
     assert report.passed is False
-    assert any(
-        failure_fragment in failure for failure in report.semantic_failures
-    )
+    assert any(failure_fragment in failure for failure in report.semantic_failures)
 
 
 def test_learned_repair_cannot_rewrite_decision_predecessor_to_answer_branch():
     active = _decision_program_with_predecessor()
     candidate = active.model_copy(deep=True)
-    candidate.states["prepare"].transitions = [
-        Transition(target="rejected_action")
-    ]
+    candidate.states["prepare"].transitions = [Transition(target="rejected_action")]
 
     report = program_regression_gate(active, candidate)
     assert report.passed is False
@@ -398,8 +477,7 @@ def test_learned_repair_cannot_add_success_exit_before_required_decision():
     report = program_regression_gate(active, candidate)
     assert report.passed is False
     assert any(
-        "successful terminal" in failure
-        and "without the signed decision" in failure
+        "successful terminal" in failure and "without the signed decision" in failure
         for failure in report.semantic_failures
     )
 
@@ -416,6 +494,115 @@ def test_learned_repair_cannot_invent_new_business_decision_policy():
     assert report.passed is False
     assert any(
         "learned repair cannot invent new normative human authority" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_bypass_decision_inside_called_subflow():
+    workflow = _decision_workflow()
+    assert workflow.program is not None
+    main = ProgramGraph(
+        entry="prepare",
+        states={
+            "prepare": State(
+                id="prepare",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="prepare",
+                    intent="prepare called review",
+                    action=ActionKind.WAIT,
+                ),
+                transitions=[Transition(target="call_review")],
+            ),
+            "call_review": State(
+                id="call_review",
+                kind=StateKind.SUBFLOW_CALL,
+                subflow="review_flow",
+                transitions=[Transition(target="commit")],
+            ),
+            "commit": State(
+                id="commit",
+                kind=StateKind.ACTION,
+                step=Step(
+                    id="commit",
+                    intent="commit selected path",
+                    action=ActionKind.KEY,
+                    key="ENTER",
+                ),
+                transitions=[Transition(target="done")],
+            ),
+            "done": State(id="done", kind=StateKind.TERMINAL, outcome="success"),
+        },
+    )
+    candidate = main.model_copy(deep=True)
+    candidate.states["prepare"].transitions.append(
+        Transition(
+            target="commit",
+            guard=Predicate(
+                kind=PredicateKind.PARAM_EQUALS,
+                param="bypass",
+                value="yes",
+            ),
+        )
+    )
+
+    report = program_regression_gate(
+        main,
+        candidate,
+        active_subflows={"review_flow": workflow.program},
+        candidate_subflows={"review_flow": workflow.program.model_copy(deep=True)},
+    )
+
+    assert report.passed is False
+    assert any("protected state" in failure for failure in report.semantic_failures)
+
+
+def test_learned_repair_cannot_change_action_authorized_by_decision():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    step = candidate.states["accepted_action"].step
+    assert step is not None
+    candidate.states["accepted_action"].step = step.model_copy(update={"key": "DELETE"})
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is False
+    assert any(
+        "business decision semantics changed" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_replace_authorized_action_payload():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    step = candidate.states["accepted_action"].step
+    assert step is not None
+    candidate.states["accepted_action"].step = step.model_copy(
+        update={"action": ActionKind.TYPE, "key": None, "text": "changed payload"}
+    )
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is False
+    assert any(
+        "business decision semantics changed" in failure
+        for failure in report.semantic_failures
+    )
+
+
+def test_learned_repair_cannot_reroute_authorized_branch_after_action():
+    active = _decision_program_with_predecessor()
+    candidate = active.model_copy(deep=True)
+    candidate.states["accepted_action"].transitions = [
+        Transition(target="rejected_action")
+    ]
+
+    report = program_regression_gate(active, candidate)
+
+    assert report.passed is False
+    assert any(
+        "business decision semantics changed" in failure
         for failure in report.semantic_failures
     )
 
@@ -461,6 +648,54 @@ def test_decision_refuses_expiry_and_missing_local_evidence(tmp_path):
     (tmp_path / "run" / ".business_decisions" / "evidence" / f"{digest}.bin").unlink()
     with pytest.raises(BusinessDecisionRefused, match="unavailable locally"):
         store.submit(submission, principal=_principal("operator"))
+
+
+def test_expired_unanswered_request_is_renewed_for_same_durable_pause(tmp_path):
+    workflow, store, _backend, request = _pause(tmp_path)
+    checkpoint_store = CheckpointStore(tmp_path / "run")
+    pending = checkpoint_store.read_pending()
+    manifest = checkpoint_store.read_manifest()
+    assert pending is not None
+    assert manifest is not None
+    assert workflow.program is not None
+    spec = workflow.program.states["review"].decision
+    assert spec is not None
+    old_request_path = store._request_path(store.read_active_request()[1])
+    renewed_at = datetime.fromisoformat(request.expires_at) + timedelta(seconds=1)
+
+    renewed, renewed_sha256 = store.issue(
+        pending=pending,
+        manifest=manifest,
+        workflow=workflow,
+        graph_id="__program__",
+        state_id="review",
+        frames=list(pending.program_frames),
+        params=dict(pending.params),
+        spec=spec,
+        governed_runtime_inputs_digest=None,
+        now=renewed_at,
+    )
+
+    assert renewed.digest != request.digest
+    assert renewed.supersedes_request_digest == request.digest
+    assert renewed.supersedes_request_sha256 == old_request_path.stem
+    assert old_request_path.is_file()
+    assert store.authenticate_request(old_request_path.stem) == request
+    assert store.read_active_request() == (renewed, renewed_sha256)
+
+    with pytest.raises(BusinessDecisionRefused, match="another decision request"):
+        store.submit(
+            _submission(store, request),
+            principal=_principal("operator"),
+            now=renewed_at + timedelta(seconds=1),
+        )
+
+    receipt = store.submit(
+        _submission(store, renewed),
+        principal=_principal("operator"),
+        now=renewed_at + timedelta(seconds=1),
+    )
+    assert receipt.request_digest == renewed.digest
 
 
 def test_answer_expires_before_delayed_resume(tmp_path):
@@ -525,6 +760,38 @@ def test_submission_recovers_after_answer_pointer_write(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_atomic_write", original_write)
     receipt = store.submit(submission, principal=_principal("operator"))
     assert receipt.option_id == "accept"
+    assert store.read_receipt(request.digest) is not None
+
+
+def test_signed_receipt_prevents_conflicting_answer_after_pointer_write_crash(
+    tmp_path, monkeypatch
+):
+    _workflow, store, _backend, request = _pause(tmp_path)
+    accepted = _submission(store, request, "accept")
+    original_write = store._atomic_write
+
+    def interrupt_before_answer_pointer(path, payload):
+        if path.parent == store.answers_dir:
+            raise RuntimeError("simulated process termination before pointer")
+        original_write(path, payload)
+
+    monkeypatch.setattr(store, "_atomic_write", interrupt_before_answer_pointer)
+    with pytest.raises(RuntimeError, match="before pointer"):
+        store.submit(accepted, principal=_principal("operator"))
+
+    assert len(list(store.receipts_dir.glob("*.json"))) == 1
+    assert not store._answer_path(request.digest).exists()
+    monkeypatch.setattr(store, "_atomic_write", original_write)
+
+    rejected = _submission(store, request, "reject")
+    with pytest.raises(BusinessDecisionRefused, match="different answer"):
+        store.submit(rejected, principal=_principal("operator"))
+    assert len(list(store.receipts_dir.glob("*.json"))) == 1
+    assert not store._answer_path(request.digest).exists()
+
+    recovered = store.submit(accepted, principal=_principal("operator"))
+    assert recovered.option_id == "accept"
+    assert len(list(store.receipts_dir.glob("*.json"))) == 1
     assert store.read_receipt(request.digest) is not None
 
 
@@ -658,6 +925,26 @@ def test_signed_decision_selects_one_branch_then_normal_action_gates_run(tmp_pat
     )
     assert trace is not None
     assert [item.state_id for item in trace] == ["accepted_action"]
+
+    reported_params = dict(report.params)
+    report.params["review_outcome"] = "rejected"
+    assert (
+        _program_action_trace(
+            workflow,
+            report.visited_states,
+            runtime_params=report.params,
+            transition_evidence=report.program_transition_evidence,
+            business_decision_evidence=report.business_decision_evidence,
+            transition_evidence_root=tmp_path / "run",
+            transition_predicate_vision=resumed_vision,
+            governed_runtime_inputs_digest=report.governed_runtime_inputs_digest,
+            run_id_sha256=report.run_id_sha256,
+            workflow_contract_digest=report.workflow_contract_sha256,
+            reported_results=report.results,
+        )
+        is None
+    )
+    report.params = reported_params
 
     forged = report.business_decision_evidence[0].model_copy(
         update={"target_state_id": "rejected_action"}

@@ -749,6 +749,19 @@ def _validate_state_payload(
                 )
             )
     elif kind is StateKind.BUSINESS_DECISION:
+        if len(state.id) > 128:
+            issues.append(
+                ValidationIssue(
+                    category="structure",
+                    code="business_decision_state_id_too_long",
+                    graph=graph_name,
+                    state_id=state.id,
+                    message=(
+                        "BUSINESS_DECISION state id exceeds the signed request "
+                        "and receipt limit of 128 characters"
+                    ),
+                )
+            )
         if state.decision is None:
             issues.append(
                 ValidationIssue(
@@ -1061,6 +1074,49 @@ def validate_workflow(workflow: "Workflow") -> ValidationReport:
     if workflow.program is not None:
         known_subflows = set(workflow.subflows.keys())
         known_params = set(workflow.params) | set(workflow.param_specs)
+        has_business_decision = any(
+            state.kind is StateKind.BUSINESS_DECISION
+            for graph in (workflow.program, *workflow.subflows.values())
+            for state in graph.states.values()
+        )
+        if has_business_decision:
+            for name in workflow.subflows:
+                if not name or len(name) > 128:
+                    issues.append(
+                        ValidationIssue(
+                            category="structure",
+                            code="business_decision_graph_id_too_long",
+                            graph=f"subflow:{name}",
+                            message=(
+                                "subflow id cannot enter a signed business "
+                                "decision scope; it must contain 1 to 128 "
+                                "characters"
+                            ),
+                        )
+                    )
+            for scope_name, graph in (
+                ("program", workflow.program),
+                *(
+                    (f"subflow:{name}", subflow)
+                    for name, subflow in workflow.subflows.items()
+                ),
+            ):
+                for state in graph.states.values():
+                    if state.kind is not StateKind.LOOP or state.loop is None:
+                        continue
+                    if len(state.id) > 128 or len(state.loop.relation) > 128:
+                        issues.append(
+                            ValidationIssue(
+                                category="structure",
+                                code="business_decision_loop_scope_too_long",
+                                graph=scope_name,
+                                state_id=state.id,
+                                message=(
+                                    "loop state id and relation must fit the "
+                                    "128-character signed decision scope"
+                                ),
+                            )
+                        )
         _validate_graph(
             workflow.program,
             "program",

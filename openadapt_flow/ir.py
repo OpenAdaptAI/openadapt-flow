@@ -1169,7 +1169,7 @@ class BusinessDecisionOption(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     label: str = Field(min_length=1, max_length=240)
     value: str = Field(min_length=1, max_length=512)
-    target: str = Field(min_length=1, max_length=256)
+    target: str = Field(min_length=1, max_length=128)
     required_evidence: tuple[str, ...] = ()
 
 
@@ -1196,20 +1196,40 @@ class BusinessDecisionSpec(BaseModel):
 
     @model_validator(mode="after")
     def _closed_contract(self) -> "BusinessDecisionSpec":
+        if not self.question.strip() or self.question.strip() != self.question:
+            raise ValueError("business decision question must be trimmed and non-empty")
         roles = tuple(role.strip() for role in self.authorized_roles)
         if (
             any(not role for role in roles)
             or roles != self.authorized_roles
             or len(set(roles)) != len(roles)
+            or any(len(role) > 128 for role in roles)
         ):
-            raise ValueError("business decision roles must be unique and non-empty")
+            raise ValueError(
+                "business decision roles must be unique, non-empty, and at "
+                "most 128 characters"
+            )
         requirement_ids = tuple(item.id for item in self.evidence_requirements)
         if len(set(requirement_ids)) != len(requirement_ids):
             raise ValueError("business decision evidence ids must be unique")
         option_ids = tuple(item.id for item in self.options)
+        option_labels = tuple(item.label.strip() for item in self.options)
         option_values = tuple(item.value for item in self.options)
         if len(set(option_ids)) != len(option_ids):
             raise ValueError("business decision option ids must be unique")
+        if (
+            any(not label for label in option_labels)
+            or option_labels != tuple(item.label for item in self.options)
+            or len({label.casefold() for label in option_labels}) != len(option_labels)
+        ):
+            raise ValueError(
+                "business decision option labels must be trimmed, non-empty, "
+                "and unique without case"
+            )
+        if any(not value.strip() or value.strip() != value for value in option_values):
+            raise ValueError(
+                "business decision option values must be trimmed and non-empty"
+            )
         if len(set(option_values)) != len(option_values):
             raise ValueError("business decision option values must be unique")
         known = set(requirement_ids)
@@ -1224,10 +1244,7 @@ class BusinessDecisionSpec(BaseModel):
                     f"business decision option {option.id!r} names unknown evidence"
                 )
         if not any(
-            (
-                predicate.kind is PredicateKind.TEXT_PRESENT
-                and bool(predicate.text)
-            )
+            (predicate.kind is PredicateKind.TEXT_PRESENT and bool(predicate.text))
             or (
                 predicate.kind is PredicateKind.ANCHOR_RESOLVES
                 and predicate.anchor is not None
@@ -2579,7 +2596,7 @@ class BusinessDecisionEvidence(BaseModel):
     option_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     output_param: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$")
     output_value: str = Field(min_length=1, max_length=512)
-    target_state_id: str = Field(min_length=1, max_length=256)
+    target_state_id: str = Field(min_length=1, max_length=128)
     operator_ref: str = Field(min_length=1, max_length=256)
     authorized_role: str = Field(min_length=1, max_length=128)
     authentication_context_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

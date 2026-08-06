@@ -427,7 +427,9 @@ def _program_action_trace(
     )
 
     if transition_predicate_vision is None:
-        import openadapt_flow.vision as transition_predicate_vision
+        from openadapt_flow import vision as default_transition_predicate_vision
+
+        transition_predicate_vision = default_transition_predicate_vision
 
     graphs = {"__program__": workflow.program, **workflow.subflows}
     state_owner: dict[str, str] = {}
@@ -1308,6 +1310,11 @@ def _program_action_trace(
     if cursor != len(visited_states) or (
         halted_at_step_id is not None and not halted_at_requested_action
     ):
+        return None
+    if business_decision_evidence and trace_base_params != dict(runtime_params or {}):
+        # Signed decision receipts are the authority for decision outputs.
+        # The run report cannot claim another value and then use that value to
+        # evaluate an action, identity, postcondition, or effect contract.
         return None
     return actions
 

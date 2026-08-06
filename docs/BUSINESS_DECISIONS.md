@@ -70,6 +70,20 @@ The request, receipt, and required evidence stay content-addressed inside the
 customer run directory. The run report carries digests and local inventory
 references. It does not carry the evidence bytes.
 
+The signed receipt is the write-ahead answer authority. If the runner stops
+after it writes the receipt but before it writes the answer pointer, restart
+recovers that exact receipt. It refuses a different answer and never signs two
+answers for one request. The submission lock is an operating-system advisory
+lock, so the kernel releases it when a process exits or is killed.
+
+If an unanswered request expires while the same durable pause is still active,
+the runner signs a new request. The new request binds the retained predecessor
+request by its digest and content hash. The old request stays in the local
+inventory for audit, but it is no longer active and cannot accept an answer.
+Issuance and submission use the same advisory lock, and submission checks the
+active pointer again while it owns that lock. Thus, a late answer cannot race a
+renewal and authorize the old request.
+
 ## Trust boundary
 
 `BusinessDecisionPrincipal` is an input from an authenticated operator route.

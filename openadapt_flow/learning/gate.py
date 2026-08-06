@@ -63,6 +63,7 @@ from openadapt_flow.ir import (
     HealEvent,
     Predicate,
     ProgramGraph,
+    State,
     StateKind,
     Step,
 )
@@ -245,6 +246,207 @@ def _gen(step: Optional[Step]) -> set[str]:
     return tokens
 
 
+def _state_gen(graph_name: str, state: State) -> set[str]:
+    """Tokens established after one state completes successfully."""
+
+    tokens = _gen(state.step if state.kind is StateKind.ACTION else None)
+    if state.kind is StateKind.BUSINESS_DECISION and state.decision is not None:
+        tokens.add(
+            _business_decision_token(
+                graph_name,
+                state.id,
+                state.decision.contract_sha256(),
+            )
+        )
+    return tokens
+
+
+def _decision_protected_state_contract(state: State) -> dict[str, object]:
+    """Return qualified state semantics while allowing locator repair only.
+
+    A learned repair can update visual locators in either action anchor. It
+    cannot change the action, inputs, postconditions, effects, risk, identity
+    metadata, or downstream control meaning that a signed answer authorizes.
+    """
+
+    payload: dict[str, object] = state.model_dump(mode="json")
+    step = payload.get("step")
+    if state.kind is StateKind.ACTION and isinstance(step, dict):
+        step.pop("anchor", None)
+        step.pop("drag_end_anchor", None)
+    return payload
+
+
+def _successful_return_summaries(
+    graphs: dict[str, ProgramGraph],
+) -> tuple[dict[str, bool], dict[str, set[str]]]:
+    """Compute tokens that every successful return from each graph establishes.
+
+    A subflow call executes its child before its own transition. The caller
+    therefore inherits only the token intersection over all successful child
+    returns. Iteration handles nested calls without mixing separate call sites.
+    """
+
+    can_return = {name: False for name in graphs}
+    # First solve only successful-return reachability. This Boolean fixed point
+    # is monotone: a nested call changes from non-returning to returning at most
+    # once. Token summaries are computed only after this call graph is stable,
+    # so they start from the conservative empty set.
+    for _ in range(len(graphs) + 1):
+        changed = False
+        for graph_name, graph in graphs.items():
+            if graph.entry not in graph.states:
+                continue
+            return_adjacency: dict[str, list[str]] = {
+                state_id: [] for state_id in graph.states
+            }
+            exits: set[str] = set()
+            for state_id, state in graph.states.items():
+                call_returns = bool(
+                    state.kind is not StateKind.SUBFLOW_CALL
+                    or (
+                        state.subflow is not None
+                        and state.subflow in graphs
+                        and can_return[state.subflow]
+                    )
+                )
+                if call_returns:
+                    return_adjacency[state_id].extend(
+                        transition.target
+                        for transition in state.transitions
+                        if transition.target in graph.states
+                    )
+                if state.kind is StateKind.TERMINAL:
+                    if (state.outcome or "success") == "success":
+                        exits.add(state_id)
+                elif not state.transitions and call_returns:
+                    exits.add(state_id)
+            return_reachable: set[str] = set()
+            stack = [graph.entry]
+            while stack:
+                node = stack.pop()
+                if node in return_reachable:
+                    continue
+                return_reachable.add(node)
+                stack.extend(
+                    successor
+                    for successor in return_adjacency.get(node, [])
+                    if successor not in return_reachable
+                )
+            if not can_return[graph_name] and bool(exits & return_reachable):
+                can_return[graph_name] = True
+                changed = True
+        if not changed:
+            break
+
+    summaries: dict[str, set[str]] = {name: set() for name in graphs}
+    token_count = sum(
+        1
+        for graph in graphs.values()
+        for state in graph.states.values()
+        if state.kind is StateKind.BUSINESS_DECISION and state.decision is not None
+    )
+    max_passes = len(graphs) * (token_count + 2) + 1
+    for _ in range(max_passes):
+        changed = False
+        for graph_name, graph in graphs.items():
+            if graph.entry not in graph.states:
+                continue
+            adjacency: dict[str, list[tuple[str, set[str]]]] = {
+                state_id: [] for state_id in graph.states
+            }
+            falloffs: dict[str, set[str]] = {}
+            terminals: set[str] = set()
+            for state_id, state in graph.states.items():
+                generated = _state_gen(graph_name, state)
+                call_returns = True
+                call_summary: set[str] = set()
+                if state.kind is StateKind.SUBFLOW_CALL:
+                    call_returns = bool(
+                        state.subflow is not None
+                        and state.subflow in graphs
+                        and can_return[state.subflow]
+                    )
+                    if call_returns and state.subflow is not None:
+                        call_summary = summaries[state.subflow]
+                continuation_tokens = generated | call_summary
+                if state.kind is not StateKind.SUBFLOW_CALL or call_returns:
+                    for transition in state.transitions:
+                        if transition.target not in graph.states:
+                            continue
+                        contribution = set(continuation_tokens)
+                        if transition.guard is not None:
+                            contribution.add(
+                                "cond::" + _predicate_key(transition.guard)
+                            )
+                        adjacency[state_id].append((transition.target, contribution))
+                if state.kind is StateKind.TERMINAL:
+                    if (state.outcome or "success") == "success":
+                        terminals.add(state_id)
+                elif not state.transitions and (
+                    state.kind is not StateKind.SUBFLOW_CALL or call_returns
+                ):
+                    falloffs[state_id] = continuation_tokens
+
+            reachable: set[str] = set()
+            stack = [graph.entry]
+            while stack:
+                node = stack.pop()
+                if node in reachable:
+                    continue
+                reachable.add(node)
+                stack.extend(
+                    successor
+                    for successor, _contribution in adjacency.get(node, [])
+                    if successor not in reachable
+                )
+            predecessors: dict[str, list[tuple[str, set[str]]]] = {
+                node: [] for node in reachable
+            }
+            for node in reachable:
+                for successor, contribution in adjacency.get(node, []):
+                    if successor in reachable:
+                        predecessors[successor].append((node, contribution))
+            must: dict[str, Optional[set[str]]] = {node: None for node in reachable}
+            must[graph.entry] = set()
+            dataflow_changed = True
+            while dataflow_changed:
+                dataflow_changed = False
+                for node in reachable:
+                    if node == graph.entry:
+                        continue
+                    incoming: Optional[set[str]] = None
+                    for predecessor, contribution in predecessors[node]:
+                        predecessor_in = must[predecessor]
+                        if predecessor_in is None:
+                            continue
+                        predecessor_out = predecessor_in | contribution
+                        incoming = (
+                            set(predecessor_out)
+                            if incoming is None
+                            else incoming & predecessor_out
+                        )
+                    if incoming is not None and must[node] != incoming:
+                        must[node] = incoming
+                        dataflow_changed = True
+
+            returns = [set(must[node] or set()) for node in terminals & reachable]
+            returns.extend(
+                set(must[node] or set()) | generated
+                for node, generated in falloffs.items()
+                if node in reachable
+            )
+            next_summary = set.intersection(*returns) if returns else set()
+            if next_summary != summaries[graph_name]:
+                summaries[graph_name] = next_summary
+                changed = True
+        if not changed:
+            return can_return, summaries
+    # The lattice above is finite and monotone. Fail closed if a future token
+    # kind breaks that assumption.
+    return {name: False for name in graphs}, {name: set() for name in graphs}
+
+
 def _analyze(
     main: ProgramGraph, subflows: Optional[dict[str, ProgramGraph]]
 ) -> _MustAnalysis:
@@ -252,13 +454,15 @@ def _analyze(
     reachable node, the guard tokens that MUST hold to reach it (a forward
     "available guards" dataflow: meet == set intersection over paths).
 
-    Subflow/loop dispatch edges are modeled conservatively: a ``subflow_call`` /
-    ``loop`` node connects to its target subflow's entry, so a write inside a
-    subflow inherits the caller's dominating guards. Cycles converge because the
-    meet only ever shrinks a node's must-set."""
+    Direct subflow calls use an interprocedural successful-return summary. Thus,
+    a decision or guard that every child return crosses also dominates the
+    caller continuation. Loop bodies do not contribute return tokens because a
+    loop can execute zero rows. Cycles converge because the meet only shrinks a
+    node's must-set."""
     graphs: dict[str, ProgramGraph] = {_MAIN: main}
     for name, g in (subflows or {}).items():
         graphs[name] = g
+    subflow_returns, subflow_summaries = _successful_return_summaries(graphs)
 
     node_step: dict[str, Optional[Step]] = {}
     # adjacency: node -> list of (successor_node, edge_contribution_tokens)
@@ -272,22 +476,25 @@ def _analyze(
             node_step[n] = step
             if step is not None and _step_armed(step):
                 role_to_id.setdefault("id::" + _role_str(step), step.id)
-            base_gen = _gen(step)
-            if st.kind is StateKind.BUSINESS_DECISION and st.decision is not None:
-                base_gen.add(
-                    _business_decision_token(
-                        gname,
-                        st.id,
-                        st.decision.contract_sha256(),
-                    )
+            base_gen = _state_gen(gname, st)
+            continuation_gen = set(base_gen)
+            call_returns = True
+            if st.kind is StateKind.SUBFLOW_CALL:
+                call_returns = bool(
+                    st.subflow is not None
+                    and st.subflow in graphs
+                    and subflow_returns[st.subflow]
                 )
+                if call_returns and st.subflow is not None:
+                    continuation_gen.update(subflow_summaries[st.subflow])
             outs: list[tuple[str, set[str]]] = []
-            for t in st.transitions:
-                if t.target in g.states:
-                    contrib = set(base_gen)
-                    if t.guard is not None:
-                        contrib.add("cond::" + _predicate_key(t.guard))
-                    outs.append((_node_id(gname, t.target), contrib))
+            if st.kind is not StateKind.SUBFLOW_CALL or call_returns:
+                for t in st.transitions:
+                    if t.target in g.states:
+                        contrib = set(continuation_gen)
+                        if t.guard is not None:
+                            contrib.add("cond::" + _predicate_key(t.guard))
+                        outs.append((_node_id(gname, t.target), contrib))
             if (
                 st.kind is StateKind.SUBFLOW_CALL
                 and st.subflow is not None
@@ -537,14 +744,11 @@ def _semantic_failures(
         # merge state even when each direct option target still has its exact
         # signed edge.
         protected_nodes = {
-            node
-            for node in a_an.reachable
-            if token in a_an.must_in.get(node, set())
+            node for node in a_an.reachable if token in a_an.must_in.get(node, set())
         }
         for protected_node in sorted(protected_nodes):
-            if (
-                protected_node not in c_an.reachable
-                or token not in c_an.must_in.get(protected_node, set())
+            if protected_node not in c_an.reachable or token not in c_an.must_in.get(
+                protected_node, set()
             ):
                 graph_name, state_id = protected_node.split("\x00", 1)
                 _append_once(
@@ -552,6 +756,33 @@ def _semantic_failures(
                     f"{location[0]!r}/{location[1]!r}: protected state "
                     f"{graph_name!r}/{state_id!r} is missing, unreachable, or "
                     "can be reached without the signed decision"
+                )
+                continue
+            graph_name, state_id = protected_node.split("\x00", 1)
+            active_protected_graph = active_graphs.get(graph_name)
+            candidate_protected_graph = candidate_graphs.get(graph_name)
+            active_protected_state = (
+                active_protected_graph.states.get(state_id)
+                if active_protected_graph is not None
+                else None
+            )
+            candidate_protected_state = (
+                candidate_protected_graph.states.get(state_id)
+                if candidate_protected_graph is not None
+                else None
+            )
+            if (
+                active_protected_state is None
+                or candidate_protected_state is None
+                or _decision_protected_state_contract(active_protected_state)
+                != _decision_protected_state_contract(candidate_protected_state)
+            ):
+                _append_once(
+                    "business decision semantics changed at "
+                    f"{graph_name!r}/{state_id!r}: a signed option can only "
+                    "receive locator or anchor repair; action inputs, effects, "
+                    "risk, postconditions, and downstream control require "
+                    "requalification"
                 )
 
         # If every successful terminal was decision-controlled before repair,

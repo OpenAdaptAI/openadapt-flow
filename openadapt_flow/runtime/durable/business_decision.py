@@ -116,11 +116,17 @@ class BusinessDecisionPrincipal(BaseModel):
     def _roles_are_closed(self) -> "BusinessDecisionPrincipal":
         stripped = tuple(role.strip() for role in self.roles)
         if (
-            any(not role for role in stripped)
+            not self.operator_ref.strip()
+            or self.operator_ref.strip() != self.operator_ref
+            or not self.authenticated_by.strip()
+            or self.authenticated_by.strip() != self.authenticated_by
+            or any(not role for role in stripped)
             or stripped != self.roles
             or len(set(self.roles)) != len(self.roles)
         ):
-            raise ValueError("principal roles must be unique and non-empty")
+            raise ValueError(
+                "principal attribution and roles must be trimmed, unique, and non-empty"
+            )
         return self
 
 
@@ -147,6 +153,12 @@ class BusinessDecisionRequest(BaseModel):
     control_frames_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     bound_params_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: BusinessDecisionSpec
+    supersedes_request_sha256: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    supersedes_request_digest: Optional[str] = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
     issued_at: str
     expires_at: str
     signature: str = Field(pattern=r"^hmac-sha256:[0-9a-f]{64}$")
@@ -160,6 +172,12 @@ class BusinessDecisionRequest(BaseModel):
         expires = _parse(self.expires_at)
         if expires != issued + timedelta(seconds=self.decision.expires_after_s):
             raise ValueError("business decision request expiry differs from contract")
+        if (self.supersedes_request_sha256 is None) != (
+            self.supersedes_request_digest is None
+        ):
+            raise ValueError(
+                "business decision renewal requires both predecessor bindings"
+            )
         return self
 
     @property
@@ -216,7 +234,7 @@ class BusinessDecisionReceipt(BaseModel):
     option_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
     output_param: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$")
     output_value: str = Field(min_length=1, max_length=512)
-    target_state_id: str = Field(min_length=1, max_length=256)
+    target_state_id: str = Field(min_length=1, max_length=128)
     evidence_artifact_sha256s: dict[str, str] = Field(default_factory=dict)
     operator_ref: str = Field(min_length=1, max_length=256)
     authorized_role: str = Field(min_length=1, max_length=128)
@@ -398,7 +416,9 @@ class BusinessDecisionStore:
 
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     msvcrt.locking(  # type: ignore[attr-defined]
-                        descriptor, msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
+                        descriptor,
+                        msvcrt.LK_NBLCK,  # type: ignore[attr-defined]
+                        1,
                     )
                 else:
                     import fcntl
@@ -421,7 +441,9 @@ class BusinessDecisionStore:
 
                     os.lseek(descriptor, 0, os.SEEK_SET)
                     msvcrt.locking(  # type: ignore[attr-defined]
-                        descriptor, msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                        descriptor,
+                        msvcrt.LK_UNLCK,  # type: ignore[attr-defined]
+                        1,
                     )
                 else:
                     import fcntl
@@ -502,6 +524,11 @@ class BusinessDecisionStore:
         receipt: BusinessDecisionReceipt,
         receipt_sha256: str,
     ) -> None:
+        retained = self._receipts_for_request(request.digest)
+        if len(retained) != 1 or retained[0][1] != receipt_sha256:
+            raise BusinessDecisionRefused(
+                "the business decision does not have one exact signed receipt"
+            )
         binding = _IdempotencyBinding.model_validate(
             self._read_model(
                 self._idempotency_sha_path(receipt.idempotency_key_sha256),
@@ -556,7 +583,45 @@ class BusinessDecisionStore:
         request = self._read_request_sha(active.request_sha256)
         if active.request_digest != request.digest:
             raise BusinessDecisionRefused("the active decision request binding differs")
+        self._authenticate_renewal(request)
         return request, active.request_sha256
+
+    def _authenticate_renewal(self, request: BusinessDecisionRequest) -> None:
+        """Authenticate the predecessor of a renewed unanswered request."""
+
+        predecessor_sha256 = request.supersedes_request_sha256
+        predecessor_digest = request.supersedes_request_digest
+        if predecessor_sha256 is None or predecessor_digest is None:
+            return
+        predecessor = self._read_request_sha(predecessor_sha256)
+        same_pause = (
+            predecessor.digest == predecessor_digest
+            and predecessor.run_id == request.run_id
+            and predecessor.workflow_name == request.workflow_name
+            and predecessor.workflow_contract_sha256 == request.workflow_contract_sha256
+            and predecessor.bundle_version == request.bundle_version
+            and predecessor.governed_runtime_inputs_digest
+            == request.governed_runtime_inputs_digest
+            and predecessor.pause_binding_sha256 == request.pause_binding_sha256
+            and predecessor.graph_id == request.graph_id
+            and predecessor.state_id == request.state_id
+            and predecessor.program_scope == request.program_scope
+            and predecessor.control_frames_sha256 == request.control_frames_sha256
+            and predecessor.bound_params_sha256 == request.bound_params_sha256
+            and predecessor.decision.contract_sha256()
+            == request.decision.contract_sha256()
+        )
+        if not same_pause or _parse(predecessor.expires_at) > _parse(request.issued_at):
+            raise BusinessDecisionRefused(
+                "the business decision renewal predecessor differs"
+            )
+        if (
+            self._receipts_for_request(predecessor.digest)
+            or self._answer_path(predecessor.digest).is_file()
+        ):
+            raise BusinessDecisionRefused(
+                "an answered business decision request cannot be renewed"
+            )
 
     def _read_receipt_sha(self, sha256: str) -> BusinessDecisionReceipt:
         path = self._receipt_path(sha256)
@@ -570,15 +635,103 @@ class BusinessDecisionStore:
             raise BusinessDecisionRefused("the decision receipt signature differs")
         return receipt
 
+    def _receipts_for_request(
+        self, request_digest: str
+    ) -> list[tuple[BusinessDecisionReceipt, str]]:
+        """Authenticate every signed receipt that names one request.
+
+        This scan is the write-ahead recovery boundary. A process can die after
+        it writes the signed receipt but before it writes the answer pointer.
+        The next submit must recover that receipt or refuse a conflicting
+        answer; it must never sign a second authority for the same request.
+        """
+
+        self._assert_managed_path(self.receipts_dir)
+        if not self.receipts_dir.exists():
+            return []
+        if self.receipts_dir.is_symlink() or not self.receipts_dir.is_dir():
+            raise BusinessDecisionRefused(
+                "the business decision receipt inventory is invalid"
+            )
+        matches: list[tuple[BusinessDecisionReceipt, str]] = []
+        for path in sorted(self.receipts_dir.glob("*.json")):
+            if path.is_symlink() or not path.is_file():
+                raise BusinessDecisionRefused(
+                    "the business decision receipt inventory is invalid"
+                )
+            try:
+                receipt_sha256 = _sha256_value(path.stem)
+            except BusinessDecisionRefused as exc:
+                raise BusinessDecisionRefused(
+                    "the business decision receipt inventory is invalid"
+                ) from exc
+            receipt = self._read_receipt_sha(receipt_sha256)
+            if receipt.request_digest == request_digest:
+                matches.append((receipt, receipt_sha256))
+        return matches
+
+    @staticmethod
+    def _receipt_matches_submission(
+        *,
+        receipt: BusinessDecisionReceipt,
+        request: BusinessDecisionRequest,
+        option: BusinessDecisionOption,
+        submission: BusinessDecisionSubmission,
+        principal: BusinessDecisionPrincipal,
+        authorized_role: str,
+        idempotency_key_sha256: str,
+    ) -> bool:
+        """Whether an orphaned signed receipt is this exact answer attempt."""
+
+        return (
+            receipt.request_digest == request.digest
+            and receipt.run_id == request.run_id
+            and receipt.workflow_name == request.workflow_name
+            and receipt.workflow_contract_sha256 == request.workflow_contract_sha256
+            and receipt.bundle_version == request.bundle_version
+            and receipt.governed_runtime_inputs_digest
+            == request.governed_runtime_inputs_digest
+            and receipt.pause_binding_sha256 == request.pause_binding_sha256
+            and receipt.graph_id == request.graph_id
+            and receipt.state_id == request.state_id
+            and receipt.program_scope == request.program_scope
+            and receipt.decision_contract_sha256 == request.decision.contract_sha256()
+            and receipt.option_id == option.id
+            and receipt.output_param == request.decision.output_param
+            and receipt.output_value == option.value
+            and receipt.target_state_id == option.target
+            and receipt.evidence_artifact_sha256s
+            == submission.evidence_artifact_sha256s
+            and receipt.operator_ref == principal.operator_ref
+            and receipt.authorized_role == authorized_role
+            and receipt.authenticated_by == principal.authenticated_by
+            and receipt.authentication_context_sha256
+            == principal.authentication_context_sha256
+            and receipt.idempotency_key_sha256 == idempotency_key_sha256
+            and receipt.decided_by == "human"
+        )
+
     def read_receipt(
         self, request_digest: str
     ) -> tuple[BusinessDecisionReceipt, str] | None:
         path = self._answer_path(request_digest)
+        retained = self._receipts_for_request(request_digest)
         if not path.is_file():
+            if retained:
+                raise BusinessDecisionRefused(
+                    "a signed business decision receipt is awaiting recovery"
+                )
             return None
+        if len(retained) != 1:
+            raise BusinessDecisionRefused(
+                "the business decision does not have one exact signed receipt"
+            )
         pointer = self._read_answer_pointer(request_digest)
         receipt = self._read_receipt_sha(pointer.receipt_sha256)
-        if receipt.digest != pointer.receipt_digest:
+        if (
+            retained[0][1] != pointer.receipt_sha256
+            or receipt.digest != pointer.receipt_digest
+        ):
             raise BusinessDecisionRefused("the decision receipt digest differs")
         return receipt, pointer.receipt_sha256
 
@@ -665,16 +818,23 @@ class BusinessDecisionStore:
         self._key(create=True)
         expected_contract = workflow_contract_sha256(workflow)
         with self._lock():
+            supersedes_request_sha256: str | None = None
+            supersedes_request_digest: str | None = None
             if self.active_path.is_file():
                 existing, sha256 = self.read_active_request()
-                if (
+                same_pause = (
                     existing.pause_binding_sha256 == approval_pause_digest(pending)
                     and existing.graph_id == graph_id
                     and existing.state_id == state_id
                     and existing.decision.contract_sha256() == spec.contract_sha256()
-                ):
-                    return existing, sha256
-                if self.read_receipt(existing.digest) is None:
+                )
+                retained = self.read_receipt(existing.digest)
+                if same_pause:
+                    if retained is not None or now < _parse(existing.expires_at):
+                        return existing, sha256
+                    supersedes_request_sha256 = sha256
+                    supersedes_request_digest = existing.digest
+                elif retained is None:
                     raise BusinessDecisionRefused(
                         "another unanswered business decision request already "
                         "owns this run"
@@ -709,6 +869,8 @@ class BusinessDecisionStore:
                 ),
                 bound_params_sha256=bound_params_sha256(params),
                 decision=spec,
+                supersedes_request_sha256=supersedes_request_sha256,
+                supersedes_request_digest=supersedes_request_digest,
                 issued_at=_iso(now),
                 expires_at=_iso(now + timedelta(seconds=spec.expires_after_s)),
                 signature="hmac-sha256:" + ("0" * 64),
@@ -840,7 +1002,15 @@ class BusinessDecisionStore:
         submission_sha256 = _sha256(_canonical(submission))
         idempotency_sha256 = _sha256(submission.idempotency_key.encode("utf-8"))
         with self._lock():
+            current_request, _current_request_sha256 = self.read_active_request()
+            if current_request.digest != request.digest:
+                raise BusinessDecisionRefused(
+                    "the active business decision request changed before answer"
+                )
+            if now >= _parse(current_request.expires_at):
+                raise BusinessDecisionRefused("the business decision request expired")
             binding_path = self._idempotency_path(submission.idempotency_key)
+            binding: _IdempotencyBinding | None = None
             if binding_path.is_file():
                 binding = _IdempotencyBinding.model_validate(
                     self._read_model(binding_path, _IdempotencyBinding)
@@ -852,30 +1022,57 @@ class BusinessDecisionStore:
                     raise BusinessDecisionRefused(
                         "the idempotency key was used for another answer"
                     )
-                receipt = self._read_receipt_sha(binding.receipt_sha256)
-                self._commit_receipt_approval(
-                    checkpoint_store=checkpoint_store,
-                    pending=pending,
-                    receipt=receipt,
+            retained = self._receipts_for_request(request.digest)
+            if len(retained) > 1:
+                raise BusinessDecisionRefused(
+                    "this business decision has multiple signed answers; "
+                    "manual audit is required"
                 )
-                return receipt
-            prior = self.read_receipt(request.digest)
-            if prior is not None:
-                prior_receipt, prior_receipt_sha256 = prior
-                pointer = self._read_answer_pointer(request.digest)
-                if pointer.submission_sha256 != submission_sha256:
+            if retained:
+                prior_receipt, prior_receipt_sha256 = retained[0]
+                if not self._receipt_matches_submission(
+                    receipt=prior_receipt,
+                    request=request,
+                    option=option,
+                    submission=submission,
+                    principal=principal,
+                    authorized_role=roles[0],
+                    idempotency_key_sha256=idempotency_sha256,
+                ):
                     raise BusinessDecisionRefused(
                         "this business decision already has a different answer"
                     )
+                answer_path = self._answer_path(request.digest)
+                pointer = _AnswerPointer(
+                    request_digest=request.digest,
+                    receipt_sha256=prior_receipt_sha256,
+                    receipt_digest=prior_receipt.digest,
+                    submission_sha256=submission_sha256,
+                )
+                if answer_path.is_file():
+                    if self._read_answer_pointer(request.digest) != pointer:
+                        raise BusinessDecisionRefused(
+                            "the decision answer pointer differs from the "
+                            "signed receipt"
+                        )
+                else:
+                    self._atomic_write(
+                        answer_path,
+                        pointer.model_dump_json(indent=2).encode("utf-8"),
+                    )
+                recovered_binding = _IdempotencyBinding(
+                    request_digest=request.digest,
+                    submission_sha256=submission_sha256,
+                    receipt_sha256=prior_receipt_sha256,
+                )
+                if binding is not None and binding != recovered_binding:
+                    raise BusinessDecisionRefused(
+                        "the decision idempotency binding differs from the "
+                        "signed receipt"
+                    )
                 self._atomic_write(
                     binding_path,
-                    _IdempotencyBinding(
-                        request_digest=request.digest,
-                        submission_sha256=submission_sha256,
-                        receipt_sha256=prior_receipt_sha256,
-                    )
-                    .model_dump_json(indent=2)
-                    .encode("utf-8"),
+                    recovered_binding.model_dump_json(indent=2).encode("utf-8"),
                 )
                 self._commit_receipt_approval(
                     checkpoint_store=checkpoint_store,
@@ -883,6 +1080,10 @@ class BusinessDecisionStore:
                     receipt=prior_receipt,
                 )
                 return prior_receipt
+            if binding is not None or self._answer_path(request.digest).is_file():
+                raise BusinessDecisionRefused(
+                    "the business decision answer metadata has no signed receipt"
+                )
             unsigned = BusinessDecisionReceipt.model_construct(
                 request_digest=request.digest,
                 run_id=request.run_id,

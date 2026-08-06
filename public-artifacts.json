@@ -97,7 +97,7 @@
     },
     {
       "path": ".github/workflows/docker-rdp-multiapp-vision.yml",
-      "sha256": "b3ab41f3eb6735a3fbcc6a34fa5b672970a3e049a6f05c3f78337db683681add"
+      "sha256": "5b8a01951787f8b4af3a77dec8e64518ba8a88fdac0d15d2587ad2a4e39b31fb"
     },
     {
       "path": ".github/workflows/docker-rdp-vision-ladder.yml",

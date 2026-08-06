@@ -413,6 +413,33 @@ def _semantic_failures(
     c_an = _analyze(candidate, candidate_subflows)
     matched, new_candidate_ids = _match_actions(active_steps, cand_steps)
 
+    def _business_contracts(
+        main: ProgramGraph, subflows: Optional[dict[str, ProgramGraph]]
+    ) -> dict[tuple[str, str], str]:
+        contracts: dict[tuple[str, str], str] = {}
+        for graph_name, graph in {
+            _MAIN: main,
+            **(subflows or {}),
+        }.items():
+            for state in graph.states.values():
+                if (
+                    state.kind is StateKind.BUSINESS_DECISION
+                    and state.decision is not None
+                ):
+                    contracts[(graph_name, state.id)] = state.decision.contract_sha256()
+        return contracts
+
+    active_decisions = _business_contracts(active, active_subflows)
+    candidate_decisions = _business_contracts(candidate, candidate_subflows)
+    for location, contract in active_decisions.items():
+        if candidate_decisions.get(location) != contract:
+            failures.append(
+                "business decision contract changed at "
+                f"{location[0]!r}/{location[1]!r}: roles, finite answers, "
+                "required evidence, expiry, output binding, live revalidation, "
+                "and branch targets must remain exact during learned repair"
+            )
+
     def _label(step: Step) -> str:
         return f"{step.id!r} ({step.intent!r})"
 

@@ -790,6 +790,10 @@ def test_expired_unanswered_request_is_renewed_for_same_durable_pause(tmp_path):
     )
     assert receipt.request_digest == renewed.digest
 
+    old_request_path.unlink()
+    with pytest.raises(BusinessDecisionRefused, match="missing or invalid"):
+        store.authenticate_request(renewed_sha256)
+
 
 def test_answer_expires_before_delayed_resume(tmp_path):
     workflow, store, _backend, request = _pause(tmp_path)

@@ -82,7 +82,9 @@ request by its digest and content hash. The old request stays in the local
 inventory for audit, but it is no longer active and cannot accept an answer.
 Issuance and submission use the same advisory lock, and submission checks the
 active pointer again while it owns that lock. Thus, a late answer cannot race a
-renewal and authorize the old request.
+renewal and authorize the old request. Historical evidence authenticates the
+complete retained renewal chain. A missing, changed, cyclic, or answered
+predecessor makes that evidence invalid.
 
 ## Trust boundary
 

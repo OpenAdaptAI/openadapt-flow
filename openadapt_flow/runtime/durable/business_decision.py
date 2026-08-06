@@ -574,54 +574,68 @@ class BusinessDecisionStore:
     def authenticate_request(self, sha256: str) -> BusinessDecisionRequest:
         """Authenticate one content-addressed request artifact."""
 
-        return self._read_request_sha(sha256)
+        request = self._read_request_sha(sha256)
+        self._authenticate_renewal(request)
+        return request
 
     def read_active_request(self) -> tuple[BusinessDecisionRequest, str]:
         active = _ActiveRequest.model_validate(
             self._read_model(self.active_path, _ActiveRequest)
         )
-        request = self._read_request_sha(active.request_sha256)
+        request = self.authenticate_request(active.request_sha256)
         if active.request_digest != request.digest:
             raise BusinessDecisionRefused("the active decision request binding differs")
-        self._authenticate_renewal(request)
         return request, active.request_sha256
 
     def _authenticate_renewal(self, request: BusinessDecisionRequest) -> None:
-        """Authenticate the predecessor of a renewed unanswered request."""
+        """Authenticate the complete retained chain of unanswered requests."""
 
-        predecessor_sha256 = request.supersedes_request_sha256
-        predecessor_digest = request.supersedes_request_digest
-        if predecessor_sha256 is None or predecessor_digest is None:
-            return
-        predecessor = self._read_request_sha(predecessor_sha256)
-        same_pause = (
-            predecessor.digest == predecessor_digest
-            and predecessor.run_id == request.run_id
-            and predecessor.workflow_name == request.workflow_name
-            and predecessor.workflow_contract_sha256 == request.workflow_contract_sha256
-            and predecessor.bundle_version == request.bundle_version
-            and predecessor.governed_runtime_inputs_digest
-            == request.governed_runtime_inputs_digest
-            and predecessor.pause_binding_sha256 == request.pause_binding_sha256
-            and predecessor.graph_id == request.graph_id
-            and predecessor.state_id == request.state_id
-            and predecessor.program_scope == request.program_scope
-            and predecessor.control_frames_sha256 == request.control_frames_sha256
-            and predecessor.bound_params_sha256 == request.bound_params_sha256
-            and predecessor.decision.contract_sha256()
-            == request.decision.contract_sha256()
-        )
-        if not same_pause or _parse(predecessor.expires_at) > _parse(request.issued_at):
-            raise BusinessDecisionRefused(
-                "the business decision renewal predecessor differs"
+        current = request
+        seen = {request.digest}
+        for _ in range(4096):
+            predecessor_sha256 = current.supersedes_request_sha256
+            predecessor_digest = current.supersedes_request_digest
+            if predecessor_sha256 is None or predecessor_digest is None:
+                return
+            predecessor = self._read_request_sha(predecessor_sha256)
+            if predecessor.digest in seen:
+                raise BusinessDecisionRefused(
+                    "the business decision renewal chain contains a cycle"
+                )
+            same_pause = (
+                predecessor.digest == predecessor_digest
+                and predecessor.run_id == current.run_id
+                and predecessor.workflow_name == current.workflow_name
+                and predecessor.workflow_contract_sha256
+                == current.workflow_contract_sha256
+                and predecessor.bundle_version == current.bundle_version
+                and predecessor.governed_runtime_inputs_digest
+                == current.governed_runtime_inputs_digest
+                and predecessor.pause_binding_sha256 == current.pause_binding_sha256
+                and predecessor.graph_id == current.graph_id
+                and predecessor.state_id == current.state_id
+                and predecessor.program_scope == current.program_scope
+                and predecessor.control_frames_sha256 == current.control_frames_sha256
+                and predecessor.bound_params_sha256 == current.bound_params_sha256
+                and predecessor.decision.contract_sha256()
+                == current.decision.contract_sha256()
             )
-        if (
-            self._receipts_for_request(predecessor.digest)
-            or self._answer_path(predecessor.digest).is_file()
-        ):
-            raise BusinessDecisionRefused(
-                "an answered business decision request cannot be renewed"
-            )
+            if not same_pause or _parse(predecessor.expires_at) > _parse(
+                current.issued_at
+            ):
+                raise BusinessDecisionRefused(
+                    "the business decision renewal predecessor differs"
+                )
+            if (
+                self._receipts_for_request(predecessor.digest)
+                or self._answer_path(predecessor.digest).is_file()
+            ):
+                raise BusinessDecisionRefused(
+                    "an answered business decision request cannot be renewed"
+                )
+            seen.add(predecessor.digest)
+            current = predecessor
+        raise BusinessDecisionRefused("the business decision renewal chain is too long")
 
     def _read_receipt_sha(self, sha256: str) -> BusinessDecisionReceipt:
         path = self._receipt_path(sha256)
@@ -1248,7 +1262,7 @@ class BusinessDecisionStore:
 
         from openadapt_flow.qualification import workflow_contract_sha256
 
-        request = self._read_request_sha(evidence.request_sha256)
+        request = self.authenticate_request(evidence.request_sha256)
         receipt = self._read_receipt_sha(evidence.receipt_sha256)
         if (
             request.run_id != run_id

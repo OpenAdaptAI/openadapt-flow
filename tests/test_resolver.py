@@ -218,6 +218,41 @@ def test_identity_armed_template_refuses_ambiguous_landmark(screen):
         )
 
 
+def test_identity_armed_exact_template_ignores_irrelevant_ambiguous_landmark(screen):
+    """Repeated context cannot veto an unchanged exact target binding."""
+
+    class AmbiguousLandmarkVision(FakeVision):
+        def find_text(
+            self,
+            screen_png,
+            text,
+            *,
+            region=None,
+            min_ratio=0.8,
+            raise_on_ambiguity=False,
+        ):
+            del screen_png, text, region, min_ratio, raise_on_ambiguity
+            raise AmbiguousOcrMatchError("two unrelated context labels")
+
+    anchor = _icon_anchor().model_copy(update={"identifier_region": (20, 20, 80, 20)})
+    vision = AmbiguousLandmarkVision()
+    vision.template_results = [
+        Match(point=(125, 110), region=(100, 100, 50, 20), confidence=1.0)
+    ]
+
+    resolution, matched = resolve(
+        anchor,
+        screen,
+        vision,
+        template_png=b"tpl",
+        viewport=VIEWPORT,
+    )
+
+    assert resolution.rung == "template"
+    assert resolution.point == anchor.click_point
+    assert matched == anchor.region
+
+
 def test_search_region_clamped_to_viewport(screen):
     anchor = Anchor(
         template="templates/a.png",

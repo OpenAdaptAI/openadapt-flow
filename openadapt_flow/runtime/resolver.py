@@ -669,6 +669,14 @@ def resolve(
         evidence = identity_landmark_evidence()
         if evidence is None:
             if ambiguous_landmark:
+                # An exact local template at the demonstrated action point
+                # does not translate the separate identifier region. A
+                # repeated nearby label is therefore irrelevant to that
+                # unchanged binding. Once the template point moves, however,
+                # those ambiguous relations are the only evidence that could
+                # justify moving the identity window, so refuse.
+                if candidate == anchor.click_point:
+                    return candidate
                 raise AmbiguousOcrMatchError(
                     "OCR landmark evidence did not uniquely establish an "
                     "identity-armed template target"

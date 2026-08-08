@@ -2497,14 +2497,16 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     workflow = _qualification_workflow(args)
 
     if verb == "judgment-cases":
-        try:
-            payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
-            case_set = JudgmentCaseSetV1.model_validate(payload)
-        except (OSError, ValueError) as exc:
-            raise SystemExit(f"invalid judgment case set: {exc}") from exc
         if args.check:
             report = evaluate_judgment_case_qualification(workflow)
         else:
+            if not args.input:
+                raise SystemExit("--input is required unless --check is used")
+            try:
+                payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+                case_set = JudgmentCaseSetV1.model_validate(payload)
+            except (OSError, ValueError) as exc:
+                raise SystemExit(f"invalid judgment case set: {exc}") from exc
             set_judgment_cases(
                 workflow, schemas=case_set.schemas, cases=case_set.cases
             )
@@ -4545,9 +4547,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("bundle", help="Workflow bundle directory")
     q.add_argument(
         "--input",
-        required=True,
         metavar="JSON",
-        help="Local openadapt.judgment-case-set/v1 JSON file",
+        help="Local openadapt.judgment-case-set/v1 JSON file (required without --check)",
     )
     q.add_argument(
         "--check",

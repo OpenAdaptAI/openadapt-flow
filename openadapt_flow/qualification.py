@@ -22,7 +22,16 @@ from collections import Counter
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Final,
+    Iterable,
+    Literal,
+    Optional,
+    Protocol,
+)
 from urllib.parse import urlsplit
 from uuid import uuid4
 
@@ -1397,7 +1406,9 @@ def evaluate_judgment_case_qualification(
 
     project = workflow.qualification
     if project is None:
-        raise QualificationError("initialize qualification before evaluating judgment cases")
+        raise QualificationError(
+            "initialize qualification before evaluating judgment cases"
+        )
     schemas = {
         (item.graph_id, item.state_id): item.fact_schema
         for item in project.judgment_fact_schemas
@@ -1424,13 +1435,17 @@ def set_judgment_cases(
 
     project = workflow.qualification
     if project is None:
-        raise QualificationError("initialize qualification before setting judgment cases")
+        raise QualificationError(
+            "initialize qualification before setting judgment cases"
+        )
     proposed_schemas = list(schemas)
     proposed_cases = list(cases)
     candidate = QualificationProject.model_validate(
         {
             **project.model_dump(mode="json"),
-            "judgment_fact_schemas": [item.model_dump(mode="json") for item in proposed_schemas],
+            "judgment_fact_schemas": [
+                item.model_dump(mode="json") for item in proposed_schemas
+            ],
             "judgment_cases": [item.model_dump(mode="json") for item in proposed_cases],
         }
     )
@@ -1447,9 +1462,10 @@ def set_judgment_cases(
     }
     strict = [item for item in report.findings if item.code in strict_codes]
     if strict:
-        raise QualificationError("invalid judgment case binding: " + "; ".join(
-            item.message for item in strict
-        ))
+        raise QualificationError(
+            "invalid judgment case binding: "
+            + "; ".join(item.message for item in strict)
+        )
     if (
         project.judgment_fact_schemas == candidate.judgment_fact_schemas
         and project.judgment_cases == candidate.judgment_cases
@@ -2321,10 +2337,17 @@ def sign_case_result(
     )
 
 
+class _HashBoundEvidenceRef(Protocol):
+    """The fields required to verify any local evidence reference."""
+
+    relative_path: str
+    sha256: str
+
+
 def _read_evidence_bytes(
     *,
     root: Path,
-    evidence: EvidenceRef,
+    evidence: _HashBoundEvidenceRef,
 ) -> tuple[Optional[bytes], Optional[str]]:
     """Read one exact hash-bound file without following a symlink."""
 
@@ -4195,7 +4218,7 @@ def _case_result_integrity_error(
 def _case_evidence_contract_sha256(project: QualificationProject) -> str:
     """Digest the exact signed current case results and their evidence refs."""
 
-    payload = []
+    payload: list[dict[str, Any]] = []
     for case in sorted(project.cases, key=lambda item: item.id):
         if not case.required:
             continue
@@ -4258,7 +4281,14 @@ def _judgment_evidence_errors(
         if case.review_note_ref is not None:
             refs.append(case.review_note_ref)
         for evidence in refs:
-            _payload, error = _read_evidence_bytes(root=root, evidence=evidence)
+            # Judgment evidence has a narrower local-only kind vocabulary. The
+            # reader needs only the existing path-and-digest reference contract.
+            read_ref = EvidenceRef(
+                kind="other",
+                relative_path=evidence.relative_path,
+                sha256=evidence.sha256,
+            )
+            _payload, error = _read_evidence_bytes(root=root, evidence=read_ref)
             if error is not None:
                 errors.append(
                     (

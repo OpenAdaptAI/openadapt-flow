@@ -274,7 +274,10 @@ def test_more_evidence_required_refuses_certification_but_human_node_does_not():
     }
 
 
-@pytest.mark.parametrize("path", ("C:/cases/a.json", r"\\server\share\a.json"))
+@pytest.mark.parametrize(
+    "path",
+    ("C:/cases/a.json", r"\\server\share\a.json", r"cases\..\..\a.json"),
+)
 def test_local_evidence_refuses_windows_absolute_paths(path: str):
     with pytest.raises(ValueError, match="local relative path"):
         LocalEvidenceRefV1(sha256="a" * 64, relative_path=path, kind="report")

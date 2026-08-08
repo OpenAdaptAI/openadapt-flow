@@ -97,6 +97,7 @@ class LocalEvidenceRefV1(BaseModel):
         if (
             value.startswith("/")
             or "://" in value
+            or "\\" in value
             or windows_path.drive
             or windows_path.is_absolute()
         ):

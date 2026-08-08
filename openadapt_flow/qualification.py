@@ -4258,6 +4258,7 @@ def _judgment_evidence_errors(
     project: QualificationProject,
     *,
     evidence_root: Optional[Path | str],
+    evidence_preverified: bool = False,
 ) -> list[tuple[str, str]]:
     """Verify every local judgment artifact before certification.
 
@@ -4268,6 +4269,8 @@ def _judgment_evidence_errors(
     if not project.judgment_cases:
         return []
     if evidence_root is None:
+        if evidence_preverified:
+            return []
         return [
             (
                 "qualification.judgment_cases",
@@ -5071,6 +5074,7 @@ def evaluate_qualification(
     for path, message in _judgment_evidence_errors(
         project,
         evidence_root=evidence_root,
+        evidence_preverified=evidence_preverified,
     ):
         refusals.append(
             QualificationRefusal(

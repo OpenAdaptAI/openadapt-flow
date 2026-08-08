@@ -31,6 +31,7 @@ ROLE_REFS = {
     "operator": "authz_role_0001",
     "supervisor": "authz_role_0002",
 }
+EGRESS_REVIEW_DIGEST = "sha256:" + "7" * 64
 
 
 def _plus_one_second(value: str) -> str:
@@ -43,9 +44,20 @@ def _presentation(request) -> BusinessDecisionPresentationV1:
         presentation_revision=1,
         decision_contract_digest="sha256:" + request.decision.contract_sha256(),
         decision_contract_revision=1,
-        question=request.decision.question,
+        question={
+            "text": request.decision.question,
+            "classification": "reviewed_remote_safe",
+            "egress_review_digest": EGRESS_REVIEW_DIGEST,
+        },
         options=tuple(
-            {"option_id": option.id, "label": option.label}
+            {
+                "option_id": option.id,
+                "label": {
+                    "text": option.label,
+                    "classification": "reviewed_remote_safe",
+                    "egress_review_digest": EGRESS_REVIEW_DIGEST,
+                },
+            }
             for option in request.decision.options
         ),
         review_contract_digest="sha256:" + "8" * 64,
@@ -68,6 +80,9 @@ def _policy(
             "decision_contract_revision": presentation.decision_contract_revision,
             "presentation_ref": presentation.presentation_ref,
             "presentation_digest": presentation.digest,
+            "presentation_egress_review_digest": (
+                EGRESS_REVIEW_DIGEST if delivery_mode == "remote_answerable" else None
+            ),
             "authorized_role_refs": tuple(ROLE_REFS.values()),
             "authorized_route_refs": ("cloud_aal2_route",),
             "authorized_answer_issuer_key_ids": ("cloud_signer_001",),
@@ -213,7 +228,13 @@ def test_remote_projection_refuses_protected_evidence(tmp_path) -> None:
 def test_projection_refuses_changed_presentation_or_policy(tmp_path) -> None:
     _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
     presentation = _presentation(request)
-    changed = presentation.model_copy(update={"question": "A different question"})
+    changed = presentation.model_copy(
+        update={
+            "question": presentation.question.model_copy(
+                update={"text": "A different question"}
+            )
+        }
+    )
     policy = _policy(request, changed)
     with pytest.raises(ValueError, match="presentation differs"):
         project_portable_business_decision_task(

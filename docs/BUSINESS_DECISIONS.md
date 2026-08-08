@@ -142,8 +142,11 @@ digests. It does not carry the question, option labels, role names, values,
 screenshots, OCR text, or record identifiers.
 
 The mobile view resolves its static reviewed question and option copy from the
-exact presentation artifact that the signed delivery policy names. Projection
-compares that copy with the authenticated Flow request before it signs a task.
+exact presentation artifact that the signed delivery policy names. Each text
+field is either local-only or remote-safe with a positive egress-review digest.
+Projection compares the exact copy and its shared content digest with the
+authenticated Flow request before it signs a task. A remote task is valid only
+when all visible text has the one reviewed egress binding named by the policy.
 The delivery policy also binds the allowed opaque roles, authenticated routes,
 answer signing-key IDs, exact authentication profile, relay capability, and
 expiry. These fields are qualification output. A caller cannot select them when

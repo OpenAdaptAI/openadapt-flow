@@ -132,20 +132,31 @@ def _verify_presentation(
     decision_digest: str,
     decision_revision: int,
 ) -> None:
+    from openadapt_types import business_decision_presentation_text_digest
+
     if (
         presentation.decision_contract_digest != decision_digest
         or presentation.decision_contract_revision != decision_revision
-        or presentation.question != request.decision.question
+        or presentation.question.text != request.decision.question
+        or presentation.question.content_digest
+        != business_decision_presentation_text_digest(request.decision.question)
     ):
         raise ValueError("the reviewed presentation differs from the decision contract")
     expected_options = tuple(
         (option.id, option.label) for option in request.decision.options
     )
     actual_options = tuple(
-        (option.option_id, option.label) for option in presentation.options
+        (option.option_id, option.label.text) for option in presentation.options
     )
     if actual_options != expected_options:
         raise ValueError("the reviewed option presentation differs from the contract")
+    for option, expected in zip(presentation.options, request.decision.options):
+        if option.label.content_digest != business_decision_presentation_text_digest(
+            expected.label
+        ):
+            raise ValueError(
+                "the reviewed option presentation digest differs from the contract"
+            )
 
 
 def project_portable_business_decision_task(
@@ -170,6 +181,7 @@ def project_portable_business_decision_task(
     from openadapt_types import (
         BusinessDecisionDeliveryMode,
         sign_business_decision_task_hmac,
+        validate_business_decision_delivery,
     )
 
     request, _request_sha256 = store.read_active_request()
@@ -324,7 +336,16 @@ def project_portable_business_decision_task(
         "expires_at": request.expires_at,
         "issuer_key_id": issuer_key_id,
     }
-    return sign_business_decision_task_hmac(key=signing_key, fields=fields)
+    task = sign_business_decision_task_hmac(key=signing_key, fields=fields)
+    validate_business_decision_delivery(
+        task,
+        presentation,
+        delivery_policy,
+        task_signing_key=signing_key,
+        qualification_signing_key=delivery_policy_signing_key,
+        at=at,
+    )
+    return task
 
 
 def admit_portable_business_decision_answer(

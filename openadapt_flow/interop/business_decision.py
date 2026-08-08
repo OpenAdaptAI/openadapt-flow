@@ -45,6 +45,9 @@ if TYPE_CHECKING:
 
 _ROLE_MAPPING_DOMAIN = b"openadapt.business-decision-role-mapping/v1\x00"
 _OPAQUE_ALIAS_DOMAIN = b"openadapt.business-decision-opaque-alias/v1\x00"
+_PORTABLE_IDEMPOTENCY_DOMAIN = (
+    b"openadapt.business-decision-portable-idempotency/v1\x00"
+)
 
 
 def _canonical_json(payload: Any) -> bytes:
@@ -87,6 +90,20 @@ def _opaque_alias(purpose: str, value: str, *, key: bytes) -> str:
     payload = _OPAQUE_ALIAS_DOMAIN + purpose.encode("ascii") + b"\x00" + value.encode()
     digest = hmac.new(key, payload, hashlib.sha256).hexdigest()
     return f"{purpose}_{digest}"
+
+
+def _portable_submission_idempotency_key(task: Any, answer: Any) -> str:
+    """Bind Flow's one-use answer to the exact signed portable envelope."""
+
+    payload = _canonical_json(
+        {
+            "answer_digest": answer.digest,
+            "idempotency_scope_digest": task.idempotency_scope_digest,
+            "portable_idempotency_key": answer.idempotency_key,
+        }
+    )
+    digest = hashlib.sha256(_PORTABLE_IDEMPOTENCY_DOMAIN + payload).hexdigest()
+    return f"portable_{digest}"
 
 
 def _parse(value: str) -> datetime:
@@ -161,7 +178,9 @@ def project_portable_business_decision_task(
         raise ValueError("the business decision policy key id is not trusted")
     if not delivery_policy.verify_hmac(delivery_policy_signing_key):
         raise ValueError("the business decision delivery policy signature is invalid")
-    if not (_parse(delivery_policy.created_at) <= now < _parse(delivery_policy.expires_at)):
+    if not (
+        _parse(delivery_policy.created_at) <= now < _parse(delivery_policy.expires_at)
+    ):
         raise ValueError("the business decision delivery policy is not active")
     if _parse(delivery_policy.created_at) > _parse(request.issued_at):
         raise ValueError("the delivery policy was issued after the decision request")
@@ -170,7 +189,9 @@ def project_portable_business_decision_task(
 
     expected_roles = set(request.decision.authorized_roles)
     if set(role_refs) != expected_roles:
-        raise ValueError("the portable role mapping must cover the exact decision roles")
+        raise ValueError(
+            "the portable role mapping must cover the exact decision roles"
+        )
     if len(set(role_refs.values())) != len(role_refs):
         raise ValueError("portable role references must map to one local role each")
     role_mapping_digest = business_decision_role_mapping_digest(
@@ -189,11 +210,26 @@ def project_portable_business_decision_task(
         role_refs[role] for role in request.decision.authorized_roles
     )
     expected_policy = {
-        "decision_contract_digest": (delivery_policy.decision_contract_digest, decision_digest),
-        "presentation_ref": (delivery_policy.presentation_ref, presentation.presentation_ref),
-        "presentation_digest": (delivery_policy.presentation_digest, presentation.digest),
-        "authorized_role_refs": (delivery_policy.authorized_role_refs, expected_role_refs),
-        "role_mapping_digest": (delivery_policy.role_mapping_digest, role_mapping_digest),
+        "decision_contract_digest": (
+            delivery_policy.decision_contract_digest,
+            decision_digest,
+        ),
+        "presentation_ref": (
+            delivery_policy.presentation_ref,
+            presentation.presentation_ref,
+        ),
+        "presentation_digest": (
+            delivery_policy.presentation_digest,
+            presentation.digest,
+        ),
+        "authorized_role_refs": (
+            delivery_policy.authorized_role_refs,
+            expected_role_refs,
+        ),
+        "role_mapping_digest": (
+            delivery_policy.role_mapping_digest,
+            role_mapping_digest,
+        ),
         "relay_capability_digest": (
             delivery_policy.relay_capability_digest,
             _prefixed_digest(active_relay_capability_digest),
@@ -209,11 +245,12 @@ def project_portable_business_decision_task(
         for evidence_id in option.required_evidence
     }
     if (
-        delivery_policy.delivery_mode
-        is BusinessDecisionDeliveryMode.REMOTE_ANSWERABLE
+        delivery_policy.delivery_mode is BusinessDecisionDeliveryMode.REMOTE_ANSWERABLE
         and required_evidence
     ):
-        raise ValueError("a remote business answer cannot require protected local evidence")
+        raise ValueError(
+            "a remote business answer cannot require protected local evidence"
+        )
 
     option_bindings = tuple(
         {
@@ -233,9 +270,7 @@ def project_portable_business_decision_task(
     )
     request_revision = _request_revision(store, request)
     run_alias = _opaque_alias("run", request.run_id, key=privacy_key)
-    pause_alias = _opaque_alias(
-        "pause", request.pause_binding_sha256, key=privacy_key
-    )
+    pause_alias = _opaque_alias("pause", request.pause_binding_sha256, key=privacy_key)
     task_id = _opaque_alias("task", request.digest, key=privacy_key)
     idempotency_scope_digest = _digest(
         {
@@ -343,7 +378,7 @@ def admit_portable_business_decision_answer(
 
     submission = BusinessDecisionSubmission(
         request_digest=answer.request_digest,
-        idempotency_key=answer.idempotency_key,
+        idempotency_key=_portable_submission_idempotency_key(task, answer),
         option_id=answer.option_id,
         evidence_artifact_sha256s={},
     )
@@ -369,6 +404,10 @@ def project_recorded_business_decision_answer_receipt(
     expected_answer_issuer_key_id: str,
     signing_key: bytes,
     issuer_key_id: str,
+    expected_tenant_id: str,
+    expected_runner_id: str,
+    role_refs: Mapping[str, str],
+    role_mapping_key: bytes,
     at: str,
 ) -> PortableBusinessDecisionAnswerReceiptV1:
     """Return a signed portable receipt for an answer retained by Flow."""
@@ -382,22 +421,45 @@ def project_recorded_business_decision_answer_receipt(
         raise ValueError("the portable task signing key id is not trusted")
     if answer.issuer_key_id != expected_answer_issuer_key_id:
         raise ValueError("the portable answer signing key id is not trusted")
+    if task.tenant_id != expected_tenant_id or task.runner_id != expected_runner_id:
+        raise ValueError("the portable task names another tenant or runner")
+    if (
+        business_decision_role_mapping_digest(role_refs, key=role_mapping_key)
+        != task.role_mapping_digest
+    ):
+        raise ValueError("the local role mapping differs from the signed task")
+    retained = store.read_receipt(task.request_digest)
+    if retained is None:
+        raise ValueError("Flow has not retained the business decision answer")
+    local_receipt, _local_receipt_sha = retained
+    if _parse(at) < _parse(local_receipt.decided_at):
+        raise ValueError("the receipt retrieval time predates the retained answer")
     validate_business_decision_answer(
         task,
         answer,
         task_signing_key=task_signing_key,
         answer_signing_key=answer_signing_key,
-        at=at,
+        at=local_receipt.decided_at,
     )
-    retained = store.read_receipt(task.request_digest)
-    if retained is None:
-        raise ValueError("Flow has not retained the business decision answer")
-    local_receipt, _local_receipt_sha = retained
+    local_roles = [
+        local_role
+        for local_role, remote_ref in role_refs.items()
+        if remote_ref == answer.authenticated_role_ref
+    ]
+    if len(local_roles) != 1:
+        raise ValueError("the authenticated role reference is not uniquely mapped")
+    expected_idempotency_sha256 = hashlib.sha256(
+        _portable_submission_idempotency_key(task, answer).encode("utf-8")
+    ).hexdigest()
     if (
         local_receipt.request_digest != task.request_digest
         or local_receipt.option_id != answer.option_id
         or local_receipt.operator_ref != answer.authenticated_principal_ref
+        or local_receipt.authorized_role != local_roles[0]
         or local_receipt.authenticated_by != answer.authenticated_route_ref
+        or local_receipt.authentication_context_sha256
+        != answer.authentication_context_digest.removeprefix("sha256:")
+        or local_receipt.idempotency_key_sha256 != expected_idempotency_sha256
     ):
         raise ValueError("the retained Flow receipt differs from the portable answer")
     return sign_business_decision_answer_receipt_hmac(

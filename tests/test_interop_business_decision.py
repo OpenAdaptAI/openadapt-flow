@@ -146,9 +146,7 @@ def _admit(store, task, answer, *, role_refs=ROLE_REFS):
 
 
 def test_projection_reuses_mobile_lane_without_relaying_runner_text(tmp_path) -> None:
-    _workflow, store, _backend, request = _pause(
-        tmp_path, required_evidence=False
-    )
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
     task = _project(store)
 
     assert task.verify_hmac(TASK_KEY)
@@ -192,6 +190,10 @@ def test_projection_reuses_mobile_lane_without_relaying_runner_text(tmp_path) ->
         expected_answer_issuer_key_id="cloud_signer_001",
         signing_key=TASK_KEY,
         issuer_key_id="runner_signer_01",
+        expected_tenant_id="tenant_example_01",
+        expected_runner_id="runner_example_01",
+        role_refs=ROLE_REFS,
+        role_mapping_key=ROLE_MAPPING_KEY,
         at=_plus_one_second(request.issued_at),
     )
     assert portable_receipt.runner_decision_receipt_digest == local_receipt.digest
@@ -209,13 +211,9 @@ def test_remote_projection_refuses_protected_evidence(tmp_path) -> None:
 
 
 def test_projection_refuses_changed_presentation_or_policy(tmp_path) -> None:
-    _workflow, store, _backend, request = _pause(
-        tmp_path, required_evidence=False
-    )
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
     presentation = _presentation(request)
-    changed = presentation.model_copy(
-        update={"question": "A different question"}
-    )
+    changed = presentation.model_copy(update={"question": "A different question"})
     policy = _policy(request, changed)
     with pytest.raises(ValueError, match="presentation differs"):
         project_portable_business_decision_task(
@@ -247,9 +245,7 @@ def test_projection_refuses_changed_presentation_or_policy(tmp_path) -> None:
 def test_admission_refuses_authentication_downgrade_or_wrong_route(
     tmp_path, changes
 ) -> None:
-    _workflow, store, _backend, request = _pause(
-        tmp_path, required_evidence=False
-    )
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
     task = _project(store)
     answer = _answer(task, request, **changes)
     with pytest.raises(ValueError):
@@ -257,9 +253,7 @@ def test_admission_refuses_authentication_downgrade_or_wrong_route(
 
 
 def test_admission_refuses_changed_local_role_mapping(tmp_path) -> None:
-    _workflow, store, _backend, request = _pause(
-        tmp_path, required_evidence=False
-    )
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
     task = _project(store)
     answer = _answer(task, request)
     with pytest.raises(ValueError, match="mapping differs"):
@@ -272,3 +266,75 @@ def test_admission_refuses_changed_local_role_mapping(tmp_path) -> None:
                 "supervisor": "authz_role_0002",
             },
         )
+
+
+def test_receipt_refuses_a_different_portable_answer(tmp_path) -> None:
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
+    task = _project(store)
+    answer = _answer(task, request)
+    submission, principal = _admit(store, task, answer)
+    BusinessDecisionStore(store.run_dir).submit(
+        submission,
+        principal=principal,
+        now=datetime.fromisoformat(_plus_one_second(request.issued_at)),
+    )
+    different_answer = _answer(
+        task,
+        request,
+        authenticated_role_ref="authz_role_0002",
+        idempotency_key="answer_mobile_0002",
+        authentication_context_digest="sha256:" + "5" * 64,
+    )
+
+    with pytest.raises(ValueError, match="retained Flow receipt differs"):
+        project_recorded_business_decision_answer_receipt(
+            store,
+            task,
+            different_answer,
+            task_signing_key=TASK_KEY,
+            expected_task_issuer_key_id="runner_signer_01",
+            answer_signing_key=ANSWER_KEY,
+            expected_answer_issuer_key_id="cloud_signer_001",
+            signing_key=TASK_KEY,
+            issuer_key_id="runner_signer_01",
+            expected_tenant_id="tenant_example_01",
+            expected_runner_id="runner_example_01",
+            role_refs=ROLE_REFS,
+            role_mapping_key=ROLE_MAPPING_KEY,
+            at=_plus_one_second(request.issued_at),
+        )
+
+
+def test_recorded_receipt_remains_available_after_task_expiry(tmp_path) -> None:
+    _workflow, store, _backend, request = _pause(tmp_path, required_evidence=False)
+    task = _project(store)
+    answer = _answer(task, request)
+    submission, principal = _admit(store, task, answer)
+    BusinessDecisionStore(store.run_dir).submit(
+        submission,
+        principal=principal,
+        now=datetime.fromisoformat(_plus_one_second(request.issued_at)),
+    )
+    after_expiry = (
+        datetime.fromisoformat(request.expires_at) + timedelta(seconds=1)
+    ).isoformat()
+
+    receipt = project_recorded_business_decision_answer_receipt(
+        store,
+        task,
+        answer,
+        task_signing_key=TASK_KEY,
+        expected_task_issuer_key_id="runner_signer_01",
+        answer_signing_key=ANSWER_KEY,
+        expected_answer_issuer_key_id="cloud_signer_001",
+        signing_key=TASK_KEY,
+        issuer_key_id="runner_signer_01",
+        expected_tenant_id="tenant_example_01",
+        expected_runner_id="runner_example_01",
+        role_refs=ROLE_REFS,
+        role_mapping_key=ROLE_MAPPING_KEY,
+        at=after_expiry,
+    )
+
+    assert receipt.answer_digest == answer.digest
+    assert receipt.succeeded is False

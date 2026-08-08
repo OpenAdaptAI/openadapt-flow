@@ -159,10 +159,15 @@ before it signs the answer.
 
 The customer runner verifies both signatures, maps the opaque role back through
 the qualification-owned role map, and calls Flow's normal business-decision
-submission API. The mobile answer receipt can report that Flow retained the
-answer and will revalidate the live application. It uses a separate schema from
-Flow's durable local receipt. It cannot report `VERIFIED`; only the later
-execution and effect receipt can prove the business result.
+submission API. Flow derives its local idempotency binding from the exact signed
+portable answer, its client idempotency key, and the task scope. A new signed
+answer envelope cannot claim a receipt for an earlier answer. The mobile answer
+receipt can report that Flow retained the exact answer and will revalidate the
+live application. A retained receipt stays available after the answer window
+expires; expiry stops a new answer but does not remove accepted audit evidence.
+The portable receipt uses a separate schema from Flow's durable local receipt.
+It cannot report `VERIFIED`; only the later execution and effect receipt can
+prove the business result.
 
 ## Integration API
 

@@ -4281,14 +4281,7 @@ def _judgment_evidence_errors(
         if case.review_note_ref is not None:
             refs.append(case.review_note_ref)
         for evidence in refs:
-            # Judgment evidence has a narrower local-only kind vocabulary. The
-            # reader needs only the existing path-and-digest reference contract.
-            read_ref = EvidenceRef(
-                kind="other",
-                relative_path=evidence.relative_path,
-                sha256=evidence.sha256,
-            )
-            _payload, error = _read_evidence_bytes(root=root, evidence=read_ref)
+            _payload, error = _read_evidence_bytes(root=root, evidence=evidence)
             if error is not None:
                 errors.append(
                     (

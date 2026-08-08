@@ -58,9 +58,7 @@ def _workflow() -> Workflow:
                 id="standard", label="Standard", value="standard", target="done"
             ),
         ),
-        revalidation=(
-            Predicate(kind=PredicateKind.TEXT_PRESENT, text="Ready"),
-        ),
+        revalidation=(Predicate(kind=PredicateKind.TEXT_PRESENT, text="Ready"),),
     )
     return Workflow(
         name="judgment-cases",
@@ -149,7 +147,9 @@ def _case(
             reviewer_principal_ref_sha256="d" * 64,
         ),
         disposition=disposition,
-        reviewed_rule_id="urgency_rule" if disposition is JudgmentDisposition.AUTOMATIC_RULE else None,
+        reviewed_rule_id="urgency_rule"
+        if disposition is JudgmentDisposition.AUTOMATIC_RULE
+        else None,
         option_id=option_id,
         contrast_case_ids=contrast_case_ids,
     )
@@ -164,7 +164,11 @@ def test_cases_bind_current_contract_and_retained_human_authority_is_not_a_rule(
     )
     set_judgment_cases(
         workflow,
-        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        schemas=(
+            JudgmentFactSchemaBindingV1(
+                graph_id="__program__", state_id="review", fact_schema=schema
+            ),
+        ),
         cases=(case,),
     )
     assert workflow.qualification is not None
@@ -172,7 +176,9 @@ def test_cases_bind_current_contract_and_retained_human_authority_is_not_a_rule(
     report = evaluate_judgment_case_qualification(workflow)
     assert report.passed
     assert report.retained_human_authority_count == 1
-    assert {finding.code.value for finding in report.findings} == {"retained_human_authority"}
+    assert {finding.code.value for finding in report.findings} == {
+        "retained_human_authority"
+    }
 
 
 def test_automatic_case_requires_reciprocal_counterfactual_and_never_infers_a_rule():
@@ -199,11 +205,18 @@ def test_automatic_case_requires_reciprocal_counterfactual_and_never_infers_a_ru
     )
     set_judgment_cases(
         workflow,
-        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        schemas=(
+            JudgmentFactSchemaBindingV1(
+                graph_id="__program__", state_id="review", fact_schema=schema
+            ),
+        ),
         cases=(first, second),
     )
     assert evaluate_judgment_case_qualification(workflow).passed
-    assert workflow.program.states["review"].decision == _workflow().program.states["review"].decision
+    assert (
+        workflow.program.states["review"].decision
+        == _workflow().program.states["review"].decision
+    )
 
 
 def test_stale_decision_binding_is_rejected_before_storage():
@@ -225,7 +238,11 @@ def test_stale_decision_binding_is_rejected_before_storage():
     with pytest.raises(QualificationError, match="invalid judgment case binding"):
         set_judgment_cases(
             workflow,
-            schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+            schemas=(
+                JudgmentFactSchemaBindingV1(
+                    graph_id="__program__", state_id="review", fact_schema=schema
+                ),
+            ),
             cases=(case,),
         )
 
@@ -243,7 +260,11 @@ def test_more_evidence_required_refuses_certification_but_human_node_does_not():
     )
     set_judgment_cases(
         workflow,
-        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        schemas=(
+            JudgmentFactSchemaBindingV1(
+                graph_id="__program__", state_id="review", fact_schema=schema
+            ),
+        ),
         cases=(case,),
     )
     report = evaluate_qualification(workflow)
@@ -282,7 +303,11 @@ def test_judgment_evidence_is_verified_under_local_evidence_root(tmp_path):
     )
     set_judgment_cases(
         workflow,
-        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        schemas=(
+            JudgmentFactSchemaBindingV1(
+                graph_id="__program__", state_id="review", fact_schema=schema
+            ),
+        ),
         cases=(case,),
     )
     verified = evaluate_qualification(workflow, evidence_root=tmp_path)

@@ -2507,9 +2507,7 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
                 case_set = JudgmentCaseSetV1.model_validate(payload)
             except (OSError, ValueError) as exc:
                 raise SystemExit(f"invalid judgment case set: {exc}") from exc
-            set_judgment_cases(
-                workflow, schemas=case_set.schemas, cases=case_set.cases
-            )
+            set_judgment_cases(workflow, schemas=case_set.schemas, cases=case_set.cases)
             save_qualified_workflow(workflow, args.bundle)
             report = evaluate_judgment_case_qualification(workflow)
         print(report.model_dump_json(indent=2))

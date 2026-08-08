@@ -147,9 +147,7 @@ class JudgmentCaseV1(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal["openadapt.judgment-case/v1"] = (
-        "openadapt.judgment-case/v1"
-    )
+    schema_version: Literal["openadapt.judgment-case/v1"] = "openadapt.judgment-case/v1"
     id: str = Field(pattern=_ID_RE)
     decision: JudgmentDecisionBindingV1
     fact_schema_sha256: str = Field(pattern=_SHA256_RE)
@@ -173,18 +171,18 @@ class JudgmentCaseV1(BaseModel):
         ):
             raise ValueError("judgment evidence paths must be unique")
         if self.review_note_ref is not None and self.review_note_ref.kind != "document":
-            raise ValueError("a judgment review note must be a local document reference")
+            raise ValueError(
+                "a judgment review note must be a local document reference"
+            )
         if self.id in self.contrast_case_ids or len(set(self.contrast_case_ids)) != len(
             self.contrast_case_ids
         ):
-            raise ValueError("judgment contrasts must be unique and cannot self-reference")
-        automatic = self.disposition is JudgmentDisposition.AUTOMATIC_RULE
-        if automatic and (
-            self.reviewed_rule_id is None or self.option_id is None
-        ):
             raise ValueError(
-                "automatic_rule requires a reviewed rule id and option id"
+                "judgment contrasts must be unique and cannot self-reference"
             )
+        automatic = self.disposition is JudgmentDisposition.AUTOMATIC_RULE
+        if automatic and (self.reviewed_rule_id is None or self.option_id is None):
+            raise ValueError("automatic_rule requires a reviewed rule id and option id")
         if not automatic and (
             self.reviewed_rule_id is not None or self.option_id is not None
         ):
@@ -271,58 +269,72 @@ def evaluate_judgment_cases(
             or case.decision.workflow_contract_sha256 != workflow_contract_sha256
             or case.decision.decision_contract_sha256 != executable[0]
         ):
-            findings.append(JudgmentCaseFindingV1(
-                code=JudgmentCaseFindingCode.BINDING_MISMATCH,
-                case_id=case.id,
-                message="case is not bound to the current workflow and decision contract",
-            ))
+            findings.append(
+                JudgmentCaseFindingV1(
+                    code=JudgmentCaseFindingCode.BINDING_MISMATCH,
+                    case_id=case.id,
+                    message="case is not bound to the current workflow and decision contract",
+                )
+            )
             continue
         if schema is None or case.fact_schema_sha256 != schema.contract_sha256():
-            findings.append(JudgmentCaseFindingV1(
-                code=JudgmentCaseFindingCode.FACT_SCHEMA_MISMATCH,
-                case_id=case.id,
-                message="case facts are not bound to the current reviewed fact schema",
-            ))
+            findings.append(
+                JudgmentCaseFindingV1(
+                    code=JudgmentCaseFindingCode.FACT_SCHEMA_MISMATCH,
+                    case_id=case.id,
+                    message="case facts are not bound to the current reviewed fact schema",
+                )
+            )
             continue
         error = _fact_value_error(schema, case.facts)
         if error:
-            findings.append(JudgmentCaseFindingV1(
-                code=JudgmentCaseFindingCode.FACT_SCHEMA_MISMATCH,
-                case_id=case.id,
-                message=error,
-            ))
+            findings.append(
+                JudgmentCaseFindingV1(
+                    code=JudgmentCaseFindingCode.FACT_SCHEMA_MISMATCH,
+                    case_id=case.id,
+                    message=error,
+                )
+            )
             continue
         if case.disposition is JudgmentDisposition.HUMAN_NODE:
             human += 1
-            findings.append(JudgmentCaseFindingV1(
-                code=JudgmentCaseFindingCode.RETAINED_HUMAN_AUTHORITY,
-                case_id=case.id,
-                message="this case retains a human decision node",
-            ))
+            findings.append(
+                JudgmentCaseFindingV1(
+                    code=JudgmentCaseFindingCode.RETAINED_HUMAN_AUTHORITY,
+                    case_id=case.id,
+                    message="this case retains a human decision node",
+                )
+            )
         elif case.disposition is JudgmentDisposition.MORE_EVIDENCE_REQUIRED:
-            findings.append(JudgmentCaseFindingV1(
-                code=JudgmentCaseFindingCode.MORE_EVIDENCE_REQUIRED,
-                case_id=case.id,
-                message="this case requires more local evidence before an answer can proceed",
-            ))
+            findings.append(
+                JudgmentCaseFindingV1(
+                    code=JudgmentCaseFindingCode.MORE_EVIDENCE_REQUIRED,
+                    case_id=case.id,
+                    message="this case requires more local evidence before an answer can proceed",
+                )
+            )
         elif case.disposition is JudgmentDisposition.AUTOMATIC_RULE:
             automatic += 1
             assert case.reviewed_rule_id is not None and case.option_id is not None
             if case.option_id not in executable[1]:
-                findings.append(JudgmentCaseFindingV1(
-                    code=JudgmentCaseFindingCode.BINDING_MISMATCH,
-                    case_id=case.id,
-                    message="automatic case names an option outside the compiled decision",
-                ))
+                findings.append(
+                    JudgmentCaseFindingV1(
+                        code=JudgmentCaseFindingCode.BINDING_MISMATCH,
+                        case_id=case.id,
+                        message="automatic case names an option outside the compiled decision",
+                    )
+                )
                 continue
             conflict_key = (*key, case.reviewed_rule_id, case.facts_sha256())
             prior = automatic_key.get(conflict_key)
             if prior is not None and by_id[prior].option_id != case.option_id:
-                findings.append(JudgmentCaseFindingV1(
-                    code=JudgmentCaseFindingCode.CONFLICT,
-                    case_id=case.id,
-                    message="identical facts select different options for one reviewed rule",
-                ))
+                findings.append(
+                    JudgmentCaseFindingV1(
+                        code=JudgmentCaseFindingCode.CONFLICT,
+                        case_id=case.id,
+                        message="identical facts select different options for one reviewed rule",
+                    )
+                )
             automatic_key[conflict_key] = case.id
             contrast_ok = any(
                 other_id in by_id
@@ -332,11 +344,13 @@ def evaluate_judgment_cases(
                 for other_id in case.contrast_case_ids
             )
             if not contrast_ok:
-                findings.append(JudgmentCaseFindingV1(
-                    code=JudgmentCaseFindingCode.MISSING_CONTRAST_COVERAGE,
-                    case_id=case.id,
-                    message="automatic_rule needs a reciprocal counterfactual with different facts",
-                ))
+                findings.append(
+                    JudgmentCaseFindingV1(
+                        code=JudgmentCaseFindingCode.MISSING_CONTRAST_COVERAGE,
+                        case_id=case.id,
+                        message="automatic_rule needs a reciprocal counterfactual with different facts",
+                    )
+                )
 
     blocking = {
         JudgmentCaseFindingCode.BINDING_MISMATCH,
@@ -355,7 +369,9 @@ def evaluate_judgment_cases(
     )
 
 
-def _fact_value_error(schema: JudgmentFactSchemaV1, facts: dict[str, Any]) -> str | None:
+def _fact_value_error(
+    schema: JudgmentFactSchemaV1, facts: dict[str, Any]
+) -> str | None:
     if set(facts) != set(schema.fields):
         return "case facts must contain exactly the reviewed fact schema fields"
     for name, field in schema.fields.items():
@@ -374,5 +390,7 @@ def _fact_value_error(schema: JudgmentFactSchemaV1, facts: dict[str, Any]) -> st
 
 def _sha256(value: Any) -> str:
     return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        json.dumps(
+            value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode()
     ).hexdigest()

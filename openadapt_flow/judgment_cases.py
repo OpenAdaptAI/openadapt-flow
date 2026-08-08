@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 from enum import Enum
+from pathlib import PureWindowsPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -92,7 +93,13 @@ class LocalEvidenceRefV1(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def _local_relative_path(cls, value: str) -> str:
-        if value.startswith("/") or "://" in value or "\\" in value:
+        windows_path = PureWindowsPath(value)
+        if (
+            value.startswith("/")
+            or "://" in value
+            or windows_path.drive
+            or windows_path.is_absolute()
+        ):
             raise ValueError("judgment evidence must use a local relative path")
         parts = value.split("/")
         if any(part in {"", ".", ".."} for part in parts):
@@ -207,6 +214,7 @@ class JudgmentCaseFindingCode(str, Enum):
     FACT_SCHEMA_MISMATCH = "fact_schema_mismatch"
     CONFLICT = "conflict"
     MISSING_CONTRAST_COVERAGE = "missing_contrast_coverage"
+    MORE_EVIDENCE_REQUIRED = "more_evidence_required"
     RETAINED_HUMAN_AUTHORITY = "retained_human_authority"
 
 
@@ -291,6 +299,12 @@ def evaluate_judgment_cases(
                 case_id=case.id,
                 message="this case retains a human decision node",
             ))
+        elif case.disposition is JudgmentDisposition.MORE_EVIDENCE_REQUIRED:
+            findings.append(JudgmentCaseFindingV1(
+                code=JudgmentCaseFindingCode.MORE_EVIDENCE_REQUIRED,
+                case_id=case.id,
+                message="this case requires more local evidence before an answer can proceed",
+            ))
         elif case.disposition is JudgmentDisposition.AUTOMATIC_RULE:
             automatic += 1
             assert case.reviewed_rule_id is not None and case.option_id is not None
@@ -329,6 +343,7 @@ def evaluate_judgment_cases(
         JudgmentCaseFindingCode.FACT_SCHEMA_MISMATCH,
         JudgmentCaseFindingCode.CONFLICT,
         JudgmentCaseFindingCode.MISSING_CONTRAST_COVERAGE,
+        JudgmentCaseFindingCode.MORE_EVIDENCE_REQUIRED,
     }
     return JudgmentCaseQualificationReportV1(
         workflow_contract_sha256=workflow_contract_sha256,

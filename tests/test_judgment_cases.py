@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from openadapt_flow.ir import (
@@ -34,7 +36,9 @@ from openadapt_flow.judgment_cases import (
 from openadapt_flow.qualification import (
     EnvironmentBoundary,
     QualificationError,
+    QualificationRefusalCode,
     evaluate_judgment_case_qualification,
+    evaluate_qualification,
     init_project,
     set_judgment_cases,
     workflow_contract_sha256,
@@ -224,3 +228,69 @@ def test_stale_decision_binding_is_rejected_before_storage():
             schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
             cases=(case,),
         )
+
+
+def test_more_evidence_required_refuses_certification_but_human_node_does_not():
+    workflow = _workflow()
+    init_project(workflow, environment=_environment())
+    schema = _schema()
+    case = _case(
+        workflow,
+        schema,
+        case_id="needs-evidence",
+        facts={"urgency": "high", "complete": False},
+        disposition=JudgmentDisposition.MORE_EVIDENCE_REQUIRED,
+    )
+    set_judgment_cases(
+        workflow,
+        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        cases=(case,),
+    )
+    report = evaluate_qualification(workflow)
+    assert report.passed is False
+    assert QualificationRefusalCode.JUDGMENT_CASE_MORE_EVIDENCE_REQUIRED in {
+        refusal.code for refusal in report.refusals
+    }
+
+
+@pytest.mark.parametrize("path", ("C:/cases/a.json", r"\\server\share\a.json"))
+def test_local_evidence_refuses_windows_absolute_paths(path: str):
+    with pytest.raises(ValueError, match="local relative path"):
+        LocalEvidenceRefV1(sha256="a" * 64, relative_path=path, kind="report")
+
+
+def test_judgment_evidence_is_verified_under_local_evidence_root(tmp_path):
+    workflow = _workflow()
+    init_project(workflow, environment=_environment())
+    schema = _schema()
+    payload = b"reviewed local evidence"
+    evidence_path = tmp_path / "cases"
+    evidence_path.mkdir()
+    (evidence_path / "human-1.json").write_bytes(payload)
+    case = _case(
+        workflow, schema, case_id="human-1", facts={"urgency": "high", "complete": True}
+    ).model_copy(
+        update={
+            "local_evidence": (
+                LocalEvidenceRefV1(
+                    relative_path="cases/human-1.json",
+                    sha256=hashlib.sha256(payload).hexdigest(),
+                    kind="report",
+                ),
+            )
+        }
+    )
+    set_judgment_cases(
+        workflow,
+        schemas=(JudgmentFactSchemaBindingV1(graph_id="__program__", state_id="review", fact_schema=schema),),
+        cases=(case,),
+    )
+    verified = evaluate_qualification(workflow, evidence_root=tmp_path)
+    assert QualificationRefusalCode.JUDGMENT_CASE_EVIDENCE_UNVERIFIED not in {
+        refusal.code for refusal in verified.refusals
+    }
+    (evidence_path / "human-1.json").write_bytes(b"changed")
+    changed = evaluate_qualification(workflow, evidence_root=tmp_path)
+    assert QualificationRefusalCode.JUDGMENT_CASE_EVIDENCE_UNVERIFIED in {
+        refusal.code for refusal in changed.refusals
+    }

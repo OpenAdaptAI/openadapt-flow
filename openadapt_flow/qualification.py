@@ -995,6 +995,8 @@ class QualificationRefusalCode(str, Enum):
     JUDGMENT_CASE_BINDING_INVALID = "judgment_case_binding_invalid"
     JUDGMENT_CASE_CONFLICT = "judgment_case_conflict"
     JUDGMENT_CASE_CONTRAST_MISSING = "judgment_case_contrast_missing"
+    JUDGMENT_CASE_MORE_EVIDENCE_REQUIRED = "judgment_case_more_evidence_required"
+    JUDGMENT_CASE_EVIDENCE_UNVERIFIED = "judgment_case_evidence_unverified"
     POLICY_VIOLATION = "policy_violation"
 
 
@@ -4206,9 +4208,65 @@ def _case_evidence_contract_sha256(project: QualificationProject) -> str:
                 ),
             }
         )
+    payload.append(
+        {
+            "judgment_cases": [
+                {
+                    "case_id": case.id,
+                    "local_evidence": [
+                        item.model_dump(mode="json") for item in case.local_evidence
+                    ],
+                    "review_note_ref": (
+                        case.review_note_ref.model_dump(mode="json")
+                        if case.review_note_ref is not None
+                        else None
+                    ),
+                }
+                for case in sorted(project.judgment_cases, key=lambda item: item.id)
+            ]
+        }
+    )
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _judgment_evidence_errors(
+    project: QualificationProject,
+    *,
+    evidence_root: Optional[Path | str],
+) -> list[tuple[str, str]]:
+    """Verify every local judgment artifact before certification.
+
+    The artifacts remain local. The sealed project stores only relative paths
+    and digests, which this check verifies under the declared local root.
+    """
+
+    if not project.judgment_cases:
+        return []
+    if evidence_root is None:
+        return [
+            (
+                "qualification.judgment_cases",
+                "judgment-case certification requires the local evidence root",
+            )
+        ]
+    root = Path(evidence_root).resolve()
+    errors: list[tuple[str, str]] = []
+    for case in project.judgment_cases:
+        refs = [*case.local_evidence]
+        if case.review_note_ref is not None:
+            refs.append(case.review_note_ref)
+        for evidence in refs:
+            _payload, error = _read_evidence_bytes(root=root, evidence=evidence)
+            if error is not None:
+                errors.append(
+                    (
+                        f"qualification.judgment_cases.{case.id}.local_evidence",
+                        error,
+                    )
+                )
+    return errors
 
 
 def record_case_results(
@@ -4969,6 +5027,10 @@ def evaluate_qualification(
             QualificationRefusalCode.JUDGMENT_CASE_CONTRAST_MISSING,
             "judgment automatic rule lacks contrast coverage",
         ),
+        JudgmentCaseFindingCode.MORE_EVIDENCE_REQUIRED: (
+            QualificationRefusalCode.JUDGMENT_CASE_MORE_EVIDENCE_REQUIRED,
+            "judgment case requires more evidence",
+        ),
     }
     for finding in judgment_report.findings:
         mapped = judgment_refusal_codes.get(finding.code)
@@ -4981,6 +5043,17 @@ def evaluate_qualification(
                 path="qualification.judgment_cases",
                 case_id=finding.case_id,
                 message=f"{mapped[1]}: {finding.message}",
+            )
+        )
+    for path, message in _judgment_evidence_errors(
+        project,
+        evidence_root=evidence_root,
+    ):
+        refusals.append(
+            QualificationRefusal(
+                code=QualificationRefusalCode.JUDGMENT_CASE_EVIDENCE_UNVERIFIED,
+                path=path,
+                message=message,
             )
         )
 

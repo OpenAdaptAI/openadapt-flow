@@ -58,6 +58,7 @@ def test_guided_cli_composes_human_recording_and_paced_replay(
         presentation_delay=None,
         name=None,
         no_receipt=True,
+        break_it=False,
     )
 
     assert _cmd_tutorial(args) == 0

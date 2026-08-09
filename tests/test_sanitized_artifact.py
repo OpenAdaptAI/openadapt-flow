@@ -89,7 +89,10 @@ class SyntaxHostileScrubber:
         (("steps", 0, "id"), "step_000"),
         (("qualification", "identity_policies", "step_000", "step_id"), "step_000"),
         (("qualification", "project_id"), "f6d239d0-0b5e-440f-b794-bbe69cc01115"),
-        (("qualification", "environment", "environment_observer_id"), "backend:PlaywrightBackend"),
+        (
+            ("qualification", "environment", "environment_observer_id"),
+            "backend:PlaywrightBackend",
+        ),
         (("steps", 0, "anchor", "landmarks", 0, "relation"), "left_of"),
     ],
 )

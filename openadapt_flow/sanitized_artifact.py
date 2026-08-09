@@ -314,9 +314,7 @@ def _bundle_string_is_structural(path: tuple[str | int, ...], value: str) -> boo
         return True
     if key.endswith("_at") and value:
         return True
-    if key in {"recording_id", "id", "step_id"} and _OPAQUE_MACHINE_ID.fullmatch(
-        value
-    ):
+    if key in {"recording_id", "id", "step_id"} and _OPAQUE_MACHINE_ID.fullmatch(value):
         return True
     if key.endswith("_id") and re.fullmatch(
         r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", value, re.IGNORECASE

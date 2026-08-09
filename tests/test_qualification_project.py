@@ -2455,9 +2455,7 @@ def test_full_campaign_certifies_through_existing_policy_and_round_trips(
     (bundle / "templates").mkdir(parents=True)
     (bundle / "templates" / "save.png").write_bytes(_qualification_visual_fixture()[1])
     workflow.save(bundle)
-    (bundle / "workflow.py").write_text(
-        render_workflow_py(workflow), encoding="utf-8"
-    )
+    (bundle / "workflow.py").write_text(render_workflow_py(workflow), encoding="utf-8")
     workflow = Workflow.load(bundle)
     _configure(workflow, tier=VerificationTier.INDEPENDENT_SYSTEM)
     evidence_root = tmp_path / "evidence"

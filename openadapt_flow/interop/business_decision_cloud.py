@@ -134,6 +134,71 @@ class BusinessDecisionCloudCycle:
     receipt_confirmed: bool
 
 
+def poll_business_decision_cloud_answer(
+    transport: RelayTransport,
+    *,
+    wait_s: float = 25.0,
+) -> Optional[BusinessDecisionCloudDelivery]:
+    """Poll one runner queue without assuming which local task it names."""
+
+    from openadapt_types import BusinessDecisionAnswerV1
+
+    if not 0 <= wait_s <= 25:
+        raise BusinessDecisionCloudRefused("the answer poll wait is invalid")
+    try:
+        status, raw = transport.post(
+            ANSWERS_POLL_PATH,
+            {"wait_seconds": wait_s},
+            timeout_s=wait_s + 10.0,
+        )
+    except RelayUncertain:
+        return None
+    if status == 204:
+        return None
+    if status >= 500:
+        return None
+    if status >= 400:
+        raise BusinessDecisionCloudRefused("Cloud refused the answer poll")
+    body = _exact_object(raw, _POLL_RESPONSE_KEYS, "answer poll response")
+    if (
+        body["one_use"] is not True
+        or body["runner_revalidation_required"] is not True
+        or body["effect_outcome"] != "not_reported_by_answer_delivery"
+    ):
+        raise BusinessDecisionCloudRefused(
+            "the answer poll response weakens the runner contract"
+        )
+    delivery = _exact_object(body["delivery"], _DELIVERY_KEYS, "answer delivery")
+    try:
+        answer = BusinessDecisionAnswerV1.model_validate(delivery["answer"])
+    except ValueError as exc:
+        raise BusinessDecisionCloudRefused("the Cloud answer is invalid") from exc
+    lease_attempt = delivery["lease_attempt"]
+    if (
+        not isinstance(delivery["answer_id"], str)
+        or not _OPAQUE_ID.fullmatch(delivery["answer_id"])
+        or not isinstance(delivery["answer_digest"], str)
+        or not _DIGEST.fullmatch(delivery["answer_digest"])
+        or delivery["answer_digest"] != answer.digest
+        or not isinstance(delivery["lease_id"], str)
+        or not _OPAQUE_ID.fullmatch(delivery["lease_id"])
+        or not isinstance(lease_attempt, int)
+        or isinstance(lease_attempt, bool)
+        or lease_attempt < 1
+        or not isinstance(delivery["lease_expires_at"], str)
+    ):
+        raise BusinessDecisionCloudRefused("the answer delivery is invalid")
+    _parse_time(delivery["lease_expires_at"], "answer lease expiry")
+    return BusinessDecisionCloudDelivery(
+        answer_id=delivery["answer_id"],
+        answer=answer,
+        answer_digest=delivery["answer_digest"],
+        lease_id=delivery["lease_id"],
+        lease_attempt=lease_attempt,
+        lease_expires_at=delivery["lease_expires_at"],
+    )
+
+
 def _parse_time(value: str, label: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -257,68 +322,28 @@ class BusinessDecisionCloudRelay:
 
     def poll(self, *, wait_s: float = 25.0) -> Optional[BusinessDecisionCloudDelivery]:
         """Poll for one answer leased to this runner."""
-
-        from openadapt_types import BusinessDecisionAnswerV1
-
-        if not 0 <= wait_s <= 25:
-            raise BusinessDecisionCloudRefused("the answer poll wait is invalid")
-        try:
-            status, raw = self._transport.post(
-                ANSWERS_POLL_PATH,
-                {"wait_seconds": wait_s},
-                timeout_s=wait_s + 10.0,
-            )
-        except RelayUncertain:
-            return None
-        if status == 204:
-            return None
-        if status >= 500:
-            return None
-        if status >= 400:
-            raise BusinessDecisionCloudRefused("Cloud refused the answer poll")
-        body = _exact_object(raw, _POLL_RESPONSE_KEYS, "answer poll response")
-        if (
-            body["one_use"] is not True
-            or body["runner_revalidation_required"] is not True
-            or body["effect_outcome"] != "not_reported_by_answer_delivery"
-        ):
-            raise BusinessDecisionCloudRefused(
-                "the answer poll response weakens the runner contract"
-            )
-        delivery = _exact_object(body["delivery"], _DELIVERY_KEYS, "answer delivery")
-        try:
-            answer = BusinessDecisionAnswerV1.model_validate(delivery["answer"])
-        except ValueError as exc:
-            raise BusinessDecisionCloudRefused("the Cloud answer is invalid") from exc
-        lease_attempt = delivery["lease_attempt"]
-        if (
-            not isinstance(delivery["answer_id"], str)
-            or not _OPAQUE_ID.fullmatch(delivery["answer_id"])
-            or not isinstance(delivery["answer_digest"], str)
-            or not _DIGEST.fullmatch(delivery["answer_digest"])
-            or delivery["answer_digest"] != answer.digest
-            or not isinstance(delivery["lease_id"], str)
-            or not _OPAQUE_ID.fullmatch(delivery["lease_id"])
-            or not isinstance(lease_attempt, int)
-            or isinstance(lease_attempt, bool)
-            or lease_attempt < 1
-            or not isinstance(delivery["lease_expires_at"], str)
-            or answer.task_id != self._task.task_id
-            or answer.task_revision != self._task.task_revision
-            or answer.task_digest != self._task.digest
-        ):
+        delivery = poll_business_decision_cloud_answer(self._transport, wait_s=wait_s)
+        if delivery is not None and not self.matches(delivery):
             raise BusinessDecisionCloudRefused(
                 "the answer delivery differs from the local task"
             )
-        _parse_time(delivery["lease_expires_at"], "answer lease expiry")
-        return BusinessDecisionCloudDelivery(
-            answer_id=delivery["answer_id"],
-            answer=answer,
-            answer_digest=delivery["answer_digest"],
-            lease_id=delivery["lease_id"],
-            lease_attempt=lease_attempt,
-            lease_expires_at=delivery["lease_expires_at"],
-        )
+        return delivery
+
+    @property
+    def task_binding(self) -> tuple[str, int, str]:
+        """Return the exact portable task key used by a shared supervisor."""
+
+        return (self._task.task_id, self._task.task_revision, self._task.digest)
+
+    def matches(self, delivery: BusinessDecisionCloudDelivery) -> bool:
+        """Return true only when a delivery names this exact task revision."""
+
+        answer = delivery.answer
+        return (
+            answer.task_id,
+            answer.task_revision,
+            answer.task_digest,
+        ) == self.task_binding
 
     def record(
         self,
@@ -661,4 +686,5 @@ __all__ = [
     "BusinessDecisionCloudRefused",
     "BusinessDecisionCloudRelay",
     "build_qualified_business_decision_cloud_relay",
+    "poll_business_decision_cloud_answer",
 ]

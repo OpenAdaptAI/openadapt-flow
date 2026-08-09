@@ -15,6 +15,7 @@ from typing import Callable, Optional, Protocol
 
 from openadapt_flow.console import data
 from openadapt_flow.console.decision_relay import RelayTransport
+from openadapt_flow.crypto import CryptoError
 from openadapt_flow.interop.business_decision_cloud import (
     BusinessDecisionCloudDelivery,
     BusinessDecisionCloudRefused,
@@ -38,6 +39,18 @@ class BusinessDecisionRelayFactory(Protocol):
         transport: RelayTransport,
         at: str,
     ) -> BusinessDecisionCloudRelay: ...
+
+
+class BusinessDecisionCheckpointKeyResolver(Protocol):
+    """Return the durable checkpoint key for one exact local run."""
+
+    def __call__(self, run_dir: Path) -> Optional[str]: ...
+
+
+class UnmatchedBusinessDecisionRefuser(Protocol):
+    """Close a leased answer that cannot bind to a current local task."""
+
+    def __call__(self, delivery: BusinessDecisionCloudDelivery, at: str) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -69,6 +82,7 @@ class BusinessDecisionSupervisorReport:
     answer_matched: bool = False
     answer_recorded: bool = False
     receipt_confirmed: bool = False
+    unmatched_refusal_confirmed: bool = False
 
 
 def _now() -> datetime:
@@ -84,11 +98,15 @@ class BusinessDecisionSupervisor:
         *,
         transport: RelayTransport,
         relay_factory: BusinessDecisionRelayFactory,
+        checkpoint_key_resolver: BusinessDecisionCheckpointKeyResolver,
+        unmatched_refuser: UnmatchedBusinessDecisionRefuser,
         now: Optional[Callable[[], datetime]] = None,
     ) -> None:
         self._runs_root = Path(runs_root)
         self._transport = transport
         self._relay_factory = relay_factory
+        self._checkpoint_key_resolver = checkpoint_key_resolver
+        self._unmatched_refuser = unmatched_refuser
         self._now = now or _now
 
     def active_relays(self, *, at: str) -> tuple[list[BoundBusinessDecisionRelay], int]:
@@ -97,18 +115,25 @@ class BusinessDecisionSupervisor:
         relays: list[BoundBusinessDecisionRelay] = []
         not_projectable = 0
         for run_dir in data._scan(self._runs_root, data._is_run_dir):
-            pending = CheckpointStore(run_dir).read_pending()
-            if pending is None or pending.category != "business_decision":
-                continue
-            store = BusinessDecisionStore(run_dir)
-            if not store.active_path.is_file():
-                not_projectable += 1
-                continue
             try:
+                checkpoint_key = self._checkpoint_key_resolver(run_dir)
+                pending = CheckpointStore(run_dir, key=checkpoint_key).read_pending()
+                if pending is None or pending.category != "business_decision":
+                    continue
+                store = BusinessDecisionStore(run_dir, checkpoint_key=checkpoint_key)
+                if not store.active_path.is_file():
+                    not_projectable += 1
+                    continue
                 request, _request_sha256 = store.read_active_request()
                 retained = store.read_receipt(request.digest)
                 relay = self._relay_factory(run_dir, store, self._transport, at)
-            except (BusinessDecisionRefused, BusinessDecisionCloudRefused, ValueError):
+            except (
+                BusinessDecisionRefused,
+                BusinessDecisionCloudRefused,
+                CryptoError,
+                OSError,
+                ValueError,
+            ):
                 not_projectable += 1
                 continue
             relays.append(
@@ -185,11 +210,15 @@ class BusinessDecisionSupervisor:
         )
         bound = indexed.get(key)
         if bound is None:
+            refused_at = self._now().astimezone(timezone.utc).isoformat()
+            confirmed = self._unmatched_refuser(delivery, refused_at)
             return BusinessDecisionSupervisorReport(
                 publishes=publishes,
                 answer_received=True,
+                unmatched_refusal_confirmed=confirmed,
             )
-        cycle = bound.relay.record(delivery, at=at)
+        recorded_at = self._now().astimezone(timezone.utc).isoformat()
+        cycle = bound.relay.record(delivery, at=recorded_at)
         return BusinessDecisionSupervisorReport(
             publishes=publishes,
             answer_received=True,
@@ -202,7 +231,9 @@ class BusinessDecisionSupervisor:
 __all__ = [
     "BoundBusinessDecisionRelay",
     "BusinessDecisionPublishReport",
+    "BusinessDecisionCheckpointKeyResolver",
     "BusinessDecisionRelayFactory",
     "BusinessDecisionSupervisor",
     "BusinessDecisionSupervisorReport",
+    "UnmatchedBusinessDecisionRefuser",
 ]

@@ -260,3 +260,37 @@ The API is the correct integration boundary for Desktop, Cloud, and
 customer-controlled operator services. A future CLI must consume a trusted
 principal from a configured local identity policy. It must not let a user
 self-assert an authorized production role.
+
+### Customer-runner transport attestations
+
+The customer runner can call
+`create_runner_business_decision_signature_attestation()` after it verifies the
+portable task and qualification-policy signatures. The helper binds that check
+to the exact task, presentation, policy, Cloud role policy, tenant, runner, and
+authenticated runner bearer. Cloud can then reject a changed or stale
+registration envelope.
+
+After Flow records the answer, the runner can call
+`create_runner_business_decision_receipt_attestation()`. This helper first
+verifies the portable receipt signature. It then binds the receipt digest and
+answer ID to the same authenticated runner route.
+
+These transport attestations do not replace Flow admission. The runner still
+verifies the exact task and Cloud answer again before it submits the local
+decision. The runner still performs fresh live-state revalidation before any
+selected successor action.
+
+`BusinessDecisionCloudRelay` connects these boundaries for one paused run. It:
+
+1. verifies and registers the exact qualified task;
+2. polls one answer leased to the same tenant and runner;
+3. verifies the Cloud answer and maps its opaque role through the local role
+   map;
+4. stores the answer in Flow's durable business-decision journal;
+5. returns the signed portable receipt and runner transport attestation.
+
+An uncertain receipt request does not repeat the decision. Flow retains the
+same local answer. The runner can submit the same receipt again when Cloud
+redelivers the signed answer. The receipt still means only `answer_recorded` and
+`recorded_pending_revalidation`. It does not mean that a successor action ran or
+that the business effect is `VERIFIED`.

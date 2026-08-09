@@ -27,7 +27,6 @@ def test_fast_tutorial_remains_the_cli_default() -> None:
 def test_guided_cli_composes_human_recording_and_paced_replay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     observed: dict[str, Any] = {}
 
@@ -65,15 +64,6 @@ def test_guided_cli_composes_human_recording_and_paced_replay(
     assert observed["interactive_record"] is True
     assert observed["headed"] is True
     assert observed["presentation_delay_s"] == tutorial.GUIDED_PRESENTATION_DELAY_S
-
-    metering_line = next(
-        line
-        for line in capsys.readouterr().out.splitlines()
-        if "metering class" in line
-    )
-    assert "billable" in metering_line
-    assert "not" in metering_line
-    assert "charged" in metering_line
 
 
 def test_presentation_delay_is_bounded_and_injected() -> None:

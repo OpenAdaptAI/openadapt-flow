@@ -8,6 +8,8 @@ text, or screenshot.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import TYPE_CHECKING, Literal, Optional
 
@@ -135,6 +137,10 @@ class QualifiedBusinessDecisionDelivery(BaseModel):
 
     @model_validator(mode="after")
     def _closed_sets(self) -> "QualifiedBusinessDecisionDelivery":
+        if self.egress_review_digest != self.review_contract_digest:
+            raise ValueError(
+                "the egress review must name the exact presentation review"
+            )
         if len(set(self.role_refs.values())) != len(self.role_refs):
             raise ValueError("each local role must map to one unique remote role")
         for values, label in (
@@ -149,6 +155,46 @@ class QualifiedBusinessDecisionDelivery(BaseModel):
         if len(set(context_ids)) != len(context_ids):
             raise ValueError("business decision context ids must be unique")
         return self
+
+
+def business_decision_delivery_review_digest(
+    decision: "BusinessDecisionSpec", binding: QualifiedBusinessDecisionDelivery
+) -> str:
+    """Bind one qualification review to every byte of remote presentation copy."""
+
+    payload = {
+        "schema_version": "openadapt.business-decision-presentation-review/v1",
+        "graph_id": binding.graph_id,
+        "state_id": binding.state_id,
+        "decision_contract_sha256": binding.decision_contract_sha256,
+        "decision_contract_revision": binding.decision_contract_revision,
+        "question": decision.question,
+        "options": [
+            {"option_id": option.id, "label": option.label}
+            for option in decision.options
+        ],
+        "presentation_ref": binding.presentation_ref,
+        "presentation_revision": binding.presentation_revision,
+        "category": binding.category,
+        "title": binding.title,
+        "role_label": binding.role_label,
+        "why_judgment_needed": binding.why_judgment_needed,
+        "context_cards": [
+            card.model_dump(mode="json") for card in binding.context_cards
+        ],
+        "option_copy": {
+            key: value.model_dump(mode="json")
+            for key, value in sorted(binding.option_copy.items())
+        },
+        "reason_codes": list(binding.reason_codes),
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def resolve_qualified_business_decision(
@@ -184,6 +230,11 @@ def resolve_qualified_business_decision(
         raise ValueError(
             "a remotely answerable business decision cannot require local evidence"
         )
+    expected_review = business_decision_delivery_review_digest(decision, binding)
+    if binding.review_contract_digest != expected_review:
+        raise ValueError(
+            "the mobile presentation differs from its exact qualification review"
+        )
     return decision
 
 
@@ -210,6 +261,7 @@ __all__ = [
     "QualifiedBusinessDecisionContextCard",
     "QualifiedBusinessDecisionDelivery",
     "QualifiedBusinessDecisionOptionCopy",
+    "business_decision_delivery_review_digest",
     "qualified_business_decision_delivery_errors",
     "resolve_qualified_business_decision",
 ]

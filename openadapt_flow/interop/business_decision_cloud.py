@@ -461,10 +461,15 @@ def build_qualified_business_decision_cloud_relay(
         business_decision_role_mapping_digest,
         project_portable_business_decision_task,
     )
-    from openadapt_flow.qualification import current_certification_matches
+    from openadapt_flow.qualification import (
+        current_certification_matches,
+        workflow_contract_sha256,
+    )
     from openadapt_flow.qualified_business_decisions import (
         resolve_qualified_business_decision,
     )
+    from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+    from openadapt_flow.runtime.durable.program_checkpoint import bundle_version
 
     project = workflow.qualification
     if project is None or not current_certification_matches(workflow, policy=policy):
@@ -472,6 +477,21 @@ def build_qualified_business_decision_cloud_relay(
             "the workflow has no current reproducible certification"
         )
     request, _request_sha256 = store.read_active_request()
+    manifest = CheckpointStore(store.run_dir, key=store.checkpoint_key).read_manifest()
+    if manifest is None:
+        raise BusinessDecisionCloudRefused(
+            "the active decision has no durable run manifest"
+        )
+    if (
+        request.run_id != manifest.run_id
+        or request.workflow_name != manifest.workflow_name
+        or request.workflow_name != workflow.name
+        or request.workflow_contract_sha256 != workflow_contract_sha256(workflow)
+        or request.bundle_version != bundle_version(manifest.bundle_dir)
+    ):
+        raise BusinessDecisionCloudRefused(
+            "the certified workflow differs from the active durable run"
+        )
     matches = [
         item
         for item in project.business_decision_deliveries

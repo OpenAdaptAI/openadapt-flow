@@ -6012,7 +6012,7 @@ def _cmd_business_decisions_serve(args: argparse.Namespace) -> int:
             origin=origin,
         )
         loop = BusinessDecisionServiceLoop(supervisor, wait_s=args.poll_wait_seconds)
-    except (RelayRefused, RunnerConfigError, ValueError) as exc:
+    except (RelayRefused, RunnerConfigError, OSError, ValueError) as exc:
         print(f"business decisions: {exc}", file=sys.stderr)
         return 2
     if args.once:

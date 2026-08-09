@@ -272,6 +272,31 @@ def test_exact_run_workflow_refuses_wrong_encryption_key(tmp_path: Path) -> None
         )
 
 
+def test_exact_run_workflow_refuses_plaintext_manifest_under_encrypted_trust(
+    tmp_path: Path,
+) -> None:
+    key = "deployment-secret"
+    run_dir, config, policy, _ = _exact_run(tmp_path, key=key)
+    store = CheckpointStore(run_dir, key=key)
+    manifest = store.read_manifest()
+    assert manifest is not None
+    manifest_path = store.checkpoints_dir / MANIFEST_FILENAME
+    encrypted_path = manifest_path.with_name(manifest_path.name + ".enc")
+    manifest_path.write_text(manifest.model_dump_json(), encoding="utf-8")
+    encrypted_path.unlink()
+
+    with pytest.raises(
+        BusinessDecisionCloudRefused, match="manifest requires encryption"
+    ):
+        _load_exact_run_workflow(
+            run_dir,
+            checkpoint_key=key,
+            runner_config=config,
+            policy=policy,
+            execution_profile="standard",
+        )
+
+
 def test_exact_run_workflow_refuses_plaintext_without_local_opt_in(
     tmp_path: Path,
 ) -> None:
@@ -491,6 +516,34 @@ def test_service_cli_reports_setup_refusal_without_traceback(
     assert _cmd_business_decisions_serve(_serve_args()) == 2
     captured = capsys.readouterr()
     assert "runner token is invalid" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_service_cli_reports_missing_policy_without_traceback(
+    monkeypatch, capsys
+) -> None:
+    from openadapt_flow.__main__ import _cmd_business_decisions_serve
+
+    monkeypatch.setattr(
+        "openadapt_flow.runner.config.load_runner_config",
+        lambda _path=None: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "openadapt_flow.runner.business_decision_service.resolve_business_decision_origin",
+        lambda _origin=None: "https://app.openadapt.ai",
+    )
+
+    def missing_policy(**_kwargs):
+        raise FileNotFoundError("the configured policy file does not exist")
+
+    monkeypatch.setattr(
+        "openadapt_flow.runner.business_decision_service.build_business_decision_supervisor",
+        missing_policy,
+    )
+
+    assert _cmd_business_decisions_serve(_serve_args()) == 2
+    captured = capsys.readouterr()
+    assert "configured policy file does not exist" in captured.err
     assert "Traceback" not in captured.err
 
 

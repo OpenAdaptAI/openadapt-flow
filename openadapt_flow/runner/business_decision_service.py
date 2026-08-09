@@ -37,7 +37,11 @@ from openadapt_flow.ir import Workflow
 from openadapt_flow.policy import Policy, load_policy, policy_contract_sha256
 from openadapt_flow.runner.config import RunnerConfig, RunnerConfigError
 from openadapt_flow.runtime.durable.approval import ResumeRefused
-from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
+from openadapt_flow.runtime.durable.checkpoint import (
+    ENC_SUFFIX,
+    MANIFEST_FILENAME,
+    CheckpointStore,
+)
 
 KEY_SCHEMA = "openadapt.business-decision-runner-keys/v1"
 DEFAULT_WAIT_S = 25.0
@@ -281,8 +285,14 @@ def _load_exact_run_workflow(
     execution_profile: str,
 ) -> Workflow:
     checkpoints = CheckpointStore(run_dir, key=checkpoint_key)
+    manifest_path = checkpoints.checkpoints_dir / MANIFEST_FILENAME
+    encrypted_manifest_path = manifest_path.with_name(manifest_path.name + ENC_SUFFIX)
     try:
-        manifest = checkpoints.read_manifest()
+        with checkpoints.state_lock():
+            manifest_source_encrypted = encrypted_manifest_path.is_file()
+            manifest = checkpoints.read_manifest()
+            if manifest_source_encrypted != encrypted_manifest_path.is_file():
+                raise OSError("the durable manifest changed while it was loaded")
     except (CryptoError, OSError, ValueError) as exc:
         raise BusinessDecisionCloudRefused(
             "the decision run cannot be loaded with the authorized local key"
@@ -310,6 +320,10 @@ def _load_exact_run_workflow(
     if not workflow.encrypted and not trusted.allow_unencrypted:
         raise BusinessDecisionCloudRefused(
             "the trusted bundle requires encryption at rest"
+        )
+    if not manifest_source_encrypted and not trusted.allow_unencrypted:
+        raise BusinessDecisionCloudRefused(
+            "the trusted durable manifest requires encryption at rest"
         )
     if trusted.policy != policy.name:
         raise BusinessDecisionCloudRefused(

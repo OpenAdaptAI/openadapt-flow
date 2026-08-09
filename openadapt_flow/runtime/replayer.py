@@ -8613,7 +8613,11 @@ class Replayer:
             if error is not None and focused_element_backend:
                 self._cancel_guarded_keyboard()
             if error is None and isinstance(self.backend, RemoteFrameContractBackend):
-                protected: list[Region] = []
+                protected: list[Region] = list(
+                    fresh_resolution.resolution_evidence_regions
+                    if fresh_resolution is not None
+                    else ()
+                )
                 if fresh_region is not None:
                     protected.append(fresh_region)
                 elif fresh_resolution is not None:

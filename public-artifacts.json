@@ -284,6 +284,18 @@
       "sha256": "580eef16facc7bb7fc9b225daabded6bb7344c2bf2e9aa070364a3c1215ed9b7"
     },
     {
+      "path": "benchmark/hosted_grounder_probe/results_qwen3_5_9b.json",
+      "sha256": "9548ec8f10f5b2ae082ce439b433477821d8317eedf55e8a31406f17b54a8e5b"
+    },
+    {
+      "path": "benchmark/hosted_grounder_probe/results_qwen3_5_9b_mt2048.json",
+      "sha256": "7e867904c4c59b23db0727e403a478832ea944f193eebaa70500d567ed6c0fb2"
+    },
+    {
+      "path": "benchmark/hosted_grounder_probe/results_qwen3_7_plus.json",
+      "sha256": "227e3956f6c913a425ea88b591f7be270b155fcaa97561f77d16b25597a673a2"
+    },
+    {
       "path": "benchmark/hybrid/results.json",
       "sha256": "cd4e736884b70d0f7723c7ece17bbfdd83d1553922ee576a374ff85114997984"
     },

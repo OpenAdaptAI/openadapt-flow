@@ -1,18 +1,25 @@
 # Local grounder probe — UNRUN
 
-**Status: UNRUN. There are no results.** No measurement of
-`OpenAICompatibleGrounder` against a real served model has completed with this
-probe. Nothing on this page or in this directory may be cited as evidence.
+**Status: UNRUN locally. There are no local results.** No measurement of
+`OpenAICompatibleGrounder` against a locally served model has completed with
+this probe. Nothing in this directory may be cited as local evidence.
+
+**Hosted results exist.** The same probe DID run against a real hosted model
+(Together AI, 2026-08-12): see `benchmark/hosted_grounder_probe/RESULTS.md`.
+That run measures model capability and wire-protocol correctness on hosted
+open weights; the on-prem/local measurement this directory is reserved for
+remains outstanding.
 
 ## What this probe is
 
 `scripts/probe_local_grounder.py` points the shipped, unmodified
 `openadapt_flow.runtime.grounder.OpenAICompatibleGrounder` at a real
-OpenAI-compatible endpoint serving a real local vision model, on the same
-dense-EMR surface and DOM ground truth as `benchmark/grounding_eval`
-(seed 1, ~51 rows, 6 deterministic targets, truth = the DOM centre of each
-target row's Open button, tolerances 40/60 px). It records per-target
-proposals, errors, hits, misses, and abstentions verbatim to
+OpenAI-compatible endpoint serving a real vision model, on two dense-list
+surfaces with DOM ground truth (the `benchmark/grounding_eval` surface —
+seed 1, ~51 rows — plus a distinct seed-2 `small_dense` render; 6
+deterministic targets each, truth = the DOM centre of each target row's Open
+button, tolerances 40/60 px). It records per-target proposals, errors, hits,
+misses, abstentions, latency, and token usage verbatim to
 `results.json` in this directory — no retries, no downscaling, no massaging.
 
 The wire protocol itself is proven in CI without any model by

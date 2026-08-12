@@ -665,6 +665,7 @@ class OpenAICompatibleGrounder:
         *,
         api_key: str = "",
         timeout: float = 10.0,
+        max_tokens: int = 256,
         client: Any = None,
     ) -> None:
         """Create the grounder.
@@ -677,20 +678,35 @@ class OpenAICompatibleGrounder:
                 => no auth header (a loopback vLLM/Ollama needs none). The caller
                 resolves this from a named env var; it is never stored here.
             timeout: Per-call timeout in seconds.
+            max_tokens: Completion-token budget sent as ``max_tokens``. The
+                default (256) is ample for the coordinate JSON, but a hosted
+                REASONING model spends its budget on reasoning before emitting
+                content: measured on Together's ``Qwen/Qwen3.5-9B``
+                (2026-08-12, ``benchmark/hosted_grounder_probe/``), 256 makes
+                it truncate mid-reasoning with EMPTY content on 11/12 dense-
+                list targets — every one a (safe) abstain. Raise this for such
+                a model. Truncation can only ever lower availability, never
+                safety: an empty or cut-off reply abstains.
             client: Optional pre-built ``httpx.Client``-like object exposing
                 ``post(url, json=..., headers=..., timeout=...)`` (for tests /
                 custom transports). None => module-level ``httpx.post``.
 
         Raises:
-            ValueError: If ``base_url`` or ``model`` is empty/blank.
+            ValueError: If ``base_url`` or ``model`` is empty/blank, or
+                ``max_tokens`` is not a positive integer.
         """
         if not base_url or not str(base_url).strip():
             raise ValueError("OpenAICompatibleGrounder requires a non-empty base_url")
         if not model or not str(model).strip():
             raise ValueError("OpenAICompatibleGrounder requires a non-empty model")
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int):
+            raise ValueError("OpenAICompatibleGrounder max_tokens must be an int")
+        if max_tokens <= 0:
+            raise ValueError("OpenAICompatibleGrounder max_tokens must be positive")
         self._url = base_url.rstrip("/") + "/chat/completions"
         self._model = model.strip()
         self._timeout = timeout
+        self._max_tokens = max_tokens
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self._client = client
 
@@ -711,7 +727,7 @@ class OpenAICompatibleGrounder:
             image_b64 = base64.standard_b64encode(screen_png).decode("utf-8")
             body = {
                 "model": self._model,
-                "max_tokens": 256,
+                "max_tokens": self._max_tokens,
                 "messages": [
                     {
                         "role": "user",

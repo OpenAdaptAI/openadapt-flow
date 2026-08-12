@@ -1,0 +1,314 @@
+{
+  "meta": {
+    "endpoint": "https://api.together.xyz/v1",
+    "model": "Qwen/Qwen3.5-9B",
+    "surfaces": {
+      "record_seed1": {
+        "viewport_px": [
+          2240,
+          3726
+        ]
+      },
+      "small_dense_seed2": {
+        "viewport_px": [
+          1120,
+          1401
+        ]
+      }
+    },
+    "surface_spec": "dense_surface.render_frame(build_dense_table(seed=S, n_rows=18), COND, top_offset_px=12); record_seed1: S=1, COND=RECORD_CONDITION; small_dense_seed2: S=2, COND=small_dense",
+    "truth": "DOM centre of each row's Open button (frame.points[i][1])",
+    "tol_px": {
+      "strict": 40,
+      "loose": 60
+    },
+    "adapter": "openadapt_flow.runtime.grounder.OpenAICompatibleGrounder",
+    "max_tokens": 2048,
+    "price_usd_per_1m": {
+      "input": 0.17,
+      "output": 0.25
+    },
+    "timestamp": "2026-08-12T13:35:19+0200"
+  },
+  "summary": {
+    "n_targets": 12,
+    "hits@40": 0,
+    "hits@60": 0,
+    "abstained": 6,
+    "median_error_px": 1791.9,
+    "est_spend_usd": 0.0137,
+    "spend_capped": false
+  },
+  "rows": [
+    {
+      "surface": "record_seed1",
+      "row": 0,
+      "name": "Halloran, Karen",
+      "mrn": "MG584224",
+      "truth": [
+        2059,
+        251
+      ],
+      "latency_s": 8.5,
+      "usage": {
+        "prompt_tokens": 8233,
+        "completion_tokens": 454
+      },
+      "est_cost_usd": 0.001513,
+      "proposed": [
+        958,
+        76
+      ],
+      "abstained": false,
+      "error_px": 1114.8,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "record_seed1",
+      "row": 8,
+      "name": "Ngyuen, Anh",
+      "mrn": "MG129724",
+      "truth": [
+        2059,
+        795
+      ],
+      "latency_s": 19.19,
+      "usage": {
+        "prompt_tokens": 8234,
+        "completion_tokens": 2048
+      },
+      "est_cost_usd": 0.001912,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "record_seed1",
+      "row": 16,
+      "name": "Okafor, Janet",
+      "mrn": "MG499721",
+      "truth": [
+        2059,
+        1339
+      ],
+      "latency_s": 3.87,
+      "usage": {
+        "prompt_tokens": 8234,
+        "completion_tokens": 155
+      },
+      "est_cost_usd": 0.001439,
+      "proposed": [
+        684,
+        190
+      ],
+      "abstained": false,
+      "error_px": 1791.9,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "record_seed1",
+      "row": 24,
+      "name": "Fitzgerald, Gregory",
+      "mrn": "MG536396",
+      "truth": [
+        2059,
+        1883
+      ],
+      "latency_s": 24.28,
+      "usage": {
+        "prompt_tokens": 8232,
+        "completion_tokens": 2048
+      },
+      "est_cost_usd": 0.001911,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "record_seed1",
+      "row": 32,
+      "name": "Whitfield, Daniel",
+      "mrn": "PLl9181",
+      "truth": [
+        2059,
+        2427
+      ],
+      "latency_s": 4.32,
+      "usage": {
+        "prompt_tokens": 8232,
+        "completion_tokens": 222
+      },
+      "est_cost_usd": 0.001455,
+      "proposed": [
+        929,
+        608
+      ],
+      "abstained": false,
+      "error_px": 2141.4,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "record_seed1",
+      "row": 40,
+      "name": "Bianchi, Gregory",
+      "mrn": "2OO633",
+      "truth": [
+        2059,
+        2971
+      ],
+      "latency_s": 19.37,
+      "usage": {
+        "prompt_tokens": 8232,
+        "completion_tokens": 1758
+      },
+      "est_cost_usd": 0.001839,
+      "proposed": [
+        942,
+        758
+      ],
+      "abstained": false,
+      "error_px": 2478.9,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 0,
+      "name": "Ferreira, Philip",
+      "mrn": "RC903088",
+      "truth": [
+        1015,
+        118
+      ],
+      "latency_s": 11.33,
+      "usage": {
+        "prompt_tokens": 1652,
+        "completion_tokens": 701
+      },
+      "est_cost_usd": 0.000456,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 8,
+      "name": "Ngyuen, Anh",
+      "mrn": "MG551589",
+      "truth": [
+        1015,
+        318
+      ],
+      "latency_s": 10.26,
+      "usage": {
+        "prompt_tokens": 1654,
+        "completion_tokens": 1022
+      },
+      "est_cost_usd": 0.000537,
+      "proposed": [
+        925,
+        458
+      ],
+      "abstained": false,
+      "error_px": 166.4,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 16,
+      "name": "Okafor, Janet",
+      "mrn": "MG687737",
+      "truth": [
+        1015,
+        518
+      ],
+      "latency_s": 20.02,
+      "usage": {
+        "prompt_tokens": 1654,
+        "completion_tokens": 2048
+      },
+      "est_cost_usd": 0.000793,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 24,
+      "name": "Montgomery, Angela",
+      "mrn": "MG899943",
+      "truth": [
+        1015,
+        718
+      ],
+      "latency_s": 27.18,
+      "usage": {
+        "prompt_tokens": 1652,
+        "completion_tokens": 2048
+      },
+      "est_cost_usd": 0.000793,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 32,
+      "name": "Underwood, Thomas",
+      "mrn": "PLl9444",
+      "truth": [
+        1015,
+        918
+      ],
+      "latency_s": 14.33,
+      "usage": {
+        "prompt_tokens": 1652,
+        "completion_tokens": 1376
+      },
+      "est_cost_usd": 0.000625,
+      "proposed": [
+        870,
+        768
+      ],
+      "abstained": false,
+      "error_px": 208.6,
+      "hit@40": false,
+      "hit@60": false
+    },
+    {
+      "surface": "small_dense_seed2",
+      "row": 40,
+      "name": "Whitfield, Gregory",
+      "mrn": "5OO675",
+      "truth": [
+        1015,
+        1118
+      ],
+      "latency_s": 4.77,
+      "usage": {
+        "prompt_tokens": 1652,
+        "completion_tokens": 466
+      },
+      "est_cost_usd": 0.000397,
+      "proposed": null,
+      "abstained": true,
+      "error_px": null,
+      "hit@40": false,
+      "hit@60": false
+    }
+  ]
+}

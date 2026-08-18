@@ -616,7 +616,7 @@ _INIT_JS = r"""
     };
   }
 
-  secretObserver = new MutationObserver((mutations) => {
+  function processSecretMutations(mutations) {
     for (const mutation of mutations) {
       if (mutation.type === 'attributes') {
         if (!secretStates.has(mutation.target)) {
@@ -634,6 +634,15 @@ _INIT_JS = r"""
         if (!el.hasAttribute(SECRET_MARKER)) el.setAttribute(SECRET_MARKER, '');
       } catch (e) {}
     }
+  }
+
+  function refreshSecretBindings() {
+    if (secretObserver === null) return;
+    processSecretMutations(secretObserver.takeRecords());
+  }
+
+  secretObserver = new MutationObserver((mutations) => {
+    processSecretMutations(mutations);
   });
   secretObserver.observe(document.documentElement || document, {
     attributes: true, attributeOldValue: true, childList: true, subtree: true,
@@ -715,6 +724,10 @@ _INIT_JS = r"""
     }, 100);
   });
   listen('focusin', (e) => {
+    // MutationObserver callbacks run at the microtask checkpoint. Drain queued
+    // records now so a page cannot add a declared field, remove its identity,
+    // and focus or type into it in one JavaScript task before classification.
+    refreshSecretBindings();
     const el = e.target;
     const declared = declaredSecretState(el);
     if (declared) {
@@ -793,6 +806,7 @@ _INIT_JS = r"""
   });
 
   listen('input', (e) => {
+    refreshSecretBindings();
     const el = e.target;
     const secretBinding = secretStateForInput(el);
     const secret = secretBinding !== null;
@@ -1621,6 +1635,12 @@ class InteractiveRecorder:
                         "frame exists in the new coordinate space"
                     )
             self._process(event)
+            # A binding callback can arrive while Playwright captures this
+            # action's after-frame. Revalidate it against the action in flight
+            # so a later click/key cannot share that frame and then appear as a
+            # separate, falsely exact step. Same-field input and one scroll
+            # batch remain safe to coalesce.
+            self._validate_event_batch([event, *self._pyq])
             if not self._owns_browser and (
                 self._viewport_dirty
                 or self._read_attached_geometry() != self._attached_geometry
@@ -1630,6 +1650,7 @@ class InteractiveRecorder:
                     "action was being retained; recording stopped without "
                     "complete metadata"
                 )
+            self._validate_event_batch([event, *self._pyq])
             self._assert_no_new_pages()
         if self._listener_error is not None:
             raise self._listener_error

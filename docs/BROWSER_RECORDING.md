@@ -122,8 +122,9 @@ sensitive recording data.
 - Flow retains one exact frame boundary per logical action. It coalesces only
   consecutive input changes from the same bound field session or consecutive
   scroll deltas from one observed gesture. If two distinct actions arrive in
-  one recorder poll, Flow refuses the recording before it captures a shared,
-  incorrect after-frame.
+  one recorder poll, or the second arrives while Flow captures the first
+  action's after-frame, Flow refuses the recording and discards the temporary
+  output instead of publishing shared, incorrect evidence.
 - Attached screenshots use CSS pixels and the actual live viewport. Thus, DOM
   coordinates and retained frame coordinates stay aligned on high-density
   displays.
@@ -141,8 +142,10 @@ sensitive recording data.
   temporary screenshot-mask marker when the field appears in the document. The
   identity remains secret if application code removes the field name or ID
   before focus, changes either attribute during input, or replaces the active
-  input element during the same input session. Flow removes the marker when it
-  detaches, including from a page-owned element that is no longer in the DOM.
+  input element during the same input session. The listener consumes queued DOM
+  changes before each focus or input event, including a field that appears and
+  changes inside one JavaScript task. Flow removes the marker when it detaches,
+  including from a page-owned element that is no longer in the DOM.
   Other typed values and visible page content are recording evidence and can
   contain sensitive data. Keep raw recordings inside the approved local
   boundary.

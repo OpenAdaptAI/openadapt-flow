@@ -1073,6 +1073,63 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             assert secret not in captured_output.err
         assert process.poll() is None
 
+        dynamic_secret = "DYNAMIC-SECRET-LITERAL-NEVER-PERSIST"
+        dynamic_secret_rect: dict[str, int] = {}
+
+        def add_remove_and_type_dynamic_secret(page, pump):
+            rect = page.evaluate(
+                """secret => {
+                  const field = document.createElement('input');
+                  field.id = 'dynamic-secret';
+                  field.name = 'dynamic-secret';
+                  field.style.cssText = 'width:220px;height:40px;border:0';
+                  document.body.appendChild(field);
+                  field.removeAttribute('name');
+                  field.removeAttribute('id');
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+                  const box = field.getBoundingClientRect();
+                  return {
+                    x: Math.round(box.left), y: Math.round(box.top),
+                    width: Math.round(box.width), height: Math.round(box.height),
+                  };
+                }""",
+                dynamic_secret,
+            )
+            dynamic_secret_rect.update(rect)
+            pump()
+            pump()
+
+        dynamic_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-dynamic-secret",
+            secret_fields=("dynamic-secret",),
+            cdp_endpoint=endpoint,
+            script=add_remove_and_type_dynamic_secret,
+        )
+        for artifact in dynamic_recording.rglob("*"):
+            if artifact.is_file():
+                assert dynamic_secret.encode() not in artifact.read_bytes()
+        dynamic_events = [
+            json.loads(line)
+            for line in (dynamic_recording / "events.jsonl").read_text().splitlines()
+        ]
+        assert len(dynamic_events) == 1
+        assert dynamic_events[0].get("secret") is True
+        dynamic_after = Image.open(
+            dynamic_recording / "frames" / "0000_after.png"
+        ).convert("RGB")
+        dynamic_crop = dynamic_after.crop(
+            (
+                dynamic_secret_rect["x"],
+                dynamic_secret_rect["y"],
+                dynamic_secret_rect["x"] + dynamic_secret_rect["width"],
+                dynamic_secret_rect["y"] + dynamic_secret_rect["height"],
+            )
+        )
+        assert all(extrema == (0, 0) for extrema in dynamic_crop.getextrema())
+        assert process.poll() is None
+
         detached_marker_session = InteractiveRecorder(
             attach_app_url,
             tmp_path / "recording-detached-secret-marker",
@@ -1253,6 +1310,41 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 )
             frame_race_session.abort()
         assert not (tmp_path / "recording-frame-race-probe").exists()
+        assert process.poll() is None
+
+        interleaved_recording = tmp_path / "recording-interleaved-action-refusal"
+        interleaved_session = InteractiveRecorder(
+            attach_app_url,
+            interleaved_recording,
+            cdp_endpoint=endpoint,
+        )
+        interleaved_session.start()
+        assert interleaved_session.page is not None
+        assert interleaved_session.backend is not None
+        interleaved_session.page.click("#note")
+        original_backend_screenshot = interleaved_session.backend.screenshot
+        interleaved_action_injected = False
+
+        def screenshot_after_second_action() -> bytes:
+            nonlocal interleaved_action_injected
+            if not interleaved_action_injected:
+                interleaved_action_injected = True
+                interleaved_session.page.click("#save")
+                interleaved_session.page.wait_for_timeout(0)
+            return original_backend_screenshot()
+
+        monkeypatch.setattr(
+            interleaved_session.backend,
+            "screenshot",
+            screenshot_after_second_action,
+        )
+        try:
+            with pytest.raises(BrowserAttachError, match="more than one logical"):
+                interleaved_session.pump()
+        finally:
+            interleaved_session.abort()
+        assert interleaved_action_injected
+        assert not (interleaved_recording / "meta.json").exists()
         assert process.poll() is None
 
         def rapid_pointer_pointer(page, pump):

@@ -370,17 +370,7 @@ _INIT_JS = r"""
   let activeSecretElement = null;
   let activeSecretState = null;
   let resizeTimer = null;
-  const secretObserver = new MutationObserver(() => {
-    for (const el of stickySecretElements) {
-      if (!el.isConnected) continue;
-      try {
-        if (!el.hasAttribute(SECRET_MARKER)) el.setAttribute(SECRET_MARKER, '');
-      } catch (e) {}
-    }
-  });
-  secretObserver.observe(document.documentElement || document, {
-    attributes: true, childList: true, subtree: true,
-  });
+  let secretObserver = null;
 
   function listenOn(target, type, handler) {
     target.addEventListener(type, handler, true);
@@ -393,10 +383,19 @@ _INIT_JS = r"""
 
   function cleanup() {
     if (resizeTimer !== null) clearTimeout(resizeTimer);
-    secretObserver.disconnect();
+    if (secretObserver !== null) secretObserver.disconnect();
     for (const [target, type, handler] of listeners) {
       try { target.removeEventListener(type, handler, true); } catch (e) {}
     }
+    // The Set retains disconnected elements for this exact cleanup. Remove
+    // the temporary marker before releasing those references so reinserting a
+    // page-owned node after Flow detaches cannot expose recorder metadata.
+    for (const el of stickySecretElements) {
+      try { el.removeAttribute(SECRET_MARKER); } catch (e) {}
+    }
+    stickySecretElements.clear();
+    activeSecretElement = null;
+    activeSecretState = null;
     const current = window[GLOBAL_KEY];
     if (current && current.sessionId === SESSION_ID) {
       try { delete window[GLOBAL_KEY]; } catch (e) { window[GLOBAL_KEY] = null; }
@@ -536,11 +535,13 @@ _INIT_JS = r"""
     } catch (e) { return false; }
   }
 
-  function bindSecretState(el, state) {
+  function bindSecretState(el, state, activate = true) {
     secretStates.set(el, state);
     stickySecretElements.add(el);
-    activeSecretElement = el;
-    activeSecretState = state;
+    if (activate) {
+      activeSecretElement = el;
+      activeSecretState = state;
+    }
     try {
       el.setAttribute(SECRET_MARKER, '');
       return el.hasAttribute(SECRET_MARKER);
@@ -579,6 +580,65 @@ _INIT_JS = r"""
     if (!state) return null;
     return {state, maskBound: bindSecretState(el, state)};
   }
+
+  function discoverDeclaredSecrets(root) {
+    const candidates = [];
+    try {
+      if (root && root.nodeType === 1 && isTextEntry(root)) candidates.push(root);
+      if (root && root.querySelectorAll) {
+        candidates.push(...root.querySelectorAll(
+          'input, textarea, [contenteditable=""], [contenteditable="true"],' +
+          ' [role="textbox"]'
+        ));
+      }
+    } catch (e) {}
+    for (const el of candidates) {
+      if (secretStates.has(el)) continue;
+      const state = declaredSecretState(el);
+      if (state) bindSecretState(el, state, false);
+    }
+  }
+
+  function stateFromPriorDeclaration(mutation) {
+    const el = mutation.target;
+    if (!isTextEntry(el) || typeof mutation.oldValue !== 'string') return null;
+    const oldValue = mutation.oldValue;
+    const oldDeclaredName = (mutation.attributeName === 'name'
+      || mutation.attributeName === 'id')
+      && SECRET_NAMES.indexOf(oldValue) >= 0;
+    const oldPasswordType = mutation.attributeName === 'type'
+      && oldValue.toLowerCase() === 'password';
+    if (!oldDeclaredName && !oldPasswordType) return null;
+    const currentField = el.name || el.id || null;
+    return {
+      field: oldDeclaredName ? oldValue : currentField,
+      inputSession: inputSessionFor(el),
+    };
+  }
+
+  secretObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      if (mutation.type === 'attributes') {
+        if (!secretStates.has(mutation.target)) {
+          const priorState = stateFromPriorDeclaration(mutation);
+          if (priorState) bindSecretState(mutation.target, priorState, false);
+        }
+        discoverDeclaredSecrets(mutation.target);
+      } else {
+        for (const node of mutation.addedNodes) discoverDeclaredSecrets(node);
+      }
+    }
+    for (const el of stickySecretElements) {
+      if (!el.isConnected) continue;
+      try {
+        if (!el.hasAttribute(SECRET_MARKER)) el.setAttribute(SECRET_MARKER, '');
+      } catch (e) {}
+    }
+  });
+  secretObserver.observe(document.documentElement || document, {
+    attributes: true, attributeOldValue: true, childList: true, subtree: true,
+  });
+  discoverDeclaredSecrets(document);
 
   function fieldLabel(el) {
     // Best available human label for the receiving field, best-first:
@@ -875,6 +935,8 @@ class InteractiveRecorder:
         self._context_page_listener = self._handle_context_page
         self._page_lifecycle_listeners_installed = False
         self._context_page_listener_installed = False
+        self._context_page_latches: list[tuple[Any, Any]] = []
+        self._context_page_baselines: list[tuple[Any, tuple[Any, ...]]] = []
         self._context = None
         self._context_pages_at_start: tuple[Any, ...] = ()
         self._finalizing = False
@@ -921,6 +983,7 @@ class InteractiveRecorder:
                         "confirm that the browser was started with remote "
                         "debugging and that the endpoint is ready"
                     ) from exc
+                self._install_candidate_context_page_latches()
                 self.page = select_attached_page(
                     self._browser,
                     app_url=self._url,
@@ -928,9 +991,15 @@ class InteractiveRecorder:
                 )
 
             self._context = self.page.context
-            self._context.on("page", self._context_page_listener)
-            self._context_page_listener_installed = True
-            self._context_pages_at_start = tuple(self._context.pages)
+            if self._owns_browser:
+                self._context.on("page", self._context_page_listener)
+                self._context_page_latches = [
+                    (self._context, self._context_page_listener)
+                ]
+                self._context_page_listener_installed = True
+                self._context_pages_at_start = tuple(self._context.pages)
+            else:
+                self._bind_selected_context_page_latch()
             if self._listener_error is not None:
                 raise self._listener_error
             self.page.on("close", self._page_close_listener)
@@ -1060,10 +1129,12 @@ class InteractiveRecorder:
 
     def finish(self) -> Path:
         """Flush input, write metadata, and close or detach as appropriate."""
+        # The first finalization operation touches the live page. Arm every
+        # irreversible lifecycle latch before cleanup or the last queue drain.
+        self._finalizing = True
         try:
             self._cleanup_page_listeners()
             self._drain_event_queue()
-            self._finalizing = True
             self._flush_type()
             self._flush_scroll()
             assert self.recorder is not None
@@ -1227,6 +1298,75 @@ class InteractiveRecorder:
                 "recording is bound to its accepted page baseline, so Flow "
                 "stopped before publishing incomplete metadata"
             )
+
+    def _install_candidate_context_page_latches(self) -> None:
+        """Latch new pages on every context before attached-page selection."""
+
+        assert self._browser is not None
+        try:
+            contexts = tuple(self._browser.contexts)
+        except Exception as exc:
+            raise BrowserAttachError(
+                "the attached browser context inventory could not be read"
+            ) from exc
+        baselines: list[tuple[Any, tuple[Any, ...]]] = []
+        for context in contexts:
+            try:
+                baseline = tuple(context.pages)
+            except Exception as exc:
+                raise BrowserAttachError(
+                    "the attached browser page baseline could not be read"
+                ) from exc
+            baselines.append((context, baseline))
+        self._context_page_baselines = baselines
+        for context, baseline in baselines:
+            try:
+                context.on("page", self._context_page_listener)
+                self._context_page_latches.append(
+                    (context, self._context_page_listener)
+                )
+                current = tuple(context.pages)
+            except Exception as exc:
+                raise BrowserAttachError(
+                    "the attached browser page baseline could not be guarded"
+                ) from exc
+            for candidate in current:
+                if not any(candidate is existing for existing in baseline):
+                    self._handle_context_page(candidate)
+        self._context_page_listener_installed = bool(self._context_page_latches)
+        if self._listener_error is not None:
+            raise self._listener_error
+
+    def _bind_selected_context_page_latch(self) -> None:
+        """Keep the selected context latch and its pre-listener baseline."""
+
+        assert self._context is not None
+        selected_baseline = next(
+            (
+                baseline
+                for context, baseline in self._context_page_baselines
+                if context is self._context
+            ),
+            None,
+        )
+        if selected_baseline is None:
+            raise BrowserAttachError(
+                "the selected browser context was not in the guarded baseline"
+            )
+        retained: list[tuple[Any, Any]] = []
+        for context, listener in self._context_page_latches:
+            if context is self._context:
+                retained.append((context, listener))
+                continue
+            try:
+                context.remove_listener("page", listener)
+            except Exception:
+                pass
+        self._context_page_latches = retained
+        self._context_page_baselines = [(self._context, selected_baseline)]
+        self._context_pages_at_start = selected_baseline
+        self._context_page_listener_installed = True
+        self._assert_no_new_pages()
 
     def _assert_no_new_pages(self) -> None:
         """Retain a refusal if this recording context gained another page."""
@@ -1446,6 +1586,8 @@ class InteractiveRecorder:
                     self.backend.stop_screenshot_mask_tracking()
                 self._page_lifecycle_listeners_installed = False
                 self._context_page_listener_installed = False
+                self._context_page_latches.clear()
+                self._context_page_baselines.clear()
                 self._context = None
 
     def _drain_event_queue(self) -> bool:

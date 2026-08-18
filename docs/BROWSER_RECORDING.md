@@ -105,11 +105,13 @@ sensitive recording data.
   cross-origin navigation stops the recording and does not produce complete
   metadata.
 - Do not open a popup or a new tab in the selected tab's browser context while
-  recording. Flow currently binds one page. A context-level listener records
-  every new-page signal, including a tab that acts and closes between recorder
-  polls. Flow keeps this refusal active through the final Playwright detach so
-  a late tab cannot produce complete metadata. A refusal leaves the external
-  browser and its tabs open.
+  recording. Flow currently binds one page. It snapshots the existing tabs and
+  installs a new-page latch on every candidate context before it selects the
+  recording tab. The selected-context latch records every later new-page signal,
+  including a tab that acts and closes between recorder polls. Flow keeps this
+  refusal active through the final Playwright detach so a late tab cannot
+  produce complete metadata. A refusal leaves the external browser and its tabs
+  open.
 - Attach mode does not combine with `--headless`. The external browser owns
   its display mode.
 - The `--out` path must not exist. Flow writes to a new temporary sibling and
@@ -136,12 +138,14 @@ sensitive recording data.
   moment after a resize. Recording then continues automatically.
 - `input[type=password]` and fields declared with `--secret FIELD` never send
   their values to Python. Flow binds a private input-session identity and a
-  temporary screenshot-mask marker when a declared secret field receives
-  focus. The identity remains secret if application code changes the field name
-  or ID, or replaces the active input element during the same input session.
-  Flow removes the marker when it detaches. Other typed values and visible page
-  content are recording evidence and can contain sensitive data. Keep raw
-  recordings inside the approved local boundary.
+  temporary screenshot-mask marker when the field appears in the document. The
+  identity remains secret if application code removes the field name or ID
+  before focus, changes either attribute during input, or replaces the active
+  input element during the same input session. Flow removes the marker when it
+  detaches, including from a page-owned element that is no longer in the DOM.
+  Other typed values and visible page content are recording evidence and can
+  contain sensitive data. Keep raw recordings inside the approved local
+  boundary.
 - Secret masks cover every frame in the selected page. Before each masked
   screenshot, Flow snapshots the frame inventory and its lifecycle generation.
   It accepts the in-memory image only when the inventory stays unchanged

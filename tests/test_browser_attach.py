@@ -17,6 +17,7 @@ from urllib.request import urlopen
 import pytest
 from PIL import Image
 
+import openadapt_flow.interactive_recorder as interactive_recorder_module
 from openadapt_flow.__main__ import main
 from openadapt_flow.backends.playwright_backend import (
     PlaywrightBackend,
@@ -733,6 +734,8 @@ _ATTACH_HTML = b"""<!doctype html>
   <input id="password" name="password" type="text">
   <label for="p&#228;ss">International secret</label>
   <input id="p&#228;ss" name="p&#228;ss" type="text">
+  <label for="pre-focus-secret">Pre-focus secret</label>
+  <input id="pre-focus-secret" name="pre-focus-secret" type="text">
   <label for="sticky-secret">Sticky secret</label>
   <input id="sticky-secret" name="sticky-secret" type="text"
          onkeydown="this.removeAttribute('name'); this.removeAttribute('id')">
@@ -982,11 +985,20 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             declared_field: str,
             secret: str,
             output_name: str,
+            remove_identity_before_focus: bool = False,
         ) -> None:
             secret_rect: dict[str, int] = {}
 
             def type_through_mutation(page, pump):
-                field = page.locator(field_selector)
+                field = page.query_selector(field_selector)
+                assert field is not None
+                if remove_identity_before_focus:
+                    field.evaluate(
+                        """element => {
+                          element.removeAttribute('name');
+                          element.removeAttribute('id');
+                        }"""
+                    )
                 box = field.bounding_box()
                 assert box is not None
                 secret_rect.update(
@@ -1033,6 +1045,14 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 )
                 assert all(extrema == (0, 0) for extrema in crop.getextrema())
 
+        pre_focus_secret = "PREINPUT-SECRET-NEVER-PERSIST"
+        assert_mutating_secret_stays_private(
+            field_selector="#pre-focus-secret",
+            declared_field="pre-focus-secret",
+            secret=pre_focus_secret,
+            output_name="recording-pre-focus-secret",
+            remove_identity_before_focus=True,
+        )
         attribute_secret = "ATTRIBUTE-MUTATION-SECRET-NEVER-PERSIST"
         assert_mutating_secret_stays_private(
             field_selector="#sticky-secret",
@@ -1048,9 +1068,50 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             output_name="recording-replacement-secret",
         )
         captured_output = capsys.readouterr()
-        for secret in (attribute_secret, replacement_secret):
+        for secret in (pre_focus_secret, attribute_secret, replacement_secret):
             assert secret not in captured_output.out
             assert secret not in captured_output.err
+        assert process.poll() is None
+
+        detached_marker_session = InteractiveRecorder(
+            attach_app_url,
+            tmp_path / "recording-detached-secret-marker",
+            secret_fields=("detached-cleanup-secret",),
+            cdp_endpoint=endpoint,
+        )
+        detached_marker_session.start()
+        assert detached_marker_session.page is not None
+        detached_marker_session.page.evaluate(
+            """() => {
+              const field = document.createElement('input');
+              field.name = 'detached-cleanup-secret';
+              document.body.appendChild(field);
+              window.__detachedOaSecret = field;
+            }"""
+        )
+        detached_marker_session.page.wait_for_timeout(0)
+        assert detached_marker_session.page.evaluate(
+            """() => Array.from(window.__detachedOaSecret.attributes)
+              .some((attribute) => attribute.name.startsWith('data-oaflow-secret-'))"""
+        )
+        detached_marker_session.page.evaluate(
+            "() => window.__detachedOaSecret.remove()"
+        )
+        detached_marker_session.finish()
+
+        detached_marker_probe = InteractiveRecorder(
+            attach_app_url,
+            tmp_path / "recording-detached-secret-marker-probe",
+            cdp_endpoint=endpoint,
+        )
+        detached_marker_probe.start()
+        assert detached_marker_probe.page is not None
+        assert not detached_marker_probe.page.evaluate(
+            """() => Array.from(window.__detachedOaSecret.attributes)
+              .some((attribute) => attribute.name.startsWith('data-oaflow-secret-'))"""
+        )
+        detached_marker_probe.page.evaluate("() => delete window.__detachedOaSecret")
+        detached_marker_probe.abort()
         assert process.poll() is None
 
         child_secret_rect: dict[str, int] = {}
@@ -1331,6 +1392,44 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200
 
+        prebaseline_recording = tmp_path / "recording-prebaseline-page-refusal"
+        original_select_attached_page = interactive_recorder_module.select_attached_page
+        prebaseline_page_acted = False
+
+        def select_after_short_lived_page(browser, *, app_url, page_url=None):
+            nonlocal prebaseline_page_acted
+            selected = original_select_attached_page(
+                browser,
+                app_url=app_url,
+                page_url=page_url,
+            )
+            temporary = selected.context.new_page()
+            temporary.set_content(
+                "<input id='pre-note'><button id='pre-save'>Save</button>"
+            )
+            temporary.fill("#pre-note", "prebaseline-activity-must-not-disappear")
+            temporary.click("#pre-save")
+            prebaseline_page_acted = True
+            temporary.close()
+            return selected
+
+        with monkeypatch.context() as patch_context:
+            patch_context.setattr(
+                interactive_recorder_module,
+                "select_attached_page",
+                select_after_short_lived_page,
+            )
+            with pytest.raises(BrowserAttachError, match="popup or new tab"):
+                record_interactive(
+                    attach_app_url,
+                    prebaseline_recording,
+                    cdp_endpoint=endpoint,
+                    script=lambda _page, _pump: None,
+                )
+        assert prebaseline_page_acted
+        assert not (prebaseline_recording / "meta.json").exists()
+        assert process.poll() is None
+
         late_page_recording = tmp_path / "recording-late-page-refusal"
         late_page_session = InteractiveRecorder(
             attach_app_url,
@@ -1359,6 +1458,43 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert process.poll() is None
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200
+
+        cleanup_frame_recording = tmp_path / "recording-cleanup-frame-refusal"
+        cleanup_frame_session = InteractiveRecorder(
+            attach_app_url,
+            cleanup_frame_recording,
+            cdp_endpoint=endpoint,
+        )
+        cleanup_frame_session.start()
+        assert cleanup_frame_session.page is not None
+        original_cleanup = cleanup_frame_session._cleanup_page_listeners
+        cleanup_race_injected = False
+
+        def cleanup_after_frame_race() -> None:
+            nonlocal cleanup_race_injected
+            if not cleanup_race_injected:
+                cleanup_race_injected = True
+                cleanup_frame_session.page.evaluate(
+                    """() => {
+                      const frame = document.createElement('iframe');
+                      frame.srcdoc = '<input type="password" value="late">';
+                      document.body.appendChild(frame);
+                      frame.remove();
+                    }"""
+                )
+                cleanup_frame_session.page.wait_for_timeout(0)
+            original_cleanup()
+
+        monkeypatch.setattr(
+            cleanup_frame_session,
+            "_cleanup_page_listeners",
+            cleanup_after_frame_race,
+        )
+        with pytest.raises(BrowserAttachError, match="changed frame state"):
+            cleanup_frame_session.finish()
+        assert cleanup_race_injected
+        assert not (cleanup_frame_recording / "meta.json").exists()
+        assert process.poll() is None
 
         iframe_recording = tmp_path / "recording-iframe-refusal"
 

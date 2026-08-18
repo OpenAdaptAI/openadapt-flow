@@ -39,6 +39,18 @@ class _Page:
         self.url = url
 
 
+class _FakePrivacyCdp:
+    """Empty-page CDP stand-in: the closed-shadow scan finds no secret node."""
+
+    def send(self, method: str, params: dict | None = None) -> dict:
+        if method == "DOM.performSearch":
+            return {"searchId": "fake-search", "resultCount": 0}
+        return {}
+
+    def detach(self) -> None:
+        return None
+
+
 def _browser(*urls: str):
     return SimpleNamespace(
         contexts=[SimpleNamespace(pages=[_Page(url) for url in urls])]
@@ -164,6 +176,31 @@ def test_attached_backend_uses_source_sanitized_structural_state() -> None:
     assert backend.page_title == "[secret]"
 
 
+def test_backend_runs_privacy_guard_before_screenshot_bytes_exist() -> None:
+    calls: list[str] = []
+
+    class Page:
+        def screenshot(self, **_kwargs):
+            calls.append("screenshot")
+            return b"png"
+
+    backend = PlaywrightBackend(  # type: ignore[arg-type]
+        Page(),
+        screenshot_guard=lambda: calls.append("guard"),
+    )
+    assert backend.screenshot() == b"png"
+    assert calls == ["guard", "screenshot"]
+
+    def refuse() -> None:
+        calls.append("refuse")
+        raise BrowserAttachError("unsafe closed shadow boundary")
+
+    refusing = PlaywrightBackend(Page(), screenshot_guard=refuse)  # type: ignore[arg-type]
+    with pytest.raises(BrowserAttachError, match="closed shadow"):
+        refusing.screenshot()
+    assert calls == ["guard", "screenshot", "refuse"]
+
+
 def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> None:
     class Frame:
         def __init__(self, name: str) -> None:
@@ -267,13 +304,18 @@ def test_attached_recorder_reads_geometry_and_refuses_origin_drift(
         tmp_path / "recording",
         cdp_endpoint="http://127.0.0.1:9222",
     )
+    origin = {"value": "https://app.example.test"}
     session.page = SimpleNamespace(
-        url="https://app.example.test/work",
-        evaluate=lambda _script: {"width": 1280, "height": 800, "dpr": 2},
+        evaluate=lambda _script: {
+            "origin": origin["value"],
+            "width": 1280,
+            "height": 800,
+            "dpr": 2,
+        },
     )
     assert session._read_attached_geometry() == (1280, 800, 2.0)
 
-    session.page.url = "https://other.example.test/?token=DO_NOT_PRINT"
+    origin["value"] = "https://other.example.test"
     with pytest.raises(BrowserAttachError) as caught:
         session._read_attached_geometry()
     assert "left the declared application origin" in str(caught.value)
@@ -290,11 +332,12 @@ def test_attached_recorder_retains_main_frame_origin_violation(
         cdp_endpoint="http://127.0.0.1:9222",
     )
     session._prepare_recording_dir()
-    frame = SimpleNamespace(url="https://other.example.test/temporary")
+    origin = {"value": "https://other.example.test"}
+    frame = SimpleNamespace(evaluate=lambda _script: origin["value"])
     session.page = SimpleNamespace(main_frame=frame)
 
     session._handle_frame_navigation(frame)
-    frame.url = "https://app.example.test/returned"
+    origin["value"] = "https://app.example.test"
     session._handle_frame_navigation(frame)
 
     assert session.done is True
@@ -398,17 +441,23 @@ def test_attached_tab_close_during_finalization_discards_metadata(
     session._prepare_recording_dir()
 
     class ClosingPage:
-        url = "https://app.example.test/"
         frames: list = []
 
         def __init__(self) -> None:
-            self.main_frame = SimpleNamespace(url=self.url)
+            self.origin = "https://app.example.test"
+            self.main_frame = SimpleNamespace(evaluate=lambda _script: self.origin)
 
         def evaluate(self, _script):
-            return {"width": 1280, "height": 800, "dpr": 1}
+            return {
+                "origin": self.origin,
+                "width": 1280,
+                "height": 800,
+                "dpr": 1,
+            }
 
     session.page = ClosingPage()
     session._page_lifecycle_listeners_installed = True
+    session._privacy_cdp = _FakePrivacyCdp()
     session._attached_geometry = (1280, 800, 1.0)
     session._initial_attached_viewport = (1280, 800)
 
@@ -441,17 +490,23 @@ def test_attached_popup_during_finalization_discards_metadata(
     session._prepare_recording_dir()
 
     class PopupPage:
-        url = "https://app.example.test/"
         frames: list = []
 
         def __init__(self) -> None:
-            self.main_frame = SimpleNamespace(url=self.url)
+            self.origin = "https://app.example.test"
+            self.main_frame = SimpleNamespace(evaluate=lambda _script: self.origin)
 
         def evaluate(self, _script):
-            return {"width": 1280, "height": 800, "dpr": 1}
+            return {
+                "origin": self.origin,
+                "width": 1280,
+                "height": 800,
+                "dpr": 1,
+            }
 
     session.page = PopupPage()
     session._page_lifecycle_listeners_installed = True
+    session._privacy_cdp = _FakePrivacyCdp()
     session._attached_geometry = (1280, 800, 1.0)
     session._initial_attached_viewport = (1280, 800)
 
@@ -488,17 +543,23 @@ def test_attached_late_lifecycle_event_discards_metadata(
     session._prepare_recording_dir()
 
     class LifecyclePage:
-        url = "https://app.example.test/"
         frames: list = []
 
         def __init__(self) -> None:
-            self.main_frame = SimpleNamespace(url=self.url)
+            self.origin = "https://app.example.test"
+            self.main_frame = SimpleNamespace(evaluate=lambda _script: self.origin)
 
         def evaluate(self, _script):
-            return {"width": 1280, "height": 800, "dpr": 1}
+            return {
+                "origin": self.origin,
+                "width": 1280,
+                "height": 800,
+                "dpr": 1,
+            }
 
     session.page = LifecyclePage()
     session._page_lifecycle_listeners_installed = True
+    session._privacy_cdp = _FakePrivacyCdp()
     session._attached_geometry = (1280, 800, 1.0)
     session._initial_attached_viewport = (1280, 800)
 
@@ -516,7 +577,7 @@ def test_attached_late_lifecycle_event_discards_metadata(
         if late_event == "context_page":
             session._handle_context_page(SimpleNamespace(url="about:blank"))
         elif late_event == "origin":
-            session.page.main_frame.url = "https://other.example.test/"
+            session.page.origin = "https://other.example.test"
             session._handle_frame_navigation(session.page.main_frame)
         else:
             session._handle_frame_tree_change(SimpleNamespace())
@@ -777,16 +838,34 @@ _ATTACH_HTML = b"""<!doctype html>
   "></iframe>
 </body></html>"""
 
+_CLOSED_SHADOW_HTML = b"""<!doctype html>
+<html><head><title>Closed shadow test</title></head><body>
+<x-closed-secret id="undeclared-closed-host"></x-closed-secret>
+<script>
+  const host = document.querySelector('x-closed-secret');
+  const root = host.attachShadow({mode: 'closed'});
+  const field = document.createElement('input');
+  field.type = 'password';
+  field.value = 'STATIC-LAUNCHED-CLOSED-SECRET';
+  root.appendChild(field);
+</script>
+</body></html>"""
+
 
 @pytest.fixture(scope="module")
 def attach_app_url() -> str:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - stdlib callback name
+            payload = (
+                _CLOSED_SHADOW_HTML
+                if self.path.startswith("/closed-shadow")
+                else _ATTACH_HTML
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(_ATTACH_HTML)))
+            self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(_ATTACH_HTML)
+            self.wfile.write(payload)
 
         def log_message(self, _format, *args):
             return
@@ -822,6 +901,49 @@ def _chromium_executable() -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
+def _activate_app_tab(endpoint: str, app_url: str) -> None:
+    """Bring the app tab back to the front through the DevTools HTTP API.
+
+    A refusal trial can leave the popup or new tab it created as the active
+    tab. Chromium throttles rendering for the now-background app tab, so the
+    next attach trial's first evidence screenshot can stall on a slow runner.
+    A real operator records in a visible tab; restore that precondition.
+    """
+
+    with urlopen(f"{endpoint}/json/list", timeout=5) as response:
+        targets = json.load(response)
+    for target in targets:
+        if target.get("type") == "page" and str(target.get("url", "")).startswith(
+            app_url
+        ):
+            with urlopen(
+                f"{endpoint}/json/activate/{target['id']}", timeout=5
+            ) as response:
+                assert response.status == 200
+            return
+    raise AssertionError("the app tab was not found for activation")
+
+
+@pytest.mark.timeout(60)
+def test_launched_browser_refuses_static_unbound_closed_shadow_password(
+    attach_app_url: str,
+    tmp_path: Path,
+) -> None:
+    """Owned launch inventories closed roots before its first screenshot."""
+
+    if _chromium_executable() is None:
+        pytest.skip("no Chromium executable is installed")
+    output = tmp_path / "launched-static-closed-shadow"
+    with pytest.raises(BrowserAttachError, match="closed shadow root"):
+        record_interactive(
+            f"{attach_app_url}closed-shadow",
+            output,
+            headless=True,
+            script=lambda _page, _pump: None,
+        )
+    assert not output.exists()
+
+
 @pytest.mark.timeout(30)
 def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     """Real Chromium proves the page-local guard before screenshot handling."""
@@ -834,8 +956,11 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     secret_fields = (
         "prefilled-secret",
         "reordered-secret",
+        "ambiguous-secret",
         "reflected-secret",
         "contenteditable-secret",
+        "label-equals-secret",
+        "altgr-secret",
     )
     init_js = (
         interactive_recorder_module._INIT_JS.replace(
@@ -865,7 +990,8 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
                     content_type="text/html",
                     body=(
                         "<input name='prefilled-secret'>"
-                        "<div id='rewrite'></div><button>save</button>"
+                        "<div id='rewrite'></div>"
+                        "<div id='ambiguous-rewrite'></div><button>save</button>"
                     ),
                 ),
             )
@@ -888,14 +1014,27 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
                   const parent = document.querySelector('#rewrite');
                   const declared = document.createElement('input');
                   declared.name = 'reordered-secret';
-                  const ordinary = document.createElement('input');
-                  parent.append(declared, ordinary);
+                  parent.appendChild(declared);
+                  parent.removeChild(declared);
+                  declared.removeAttribute('name');
                   const replacement = document.createElement('input');
-                  parent.replaceChildren(document.createElement('input'), replacement);
+                  parent.appendChild(replacement);
                   replacement.value = secret;
                   replacement.dispatchEvent(new Event('input', {bubbles: true}));
                 }""",
                 reordered,
+            )
+            page.evaluate(
+                """() => {
+                  const parent = document.querySelector('#ambiguous-rewrite');
+                  const declared = document.createElement('input');
+                  declared.name = 'ambiguous-secret';
+                  parent.append(declared, document.createElement('input'));
+                  const possible = document.createElement('input');
+                  parent.replaceChildren(document.createElement('input'), possible);
+                  possible.value = 'AMBIGUOUS VALUE MUST NOT CROSS';
+                  possible.dispatchEvent(new Event('input', {bubbles: true}));
+                }"""
             )
 
             reflected = "REFLECTED SECRET MUST NOT CROSS"
@@ -929,6 +1068,48 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
                 }""",
                 contenteditable,
             )
+            page.evaluate(
+                """async () => {
+                  const label = document.createElement('label');
+                  label.htmlFor = 'label-equals-secret';
+                  label.textContent = 'Password';
+                  const field = document.createElement('input');
+                  field.id = 'label-equals-secret';
+                  field.name = 'label-equals-secret';
+                  document.body.append(label, field);
+                  await Promise.resolve();
+                  field.value = 'Password';
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+
+                  const altGr = document.createElement('input');
+                  altGr.name = 'altgr-secret';
+                  document.body.appendChild(altGr);
+                  altGr.dispatchEvent(new KeyboardEvent('keydown', {
+                    key: '@', ctrlKey: true, altKey: true, bubbles: true,
+                  }));
+
+                  const editable = document.createElement('div');
+                  editable.contentEditable = 'true';
+                  editable.innerText = 'VISIBLE CONTENTEDITABLE';
+                  document.body.appendChild(editable);
+                  editable.dispatchEvent(new Event('input', {bubbles: true}));
+
+                  const aria = document.createElement('div');
+                  aria.setAttribute('role', 'textbox');
+                  aria.textContent = 'VISIBLE ARIA TEXTBOX';
+                  document.body.appendChild(aria);
+                  aria.dispatchEvent(new Event('input', {bubbles: true}));
+
+                  const checkbox = document.createElement('input');
+                  checkbox.type = 'checkbox';
+                  document.body.appendChild(checkbox);
+                  checkbox.dispatchEvent(new Event('input', {bubbles: true}));
+                  const select = document.createElement('select');
+                  select.innerHTML = '<option value="one">One</option>';
+                  document.body.appendChild(select);
+                  select.dispatchEvent(new Event('input', {bubbles: true}));
+                }"""
+            )
             page.wait_for_timeout(50)
         finally:
             browser.close()
@@ -936,11 +1117,26 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     payload = json.dumps(events)
     assert prefilled not in payload
     assert reordered not in payload
+    assert "AMBIGUOUS VALUE MUST NOT CROSS" not in payload
     assert reflected not in payload
     assert contenteditable not in payload
     input_events = [event for event in events if event.get("kind") == "input"]
-    assert len(input_events) == 3
-    assert all(event.get("secret") is True for event in input_events)
+    assert len(input_events) == 6
+    assert sum(event.get("secret") is True for event in input_events) == 4
+    label_event = next(
+        event for event in input_events if event.get("field") == "label-equals-secret"
+    )
+    assert label_event["label"] == "[secret]"
+    assert {
+        event.get("value") for event in input_events if not event.get("secret")
+    } == {
+        "VISIBLE CONTENTEDITABLE",
+        "VISIBLE ARIA TEXTBOX",
+    }
+    assert sum(event.get("kind") == "privacy_refusal" for event in events) == 1
+    assert not any(
+        event.get("kind") == "hotkey" and event.get("key") == "@" for event in events
+    )
     click = next(event for event in events if event.get("kind") == "click")
     assert click["structural"]["selector"] is None
     assert click["structural"]["role"] == "[secret]"
@@ -959,6 +1155,8 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
     executable = _chromium_executable()
     if executable is None:
         pytest.skip("no Chromium executable is installed")
+    from playwright.sync_api import sync_playwright
+
     profile = tmp_path / "chrome-profile"
     profile.mkdir()
     process = subprocess.Popen(
@@ -1447,6 +1645,51 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         )
         assert all(extrema == (0, 0) for extrema in future_closed_crop.getextrema())
 
+        late_closed_secret = "LATE-CLOSED-SECRET-LITERAL-NEVER-PERSIST"
+        late_closed_output = tmp_path / "recording-late-unbound-closed-secret"
+
+        def expose_late_unbound_closed_secret(page, pump):
+            page.evaluate(
+                """secret => {
+                  const host = document.createElement('x-late-closed-secret');
+                  host.id = 'different-late-closed-host';
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'closed'});
+                  const field = document.createElement('input');
+                  field.name = 'late-closed-secret';
+                  field.value = secret;
+                  root.appendChild(field);
+                  document.title = secret;
+                }""",
+                late_closed_secret,
+            )
+            page.click("#save")
+            pump()
+
+        with pytest.raises(BrowserAttachError, match="closed shadow root"):
+            record_interactive(
+                attach_app_url,
+                late_closed_output,
+                secret_fields=("late-closed-secret",),
+                cdp_endpoint=endpoint,
+                script=expose_late_unbound_closed_secret,
+            )
+        assert not late_closed_output.exists()
+        with sync_playwright() as late_cleanup_playwright:
+            late_cleanup_browser = late_cleanup_playwright.chromium.connect_over_cdp(
+                endpoint
+            )
+            late_cleanup_page = select_attached_page(
+                late_cleanup_browser,
+                app_url=attach_app_url,
+            )
+            late_cleanup_page.evaluate(
+                """() => {
+                  document.querySelector('#different-late-closed-host').remove();
+                  document.title = 'Attach recorder test';
+                }"""
+            )
+
         contenteditable_secret = "CONTENTEDITABLE-SECRET-LITERAL-NEVER-PERSIST"
 
         def type_and_click_secret_contenteditable(page, pump):
@@ -1546,13 +1789,65 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 assert reflected_secret.encode() not in payload
                 assert encoded_reflected_secret.encode() not in payload
 
-        from playwright.sync_api import sync_playwright
+        replaced_guard_output = tmp_path / "recording-replaced-privacy-guard"
 
+        def replace_page_privacy_guard(page, pump):
+            page.evaluate(
+                """() => {
+                  const host = document.createElement('x-guard-secret');
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'open'});
+                  const field = document.createElement('input');
+                  field.name = 'guard-secret';
+                  field.value = 'GUARD-SECRET-NEVER-PERSIST';
+                  root.appendChild(field);
+                  field.dispatchEvent(new Event('input', {
+                    bubbles: true, composed: true,
+                  }));
+                }"""
+            )
+            pump()
+            page.evaluate(
+                "() => { window.__oaflowRecorder = {sessionId: 'replaced'}; }"
+            )
+
+        with pytest.raises(BrowserAttachError, match="privacy guard is unavailable"):
+            record_interactive(
+                attach_app_url,
+                replaced_guard_output,
+                secret_fields=("guard-secret",),
+                cdp_endpoint=endpoint,
+                script=replace_page_privacy_guard,
+            )
+        assert not replaced_guard_output.exists()
+        with sync_playwright() as guard_cleanup_playwright:
+            guard_cleanup_browser = guard_cleanup_playwright.chromium.connect_over_cdp(
+                endpoint
+            )
+            guard_cleanup_page = select_attached_page(
+                guard_cleanup_browser,
+                app_url=attach_app_url,
+            )
+            remaining_markers = guard_cleanup_page.evaluate(
+                """() => {
+                  const host = document.querySelector('x-guard-secret');
+                  const field = host.shadowRoot.querySelector('input');
+                  const markers = Array.from(field.attributes).filter(
+                    (attribute) => attribute.name.startsWith('data-oaflow-secret-')
+                  );
+                  host.remove();
+                  delete window.__oaflowRecorder;
+                  return markers.length;
+                }"""
+            )
+            assert remaining_markers == 0
+
+        existing_closed_secret = "EXISTING-CLOSED-SECRET-LITERAL-NEVER-PERSIST"
         with sync_playwright() as setup_playwright:
             setup_browser = setup_playwright.chromium.connect_over_cdp(endpoint)
             setup_page = select_attached_page(setup_browser, app_url=attach_app_url)
             setup_page.evaluate(
-                """() => {
+                """secret => {
                   const host = document.createElement('x-existing-closed-secret');
                   host.id = 'existing-closed-secret';
                   host.style.cssText = 'display:block;width:240px;height:50px';
@@ -1560,18 +1855,19 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                   const root = host.attachShadow({mode: 'closed'});
                   const field = document.createElement('input');
                   field.name = 'existing-closed-secret';
+                  field.value = secret;
                   field.style.cssText = 'width:220px;height:40px;border:0';
                   root.appendChild(field);
+                  document.title = secret;
                   host.writeSecret = (secret) => {
                     field.value = secret;
                     field.dispatchEvent(new Event('input', {
                       bubbles: true, composed: true,
                     }));
                   };
-                }"""
+                }""",
+                existing_closed_secret,
             )
-
-        existing_closed_secret = "EXISTING-CLOSED-SECRET-LITERAL-NEVER-PERSIST"
 
         def type_existing_closed_shadow_secret(page, pump):
             page.evaluate(
@@ -1600,6 +1896,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             refusal_page.evaluate(
                 """() => {
                   document.querySelector('#existing-closed-secret').remove();
+                  document.title = 'Attach recorder test';
                   const host = document.createElement('x-undeclared-closed-secret');
                   host.id = 'different-closed-host';
                   document.body.appendChild(host);
@@ -1611,7 +1908,10 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             )
 
         refused_closed_output = tmp_path / "recording-refused-existing-closed-secret"
-        with pytest.raises(BrowserAttachError, match="pre-existing closed shadow"):
+        with pytest.raises(
+            BrowserAttachError,
+            match="pre-existing or newly added closed shadow",
+        ):
             record_interactive(
                 attach_app_url,
                 refused_closed_output,
@@ -2013,6 +2313,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             popup_targets = json.load(response)
         assert any(target.get("url") == "about:blank" for target in popup_targets)
 
+        _activate_app_tab(endpoint, attach_app_url)
         popup_activity_recording = tmp_path / "recording-popup-activity-refusal"
 
         def act_inside_popup(page, pump):
@@ -2038,6 +2339,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200
 
+        _activate_app_tab(endpoint, attach_app_url)
         short_page_recording = tmp_path / "recording-short-page-refusal"
 
         def act_in_short_lived_context_page(page, pump):
@@ -2063,6 +2365,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200
 
+        _activate_app_tab(endpoint, attach_app_url)
         prebaseline_recording = tmp_path / "recording-prebaseline-page-refusal"
         original_select_attached_page = interactive_recorder_module.select_attached_page
         prebaseline_page_acted = False
@@ -2101,6 +2404,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert not (prebaseline_recording / "meta.json").exists()
         assert process.poll() is None
 
+        _activate_app_tab(endpoint, attach_app_url)
         baseline_getter_recording = tmp_path / "recording-baseline-getter-refusal"
         from playwright.sync_api import BrowserContext
 
@@ -2139,6 +2443,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert not (baseline_getter_recording / "meta.json").exists()
         assert process.poll() is None
 
+        _activate_app_tab(endpoint, attach_app_url)
         late_page_recording = tmp_path / "recording-late-page-refusal"
         late_page_session = InteractiveRecorder(
             attach_app_url,
@@ -2168,6 +2473,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200
 
+        _activate_app_tab(endpoint, attach_app_url)
         cleanup_frame_recording = tmp_path / "recording-cleanup-frame-refusal"
         cleanup_frame_session = InteractiveRecorder(
             attach_app_url,

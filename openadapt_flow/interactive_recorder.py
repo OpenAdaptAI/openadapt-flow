@@ -84,6 +84,10 @@ class BrowserAttachError(RuntimeError):
 
 _PARTIAL_RECORDING_PREFIX = ".openadapt-recording-partial-"
 
+# One protocol object group scopes every remote object that the closed-shadow
+# privacy scan resolves, so each scan can release its handles in one call.
+_PRIVACY_SCAN_OBJECT_GROUP = "openadapt-flow-privacy-scan"
+
 
 def _rename_directory_noreplace(source: Path, destination: Path) -> None:
     """Atomically rename a directory without replacing any destination."""
@@ -353,6 +357,7 @@ _INIT_JS = r"""
   const SESSION_ID = __SESSION_ID__;
   const BINDING_NAME = __BINDING_NAME__;
   const GLOBAL_KEY = '__oaflowRecorder';
+  const CLEANUP_KEY = '__oaflowCleanup_' + SESSION_ID;
   const previous = window[GLOBAL_KEY];
   if (previous && previous.sessionId === SESSION_ID) return;
   if (previous && typeof previous.cleanup === 'function') {
@@ -371,6 +376,7 @@ _INIT_JS = r"""
   const stickySecretElements = new Set();
   const stickySecretValues = new Set();
   const observedSecretRoots = new WeakSet();
+  const ambiguousSecretReplacements = new WeakSet();
   let nextInputSession = 0;
   let activeSecretElement = null;
   let activeSecretState = null;
@@ -418,6 +424,7 @@ _INIT_JS = r"""
     if (current && current.sessionId === SESSION_ID) {
       try { delete window[GLOBAL_KEY]; } catch (e) { window[GLOBAL_KEY] = null; }
     }
+    try { delete window[CLEANUP_KEY]; } catch (e) { window[CLEANUP_KEY] = null; }
   }
   window[GLOBAL_KEY] = {
     sessionId: SESSION_ID,
@@ -428,6 +435,7 @@ _INIT_JS = r"""
     registerExistingClosedShadowHost,
     structuralState: safePageState,
   };
+  window[CLEANUP_KEY] = {sessionId: SESSION_ID, stopEvents, cleanup};
 
   function identifierRect() {
     // Bounding rect of the operator-marked record-identifying field
@@ -453,7 +461,10 @@ _INIT_JS = r"""
   function currentSecretValue(el) {
     try {
       if (el && el.value != null) return String(el.value);
-      if (el && el.isContentEditable) return String(el.innerText || '');
+      if (el && (el.isContentEditable
+          || (el.getAttribute && el.getAttribute('role') === 'textbox'))) {
+        return String(el.innerText || el.textContent || '');
+      }
     } catch (e) {}
     return '';
   }
@@ -463,11 +474,11 @@ _INIT_JS = r"""
     if (value) stickySecretValues.add(value);
   }
 
-  function scrubSecretText(value) {
+  function scrubTextWithSecretValues(value, secretValues) {
     if (value == null) return value;
     if (opaqueSecretActive) return String(value) ? '[secret]' : '';
     let scrubbed = String(value);
-    const values = Array.from(stickySecretValues).sort(
+    const values = Array.from(secretValues).filter(Boolean).sort(
       (left, right) => right.length - left.length
     );
     for (const secret of values) {
@@ -481,6 +492,10 @@ _INIT_JS = r"""
       }
     }
     return scrubbed;
+  }
+
+  function scrubSecretText(value) {
+    return scrubTextWithSecretValues(value, stickySecretValues);
   }
 
   function safePageState() {
@@ -606,10 +621,15 @@ _INIT_JS = r"""
 
   function isTextEntry(el) {
     try {
-      return !!el && !!el.matches && el.matches(
-        'input, textarea, [contenteditable=""], [contenteditable="true"],' +
-        ' [role="textbox"]'
-      );
+      if (!el || !el.matches) return false;
+      if (el.matches('textarea, [contenteditable=""], [contenteditable="true"],'
+          + ' [role="textbox"]')) return true;
+      if (!el.matches('input')) return false;
+      const type = (el.getAttribute('type') || 'text').toLowerCase();
+      return [
+        'button', 'checkbox', 'color', 'file', 'hidden', 'image', 'radio',
+        'range', 'reset', 'submit',
+      ].indexOf(type) < 0;
     } catch (e) { return false; }
   }
 
@@ -813,47 +833,58 @@ _INIT_JS = r"""
   }
 
   function processSecretMutations(mutations) {
+    // Apply every attribute record first. A removed declared field can lose its
+    // name after removal but before its replacement is appended in the same
+    // task. The old-value record binds that removed node before rewrite
+    // matching runs across the complete MutationObserver batch.
     for (const mutation of mutations) {
-      if (mutation.type === 'attributes') {
-        if (!secretStates.has(mutation.target)) {
-          const priorState = stateFromPriorDeclaration(mutation);
-          if (priorState) bindSecretState(mutation.target, priorState, false);
-        }
-        discoverDeclaredSecrets(mutation.target);
+      if (mutation.type !== 'attributes') continue;
+      if (!secretStates.has(mutation.target)) {
+        const priorState = stateFromPriorDeclaration(mutation);
+        if (priorState) bindSecretState(mutation.target, priorState, false);
+      }
+      discoverDeclaredSecrets(mutation.target);
+    }
+    const removedEntries = [];
+    const addedEntries = [];
+    for (const mutation of mutations) {
+      if (mutation.type !== 'childList') continue;
+      for (const node of mutation.removedNodes) {
+        removedEntries.push(...textEntryCandidates(node));
+      }
+      for (const node of mutation.addedNodes) {
+        discoverDeclaredSecrets(node);
+        addedEntries.push(...textEntryCandidates(node));
+      }
+    }
+    const detachedRemovedEntries = removedEntries.filter(
+      (el) => !el.isConnected
+    );
+    const liveAddedEntries = addedEntries.filter((el) => el.isConnected);
+    const removedSecretEntries = detachedRemovedEntries.filter(
+      (el) => secretStates.has(el)
+    );
+    const unboundAddedEntries = liveAddedEntries.filter(
+      (el) => !secretStates.has(el)
+    );
+    if (removedSecretEntries.length && unboundAddedEntries.length) {
+      if (detachedRemovedEntries.length === 1 && liveAddedEntries.length === 1
+          && removedSecretEntries.length === 1
+          && unboundAddedEntries.length === 1) {
+        bindSecretState(
+          unboundAddedEntries[0],
+          secretStates.get(removedSecretEntries[0]),
+          false
+        );
       } else {
-        const removedEntries = [];
-        const addedEntries = [];
-        for (const node of mutation.removedNodes) {
-          for (const el of textEntryCandidates(node)) {
-            removedEntries.push({el, state: secretStates.get(el) || null});
-          }
-        }
-        for (const node of mutation.addedNodes) {
-          discoverDeclaredSecrets(node);
-          addedEntries.push(...textEntryCandidates(node));
-        }
-        const removedSecretStates = removedEntries
-          .map((entry) => entry.state).filter((state) => state !== null);
-        if (removedSecretStates.length && addedEntries.length) {
-          // A controlled input can replace a declared secret before its first
-          // input event. Mutation records retain the removed node, so transfer
-          // its sticky state before the event handler can read a replacement.
-          // If a subtree rewrite is ambiguous, mark every possible replacement
-          // secret. Extra redaction is safer than persisting a secret value.
-          if (removedEntries.length === 1 && addedEntries.length === 1) {
-            for (let index = 0; index < addedEntries.length; index += 1) {
-              const state = removedEntries[index].state;
-              const el = addedEntries[index];
-              if (state && !secretStates.has(el)) bindSecretState(el, state, false);
-            }
-          } else {
-            // A multi-node rewrite can reorder its text entries. Index mapping
-            // is not proof of identity, even when the two counts are equal.
-            const state = removedSecretStates[0];
-            for (const el of addedEntries) {
-              if (!secretStates.has(el)) bindSecretState(el, state, false);
-            }
-          }
+        // A multi-node rewrite has no proven field mapping. Mask every
+        // possible replacement, but refuse its first input. Assigning one
+        // removed field/session to all candidates can merge distinct actions
+        // and replay a secret into the wrong field.
+        const maskState = secretStates.get(removedSecretEntries[0]);
+        for (const el of unboundAddedEntries) {
+          bindSecretState(el, maskState, false);
+          ambiguousSecretReplacements.add(el);
         }
       }
     }
@@ -887,7 +918,10 @@ _INIT_JS = r"""
     // the compile-time parameter-proposal pass; NEVER the field's value.
     try {
       if (trustedSecretFieldLabels.has(el)) {
-        return trustedSecretFieldLabels.get(el);
+        return scrubTextWithSecretValues(
+          trustedSecretFieldLabels.get(el),
+          [currentSecretValue(el)]
+        );
       }
       const clean = (s) => scrubSecretText(
         (s || '').replace(/\s+/g, ' ').trim()
@@ -1066,12 +1100,30 @@ _INIT_JS = r"""
   listen('input', (e) => {
     refreshSecretBindings();
     const el = inputEventTarget(e);
+    if (ambiguousSecretReplacements.has(el)) {
+      privacyBoundaryError = (
+        'a DOM rewrite made a declared secret field identity ambiguous'
+      );
+      emit({kind: 'privacy_refusal'});
+      return;
+    }
     const root = el && el.getRootNode ? el.getRootNode() : null;
     const isUnboundShadowInput = root && root.host
       && !secretStates.has(el) && !secretBoundaryStates.has(root)
       && !declaredSecretState(el) && !declaredSecretHostState(root.host);
-    if ((!isTextEntry(el) && !closedSecretHosts.has(el))
-        || (isUnboundShadowInput && SECRET_NAMES.length)) {
+    const isNativeNonTextControl = !!el && !!el.matches && el.matches(
+      'select, input, button, option'
+    ) && !isTextEntry(el);
+    if (!isTextEntry(el) && !closedSecretHosts.has(el)
+        && !declaredSecretHostState(el)) {
+      if (isNativeNonTextControl) return;
+      privacyBoundaryError = (
+        'a shadow input event did not have a declared secret host boundary'
+      );
+      emit({kind: 'privacy_refusal'});
+      return;
+    }
+    if (isUnboundShadowInput && SECRET_NAMES.length) {
       privacyBoundaryError = (
         'a shadow input event did not have a declared secret host boundary'
       );
@@ -1104,12 +1156,23 @@ _INIT_JS = r"""
     if (secret) {
       o.__oaflow_secret_mask_bound = secretBinding.maskBound;
     } else {
-      o.value = (el.value != null ? String(el.value) : '');
+      o.value = currentSecretValue(el);
     }
     emit(o);
   });
 
   listen('keydown', (e) => {
+    refreshSecretBindings();
+    const el = inputEventTarget(e);
+    if (ambiguousSecretReplacements.has(el)) {
+      privacyBoundaryError = (
+        'a DOM rewrite made a declared secret field identity ambiguous'
+      );
+      emit({kind: 'privacy_refusal'});
+      return;
+    }
+    const keySecretBinding = secretStateForInput(el);
+    if (keySecretBinding && e.key.length === 1) return;
     const modifiers = [];
     if (e.ctrlKey) modifiers.push('ctrl');
     if (e.altKey) modifiers.push('alt');
@@ -1229,6 +1292,7 @@ class InteractiveRecorder:
         self._context_page_latches: list[tuple[Any, Any]] = []
         self._context_page_baselines: list[tuple[Any, tuple[Any, ...]]] = []
         self._context = None
+        self._privacy_cdp = None
         self._context_pages_at_start: tuple[Any, ...] = ()
         self._finalizing = False
         self.backend: Optional[PlaywrightBackend] = None
@@ -1347,8 +1411,7 @@ class InteractiveRecorder:
                             "could not install the recording listener in every "
                             "existing browser frame; recording was refused"
                         ) from exc
-                self._register_existing_closed_shadow_boundaries()
-                self._assert_page_privacy_safe()
+            self._guard_screenshot_privacy()
 
             self.backend = PlaywrightBackend(
                 self.page,
@@ -1358,6 +1421,7 @@ class InteractiveRecorder:
                     marker_attribute=self._secret_marker_attribute,
                 ),
                 structural_state_reader=self._read_scrubbed_page_state,
+                screenshot_guard=self._guard_screenshot_privacy,
             )
             assert self._recording_dir is not None
             self.recorder = Recorder(
@@ -1386,22 +1450,24 @@ class InteractiveRecorder:
         secret literal crosses the CDP boundary.
         """
 
-        assert not self._owns_browser
         assert self.page is not None
-        assert self._context is not None
         queries = ["input[type='password']"]
         for field in sorted(self._secret_fields):
             encoded = _css_string_literal(field)
             queries.append(f"[name={encoded}], [id={encoded}]")
+        cdp = self._privacy_cdp
+        if cdp is None:
+            assert self._context is not None
+            try:
+                cdp = self._context.new_cdp_session(self.page)
+                cdp.send("DOM.enable")
+            except Exception as exc:
+                raise BrowserAttachError(
+                    "could not inspect closed shadow boundaries; recording was "
+                    "refused before retaining a frame"
+                ) from exc
+            self._privacy_cdp = cdp
         try:
-            cdp = self._context.new_cdp_session(self.page)
-        except Exception as exc:
-            raise BrowserAttachError(
-                "could not inspect pre-existing closed shadow boundaries; "
-                "recording was refused before the first frame"
-            ) from exc
-        try:
-            cdp.send("DOM.enable")
             # Populate stable frontend node ids. Depth zero returns only the
             # document node; it does not send page attributes or text to Python.
             cdp.send("DOM.getDocument", {"depth": 0, "pierce": True})
@@ -1424,7 +1490,13 @@ class InteractiveRecorder:
                         },
                     )
                     for node_id in results.get("nodeIds", []):
-                        resolved = cdp.send("DOM.resolveNode", {"nodeId": int(node_id)})
+                        resolved = cdp.send(
+                            "DOM.resolveNode",
+                            {
+                                "nodeId": int(node_id),
+                                "objectGroup": _PRIVACY_SCAN_OBJECT_GROUP,
+                            },
+                        )
                         object_id = resolved.get("object", {}).get("objectId")
                         if not object_id:
                             raise BrowserAttachError(
@@ -1435,6 +1507,7 @@ class InteractiveRecorder:
                             "Runtime.callFunctionOn",
                             {
                                 "objectId": object_id,
+                                "objectGroup": _PRIVACY_SCAN_OBJECT_GROUP,
                                 "functionDeclaration": r"""function(sessionId) {
                                   const root = this.getRootNode && this.getRootNode();
                                   if (!root || root.mode !== 'closed') {
@@ -1461,25 +1534,33 @@ class InteractiveRecorder:
                         value = outcome.get("result", {}).get("value", {})
                         if value.get("closed") and not value.get("registered"):
                             raise BrowserAttachError(
-                                "a declared secret is inside a pre-existing closed "
-                                "shadow root whose host is not declared with the "
-                                "same --secret name or id; recording was refused "
-                                "before the first frame"
+                                "a declared secret is inside a pre-existing or "
+                                "newly added closed shadow root whose host is not "
+                                "declared with the same --secret name or id; "
+                                "recording was refused before retaining a frame"
                             )
                 finally:
                     cdp.send("DOM.discardSearchResults", {"searchId": search_id})
+            # This guard runs before every retained screenshot. Release the
+            # scan's resolved objects so a long recording cannot accumulate
+            # protocol handles inside the attached browser.
+            cdp.send(
+                "Runtime.releaseObjectGroup",
+                {"objectGroup": _PRIVACY_SCAN_OBJECT_GROUP},
+            )
         except BrowserAttachError:
             raise
         except Exception as exc:
             raise BrowserAttachError(
-                "could not prove pre-existing closed shadow secret boundaries; "
-                "recording was refused before the first frame"
+                "could not prove closed shadow secret boundaries; recording was "
+                "refused before retaining a frame"
             ) from exc
-        finally:
-            try:
-                cdp.detach()
-            except Exception:
-                pass
+
+    def _guard_screenshot_privacy(self) -> None:
+        """Bind or refuse every secret boundary before screenshot bytes exist."""
+
+        self._register_existing_closed_shadow_boundaries()
+        self._assert_page_privacy_safe()
 
     def _assert_page_privacy_safe(self) -> None:
         """Refuse a screenshot after an undeclared closed root appears."""
@@ -1569,10 +1650,21 @@ class InteractiveRecorder:
 
     def finish(self) -> Path:
         """Flush input, write metadata, and close or detach as appropriate."""
-        # The first finalization operation touches the live page. Arm every
-        # irreversible lifecycle latch before cleanup or the last queue drain.
-        self._finalizing = True
         try:
+            if self._listener_error is not None:
+                raise self._listener_error
+            # Bind or refuse every secret boundary first. These page
+            # round-trips also deliver lifecycle events that Chromium queued
+            # during the recording, so a stale pre-finalization event is
+            # judged by recording-time rules instead of aliasing a change
+            # after the final evidence.
+            self._guard_screenshot_privacy()
+            if self._listener_error is not None:
+                raise self._listener_error
+            # The operations below retain the final evidence. Arm every
+            # irreversible lifecycle latch before cleanup and the last
+            # queue drain.
+            self._finalizing = True
             self._cleanup_page_listeners()
             self._drain_event_queue()
             self._flush_type()
@@ -1680,23 +1772,24 @@ class InteractiveRecorder:
 
         if self._owns_browser or self.page is None or self._listener_error is not None:
             return
+        if self._finalizing:
+            # The final evidence is already bound. Refuse without another page
+            # round-trip: an evaluate here would re-enter event dispatch while
+            # the latch is armed.
+            self._retain_late_frame_error()
+            return
         try:
             if frame is not self.page.main_frame:
-                if self._finalizing:
-                    self._retain_late_frame_error()
                 return
             current_origin = _http_origin(
-                str(frame.url),
+                str(frame.evaluate("() => location.origin")),
                 label="the selected browser tab URL",
             )
         except Exception:
             current_origin = None
-        if self._finalizing or current_origin != self._attached_origin:
+        if current_origin != self._attached_origin:
             self._listener_error = BrowserAttachError(
-                "the selected browser tab changed frame state after Flow "
-                "retained its final evidence; recording was refused"
-                if self._finalizing
-                else "the selected browser tab left the declared application "
+                "the selected browser tab left the declared application "
                 "origin; recording was refused"
             )
             self.done = True
@@ -1972,9 +2065,12 @@ class InteractiveRecorder:
                 frame.evaluate(
                     """sessionId => {
                       const current = window.__oaflowRecorder;
-                      if (current && current.sessionId === sessionId
-                          && typeof current.stopEvents === 'function') {
-                        current.stopEvents();
+                      const fallback = window['__oaflowCleanup_' + sessionId];
+                      const owner = current && current.sessionId === sessionId
+                        ? current : fallback;
+                      if (owner && owner.sessionId === sessionId
+                          && typeof owner.stopEvents === 'function') {
+                        owner.stopEvents();
                       }
                     }""",
                     self._session_id,
@@ -1996,13 +2092,23 @@ class InteractiveRecorder:
                 frame.evaluate(
                     """([sessionId, marker]) => {
                       const current = window.__oaflowRecorder;
-                      if (current && current.sessionId === sessionId
-                          && typeof current.cleanup === 'function') {
-                        current.cleanup();
+                      const fallback = window['__oaflowCleanup_' + sessionId];
+                      const owner = current && current.sessionId === sessionId
+                        ? current : fallback;
+                      if (owner && owner.sessionId === sessionId
+                          && typeof owner.cleanup === 'function') {
+                        owner.cleanup();
                       }
-                      for (const element of document.querySelectorAll('*')) {
-                        if (element.hasAttribute(marker)) {
-                          element.removeAttribute(marker);
+                      const roots = [document];
+                      while (roots.length) {
+                        const root = roots.pop();
+                        for (const element of root.querySelectorAll('*')) {
+                          if (element.hasAttribute(marker)) {
+                            element.removeAttribute(marker);
+                          }
+                          if (element.shadowRoot) {
+                            roots.push(element.shadowRoot);
+                          }
                         }
                       }
                     }""",
@@ -2016,9 +2122,15 @@ class InteractiveRecorder:
 
         self._cleanup_page_listeners()
         self._cleanup_secret_markers()
+        privacy_cdp, self._privacy_cdp = self._privacy_cdp, None
         browser, self._browser = self._browser, None
         playwright, self._pw = self._pw, None
         try:
+            if privacy_cdp is not None:
+                try:
+                    privacy_cdp.detach()
+                except Exception:
+                    pass
             if self._owns_browser and browser is not None:
                 browser.close()
         finally:
@@ -2325,27 +2437,17 @@ class InteractiveRecorder:
         assert not self._owns_browser
         assert self.page is not None
         try:
-            current_origin = _http_origin(
-                str(self.page.url),
-                label="the selected browser tab URL",
-            )
-        except Exception as exc:
-            raise BrowserAttachError(
-                "the selected browser tab left the declared application origin; "
-                "recording was refused"
-            ) from exc
-        if current_origin != self._attached_origin:
-            raise BrowserAttachError(
-                "the selected browser tab left the declared application origin; "
-                "recording was refused"
-            )
-        try:
             raw = self.page.evaluate(
                 """() => ({
+                  origin: location.origin,
                   width: window.innerWidth,
                   height: window.innerHeight,
                   dpr: window.devicePixelRatio || 1,
                 })"""
+            )
+            current_origin = _http_origin(
+                str(raw["origin"]),
+                label="the selected browser tab URL",
             )
             geometry = (
                 int(raw["width"]),
@@ -2356,6 +2458,11 @@ class InteractiveRecorder:
             raise BrowserAttachError(
                 "the attached tab geometry could not be read; recording was refused"
             ) from exc
+        if current_origin != self._attached_origin:
+            raise BrowserAttachError(
+                "the selected browser tab left the declared application origin; "
+                "recording was refused"
+            )
         if geometry[0] <= 0 or geometry[1] <= 0 or not 0.1 <= geometry[2] <= 16.0:
             raise BrowserAttachError(
                 "the attached tab reported invalid viewport or monitor-scale "

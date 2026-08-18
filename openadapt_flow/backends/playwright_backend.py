@@ -715,6 +715,7 @@ class PlaywrightBackend:
         screenshot_scale: Literal["css", "device"] = "device",
         screenshot_mask_selectors: tuple[str, ...] = (),
         structural_state_reader: Optional[Callable[[], dict[str, Any]]] = None,
+        screenshot_guard: Optional[Callable[[], None]] = None,
     ) -> None:
         """Wrap an existing Playwright page.
 
@@ -735,11 +736,15 @@ class PlaywrightBackend:
             structural_state_reader: Optional source-time sanitized URL/title
                 reader. Recording paths use it to keep raw reflected secrets
                 out of Python-side structural evidence.
+            screenshot_guard: Optional fail-closed check that runs before
+                Chromium creates screenshot bytes. Recording paths use it to
+                bind or refuse closed-shadow secret boundaries.
         """
         self.page = page
         self._screenshot_scale = screenshot_scale
         self._screenshot_mask_selectors = screenshot_mask_selectors
         self._structural_state_reader = structural_state_reader
+        self._screenshot_guard = screenshot_guard
         self._screenshot_frame_generation = 0
         self._screenshot_frame_listener = self._handle_screenshot_frame_lifecycle
         self._screenshot_frame_tracking = False
@@ -2287,6 +2292,8 @@ class PlaywrightBackend:
 
     def screenshot(self) -> bytes:
         """Return a stable current full-viewport frame as PNG bytes."""
+        if self._screenshot_guard is not None:
+            self._screenshot_guard()
         base_options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
             base_options["scale"] = "css"

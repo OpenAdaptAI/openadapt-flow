@@ -22,7 +22,9 @@ from typing import Sequence
 
 _UNHANDLED_RUNTIME_MARKERS = (
     "Task was destroyed but it is pending!",
+    "Task exception was never retrieved",
     "Future exception was never retrieved",
+    "TargetClosedError",
 )
 
 

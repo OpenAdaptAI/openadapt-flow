@@ -111,7 +111,9 @@ def test_run_forces_utf8_for_child_cli_and_log(tmp_path, monkeypatch):
     "marker",
     [
         "Task was destroyed but it is pending!",
+        "Task exception was never retrieved",
         "Future exception was never retrieved",
+        "TargetClosedError: Target page, context or browser has been closed",
     ],
 )
 def test_run_rejects_unhandled_runtime_errors_on_a_zero_exit(

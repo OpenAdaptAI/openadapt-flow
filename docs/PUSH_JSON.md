@@ -13,7 +13,7 @@ The command without `--json` keeps its existing human-readable output.
 | `paused_for_review` | 0 | Flow made a local sanitized derivative. It did not upload it. | `review_local` |
 | `accepted_for_ingest` | 0 | The server acknowledged the exact approved archive and returned its stable ingest id. | `parameterize`, `validate_runtime`, or `open_dashboard` |
 | `failed` | 1 | Flow did not receive a complete accepted-ingest contract. | `null` or `reconcile` |
-| `delivery_uncertain` | 1 | A transport failure occurred after Flow attempted the request. The server can have received it. | `reconcile` |
+| `delivery_uncertain` | 1 | A transport failure or an ambiguous server response occurred after Flow attempted the request. The server can have received it. | `reconcile` |
 
 Do not retry `delivery_uncertain` automatically. Use `artifact_sha256` to
 reconcile the request with the hosted control plane first.
@@ -46,7 +46,9 @@ The `binding` object lets Desktop detect a stale handoff. It carries:
 - the sanitization and certification policies;
 - the certification evidence, parameter schema, governed authorization
   template, and attested run-report SHA-256 values; and
-- the halted run UUID when the bundle resolves a governed halt.
+- the halted run UUID when the bundle resolves a governed halt; and
+- the server-retained organization, bundle-version, and runtime-validation
+  identifiers for an accepted bundle.
 
 The local `review.id` is a domain-separated SHA-256 of the canonical sanitized
 manifest. It is stable for that exact review candidate. It is local and
@@ -88,7 +90,11 @@ openadapt-flow push recording/ --json
     "governed_authorization_template_sha256": null,
     "parameter_schema_sha256": null,
     "attested_run_report_sha256": null,
-    "resolves_run_id": null
+    "resolves_run_id": null,
+    "organization_id": null,
+    "bundle_version_id": null,
+    "bundle_version": null,
+    "runtime_validation_id": null
   },
   "next_action": "review_local",
   "dashboard_url": null,
@@ -105,7 +111,9 @@ openadapt-flow push approved-bundle/ --kind bundle \
 ```
 
 Flow returns `accepted_for_ingest` only after it checks all required server ids,
-the echoed artifact hash, and the exact local attestation binding.
+the echoed artifact hash, the exact local attestation binding, and the retained
+server bundle-version record. The server record must bind its organization,
+workflow, artifact hash, version number, and runtime-validation identifier.
 
 ## Error privacy
 

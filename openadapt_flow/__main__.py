@@ -3230,6 +3230,10 @@ def _push_json_base(status: str) -> dict[str, Any]:
             "parameter_schema_sha256": None,
             "attested_run_report_sha256": None,
             "resolves_run_id": None,
+            "organization_id": None,
+            "bundle_version_id": None,
+            "bundle_version": None,
+            "runtime_validation_id": None,
         },
         "next_action": None,
         "dashboard_url": None,
@@ -3492,6 +3496,31 @@ def _push_json_result(result: dict[str, Any]) -> dict[str, Any]:
     workflow_id = result.get("workflow_id")
     if not _is_uuid(workflow_id):
         raise ValueError("bundle ingest has no workflow id")
+    if result.get("status") != "accepted":
+        raise ValueError("bundle ingest is not accepted")
+    version = result.get("version")
+    if not isinstance(version, dict):
+        raise ValueError("bundle ingest has no retained version binding")
+    bundle_version_id = version.get("id")
+    organization_id = version.get("org_id")
+    version_workflow_id = version.get("workflow_id")
+    version_artifact_sha = version.get("artifact_sha256")
+    runtime_validation_id = version.get("runtime_validation_id")
+    version_number = version.get("version")
+    if not _is_uuid(bundle_version_id):
+        raise ValueError("invalid retained bundle version id")
+    if not _is_uuid(organization_id):
+        raise ValueError("invalid retained organization binding")
+    if version_workflow_id != workflow_id:
+        raise ValueError("retained bundle version workflow mismatch")
+    if version_artifact_sha != artifact_sha:
+        raise ValueError("retained bundle version artifact mismatch")
+    if not _is_uuid(runtime_validation_id):
+        raise ValueError("invalid retained runtime validation binding")
+    if not isinstance(version_number, int) or isinstance(version_number, bool):
+        raise ValueError("invalid retained bundle version")
+    if version_number < 1:
+        raise ValueError("invalid retained bundle version")
     attestation = result.get("attestation_binding")
     if not isinstance(attestation, dict):
         raise ValueError("bundle ingest has no attestation binding")
@@ -3544,6 +3573,10 @@ def _push_json_result(result: dict[str, Any]) -> dict[str, Any]:
             "parameter_schema_sha256": parameter_schema_sha,
             "attested_run_report_sha256": run_report_sha,
             "resolves_run_id": resolves_run_id,
+            "organization_id": organization_id,
+            "bundle_version_id": bundle_version_id,
+            "bundle_version": version_number,
+            "runtime_validation_id": runtime_validation_id,
         }
     )
     dashboard_url = result.get("dashboard_url")

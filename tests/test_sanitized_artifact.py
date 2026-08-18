@@ -877,6 +877,7 @@ def test_schema_files_are_valid_json():
         "runtime-validation-attestation-v1.json",
         "runtime-validation-attestation-v2.json",
         "runtime-validation-attestation-v3.json",
+        "push-result-v1.json",
     ):
         schema = json.loads((root / name).read_text())
         assert schema["$schema"].endswith("2020-12/schema")

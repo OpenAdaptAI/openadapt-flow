@@ -933,8 +933,34 @@ def test_push_non_201(tmp_path, monkeypatch):
     monkeypatch.setattr(
         httpx, "post", lambda url, **kw: httpx.Response(502, text="store down")
     )
-    with pytest.raises(hosted.HostedError, match="502"):
+    with pytest.raises(hosted.HostedDeliveryUncertain, match="502"):
         hosted.push(rec, token="tok", host="https://h.test")
+
+
+@pytest.mark.parametrize("status", [400, 403, 404, 413, 422, 429])
+def test_push_definite_client_rejection_is_not_delivery_uncertain(
+    tmp_path, monkeypatch, status
+):
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
+    monkeypatch.setattr(
+        httpx, "post", lambda url, **kw: httpx.Response(status, text="rejected")
+    )
+    with pytest.raises(hosted.HostedError, match=str(status)) as raised:
+        hosted.push(rec, token="tok", host="https://h.test")
+    assert not isinstance(raised.value, hosted.HostedDeliveryUncertain)
+
+
+@pytest.mark.parametrize("status", [200, 302, 408, 409, 500, 502, 503])
+def test_push_ambiguous_response_is_delivery_uncertain(tmp_path, monkeypatch, status):
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
+    monkeypatch.setattr(
+        httpx, "post", lambda url, **kw: httpx.Response(status, text="ambiguous")
+    )
+    with pytest.raises(hosted.HostedDeliveryUncertain, match=str(status)) as raised:
+        hosted.push(rec, token="tok", host="https://h.test")
+    assert raised.value.context["local_binding"]["approved_archive_sha256"]
 
 
 def test_push_401(tmp_path, monkeypatch):
@@ -2877,6 +2903,9 @@ _PUSH_RECORDING_SHA = "2" * 64
 _PUSH_TEMPLATE_SHA = "3" * 64
 _PUSH_INGEST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 _PUSH_WORKFLOW_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+_PUSH_ORG_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+_PUSH_VERSION_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+_PUSH_RUNTIME_VALIDATION_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 
 
 def _assert_push_json_schema(value):
@@ -3005,6 +3034,15 @@ def test_cli_push_json_bundle_accepted_with_exact_attestation_binding(
                 "run_report_sha256": _PUSH_REPORT_SHA,
                 "governed_authorization_template_sha256": _PUSH_TEMPLATE_SHA,
             },
+            "status": "accepted",
+            "version": {
+                "id": _PUSH_VERSION_ID,
+                "org_id": _PUSH_ORG_ID,
+                "workflow_id": _PUSH_WORKFLOW_ID,
+                "version": 3,
+                "artifact_sha256": _PUSH_ARTIFACT_SHA,
+                "runtime_validation_id": _PUSH_RUNTIME_VALIDATION_ID,
+            },
         }
     )
     monkeypatch.setattr(hosted, "push", lambda *args, **kwargs: result)
@@ -3034,8 +3072,63 @@ def test_cli_push_json_bundle_accepted_with_exact_attestation_binding(
         "parameter_schema_sha256": _PUSH_PARAMETER_SHA,
         "attested_run_report_sha256": _PUSH_REPORT_SHA,
         "resolves_run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+        "organization_id": _PUSH_ORG_ID,
+        "bundle_version_id": _PUSH_VERSION_ID,
+        "bundle_version": 3,
+        "runtime_validation_id": _PUSH_RUNTIME_VALIDATION_ID,
     }
     assert value["next_action"] == "open_dashboard"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("org_id", "not-a-uuid"),
+        ("workflow_id", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        ("artifact_sha256", "9" * 64),
+        ("runtime_validation_id", None),
+    ],
+)
+def test_cli_push_json_refuses_mismatched_server_version_binding(
+    monkeypatch, capsys, field, value
+):
+    result = _json_push_base(kind="bundle")
+    result.update(
+        {
+            "workflow_id": _PUSH_WORKFLOW_ID,
+            "dashboard_url": (
+                f"https://h.test/dashboard/workflows/{_PUSH_WORKFLOW_ID}"
+            ),
+            "status": "accepted",
+            "version": {
+                "id": _PUSH_VERSION_ID,
+                "org_id": _PUSH_ORG_ID,
+                "workflow_id": _PUSH_WORKFLOW_ID,
+                "version": 3,
+                "artifact_sha256": _PUSH_ARTIFACT_SHA,
+                "runtime_validation_id": _PUSH_RUNTIME_VALIDATION_ID,
+            },
+            "attestation_binding": {
+                "schema": "openadapt.runtime-validation/v3",
+                "challenge_id": "challenge-7",
+                "source_recording_sha256": _PUSH_RECORDING_SHA,
+                "bundle_sha256": _PUSH_ARTIFACT_SHA,
+                "parameter_schema_sha256": _PUSH_PARAMETER_SHA,
+                "policy": "clinical-write",
+                "policy_evidence_sha256": _PUSH_POLICY_SHA,
+                "run_report_sha256": _PUSH_REPORT_SHA,
+                "governed_authorization_template_sha256": _PUSH_TEMPLATE_SHA,
+            },
+        }
+    )
+    result["version"][field] = value
+    monkeypatch.setattr(hosted, "push", lambda *args, **kwargs: result)
+
+    assert main(["push", "approved", "--kind", "bundle", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(document)
+    assert document["status"] == "failed"
+    assert document["error"]["code"] == "invalid_ingest_response"
 
 
 def test_cli_push_json_refuses_false_success_without_server_ingest_id(

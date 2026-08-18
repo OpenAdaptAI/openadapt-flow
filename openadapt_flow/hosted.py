@@ -1413,9 +1413,19 @@ def push(
         ) from exc
     if resp.status_code == 401:
         raise HostedError("Ingest token was rejected (401).")
-    if resp.status_code != 201:
+    if 400 <= resp.status_code < 500 and resp.status_code not in {408, 409}:
         raise HostedError(
             f"Ingest returned {resp.status_code} (expected 201): {_body_snippet(resp)}"
+        )
+    if resp.status_code != 201:
+        # A timeout/conflict, redirect, or server failure is not proof that the
+        # hosted side rejected the artifact. The request body can have reached
+        # ingest before the response failed. Keep the exact local binding so a
+        # controller can reconcile it, and never invite a blind retry.
+        raise HostedDeliveryUncertain(
+            f"Ingest returned {resp.status_code} without a trustworthy "
+            f"acceptance result: {_body_snippet(resp)}",
+            context=local_result,
         )
     try:
         payload = resp.json()

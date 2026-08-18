@@ -306,6 +306,7 @@ jobs:
   # floor (see the "Coverage floor" step).
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -343,7 +344,10 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
 
       - name: Install Playwright browser
-        run: playwright install --with-deps chromium
+        timeout-minutes: 22
+        run: >-
+          python scripts/install_playwright_browser.py
+          --attempts 2 --attempt-timeout-seconds 600
 
       # --basetemp pins pytest's tmp_path factory inside the workspace so
       # run dirs (REPORT.md + step/heal PNGs) survive for artifact upload;
@@ -399,6 +403,7 @@ jobs:
   # first without costing a second run of it.
   e2e-browser:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -423,7 +428,10 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
 
       - name: Install Playwright browser
-        run: playwright install --with-deps chromium
+        timeout-minutes: 22
+        run: >-
+          python scripts/install_playwright_browser.py
+          --attempts 2 --attempt-timeout-seconds 600
 
       # The GOLDEN TASK, first and on its own. It is the core loop end to end
       # -- record, compile, certify, run under the Standard profile against an
@@ -535,6 +543,7 @@ jobs:
           - os: macos-latest
             python-version: "3.12"
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -559,7 +568,10 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
 
       - name: Install Playwright browser
-        run: playwright install --with-deps chromium
+        timeout-minutes: 22
+        run: >-
+          python scripts/install_playwright_browser.py
+          --attempts 2 --attempt-timeout-seconds 600
 
       # The platform-neutral identity-ladder harness is intentionally counted
       # on the canonical Ubuntu matrix (including Python 3.12). Running its

@@ -434,6 +434,47 @@ def test_qualification_workflow_is_path_filtered_manual_and_fail_loud() -> None:
     assert "pip check" in workflow
 
 
+def test_workflow_separates_required_evidence_from_optional_presentation() -> None:
+    workflow = (
+        REPO / ".github" / "workflows" / "docker-rdp-vision-ladder.yml"
+    ).read_text()
+    required_start = workflow.index("\n  docker-rdp-vision-ladder:")
+    presentation_start = workflow.index("\n  rdp-presentation:")
+    required = workflow[required_start:presentation_start]
+    presentation = workflow[presentation_start:]
+
+    assert "timeout-minutes: 25" in required
+    assert "run_rdp_ladder_qualification.py" in required
+    assert "Upload fail-closed qualification evidence" in required
+    assert "name: rdp-ladder-qualification" in required
+    assert "if-no-files-found: error" in required
+    assert "Render the paced RDP presentation" not in required
+    assert "render_presentation.py" not in required
+    assert required.index("Upload fail-closed qualification evidence") < required.index(
+        "- name: Tear down"
+    )
+    teardown = required[required.index("- name: Tear down") :]
+    assert "if: always()" in teardown
+    assert "timeout-minutes: 2" in teardown
+
+    assert "needs: docker-rdp-vision-ladder" in presentation
+    assert "github.event_name == 'workflow_dispatch'" in presentation
+    assert "github.ref == 'refs/heads/main'" in presentation
+    assert "timeout-minutes: 22" in presentation
+    assert "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" in (
+        presentation
+    )
+    assert "name: rdp-ladder-qualification" in presentation
+    assert "run_rdp_ladder_qualification.py" not in presentation
+    assert "render_presentation.py" in presentation
+    assert "timeout-minutes: 15" in presentation
+    assert "name: rdp-ladder-presentation" in presentation
+    assert "openadapt-rdp-demo.timeline.json" in presentation
+    assert "openadapt-rdp-demo.manifest.json" in presentation
+    assert "Tear down presentation workspace" in presentation
+    assert "timeout-minutes: 1" in presentation
+
+
 def test_fixture_policy_keeps_identity_effect_and_idempotency_gates() -> None:
     policy = load_policy(qualification.POLICY_PATH)
     assert policy.prohibit_unarmed_clicks is True

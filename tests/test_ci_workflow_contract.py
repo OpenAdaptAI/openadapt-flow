@@ -23,6 +23,48 @@ def test_playwright_version_probes_are_valid_python() -> None:
     assert r"m.version(\"playwright\")" not in workflow
 
 
+def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
+    """A stalled external browser download cannot consume a runner for hours."""
+    workflow = CI.read_text(encoding="utf-8")
+    test_start = workflow.index("\n  test:")
+    e2e_start = workflow.index("\n  e2e-browser:")
+    linux_start = workflow.index("\n  linux-atspi-x11:")
+    matrix_start = workflow.index("\n  test-matrix:")
+    windows_start = workflow.index("\n  windows-mock:")
+
+    test_job = workflow[test_start:e2e_start]
+    e2e_job = workflow[e2e_start:linux_start]
+    matrix_job = workflow[matrix_start:windows_start]
+    invocation = (
+        "python scripts/install_playwright_browser.py\n"
+        "          --attempts 2 --attempt-timeout-seconds 600"
+    )
+
+    for job, timeout in (
+        (test_job, "timeout-minutes: 55"),
+        (e2e_job, "timeout-minutes: 50"),
+        (matrix_job, "timeout-minutes: 75"),
+    ):
+        assert timeout in job
+        install_start = job.index("- name: Install Playwright browser")
+        install_end = job.index("\n\n", install_start)
+        install_step = job[install_start:install_end]
+        assert "timeout-minutes: 22" in install_step
+        assert invocation in install_step
+
+    assert workflow.count(invocation) == 3
+    assert "run: playwright install --with-deps chromium" not in workflow
+
+    # The timeout wrapper changes only external installation. Keep the exact
+    # required test and coverage selections intact.
+    assert "pytest -q --ignore=tests/e2e --basetemp=runs/ci" in test_job
+    assert "coverage report --fail-under=85" in test_job
+    assert "pytest -q tests/e2e/test_free_path_e2e.py" in e2e_job
+    assert "pytest -q tests/e2e \\" in e2e_job
+    assert "--ignore=tests/e2e/test_free_path_e2e.py" in e2e_job
+    assert "pytest -q --basetemp=runs/ci" in matrix_job
+
+
 def test_full_matrix_can_be_dispatched_on_an_exact_branch() -> None:
     workflow = CI.read_text(encoding="utf-8")
     on_start = workflow.index("on:\n")

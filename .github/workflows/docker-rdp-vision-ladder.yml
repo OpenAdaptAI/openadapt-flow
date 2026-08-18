@@ -84,6 +84,7 @@ jobs:
           sleep 22
 
       - name: Run the vision-ladder qualification
+        timeout-minutes: 20
         run: |
           python benchmark/rdp_ladder/run_rdp_ladder_qualification.py \
             --container oaflow-rdp-ladder \

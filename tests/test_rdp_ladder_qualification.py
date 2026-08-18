@@ -445,6 +445,10 @@ def test_workflow_separates_required_evidence_from_optional_presentation() -> No
 
     assert "timeout-minutes: 25" in required
     assert "run_rdp_ladder_qualification.py" in required
+    qualification_start = required.index("- name: Run the vision-ladder qualification")
+    qualification_end = required.index("\n\n", qualification_start)
+    qualification_step = required[qualification_start:qualification_end]
+    assert "timeout-minutes: 20" in qualification_step
     assert "Upload fail-closed qualification evidence" in required
     assert "name: rdp-ladder-qualification" in required
     assert "if-no-files-found: error" in required

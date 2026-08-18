@@ -634,6 +634,10 @@ jobs:
         run: |
           pytest -q tests/test_windows_context_identity_native.py
 
+      - name: Windows retained installer Job Object (non-injecting)
+        run: |
+          pytest -q tests/test_install_playwright_browser.py
+
       # The remaining WindowsBackend + RDP backend suites mock the WAA/RDP
       # servers with stdlib HTTP + fakes (no live VM, no Playwright browser),
       # and the win32 window-client behavior suite mocks the entire Win32 API.

@@ -370,9 +370,7 @@ def test_posix_partial_group_kill_uses_exact_privileged_fallback(
     )
     process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
 
-    cleanup_succeeded = install_playwright_browser._terminate_process_group(
-        process, platform="posix"
-    )
+    cleanup_succeeded = install_playwright_browser._terminate_process_group(process)
 
     assert cleanup_succeeded is True
     assert normal_signals == [
@@ -402,10 +400,7 @@ def test_posix_final_cleanup_verification_is_authoritative(
     )
     process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
 
-    assert (
-        install_playwright_browser._terminate_process_group(process, platform="posix")
-        is False
-    )
+    assert install_playwright_browser._terminate_process_group(process) is False
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
@@ -458,111 +453,315 @@ def test_privileged_fallback_is_bounded_and_targets_only_the_exact_group(
     assert kwargs["timeout"] == install_playwright_browser.SUDO_SIGNAL_TIMEOUT_SECONDS
 
 
-def test_windows_timeout_terminates_the_complete_child_tree(
+@pytest.mark.parametrize("leader_return_code", [0, 7])
+def test_windows_job_cleanup_runs_after_every_leader_exit(
     monkeypatch: pytest.MonkeyPatch,
+    leader_return_code: int,
 ) -> None:
-    taskkill_calls: list[tuple[list[str], dict[str, Any]]] = []
+    events: list[str] = []
+
+    class FakeStdin:
+        def write(self, payload: bytes) -> int:
+            assert events == ["assigned"]
+            assert payload == b"START\n"
+            events.append("started")
+            return len(payload)
+
+        def close(self) -> None:
+            events.append("gate-closed")
 
     class FakeProcess:
-        pid = 4815
+        stdin = FakeStdin()
 
-        def poll(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            raise AssertionError("taskkill must terminate the Windows tree")
+        def poll(self) -> int:
+            return leader_return_code
 
         def wait(self, timeout: int) -> int:
-            assert timeout == install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS
-            return 1
-
-    def fake_run(
-        command: list[str], **kwargs: Any
-    ) -> install_playwright_browser.subprocess.CompletedProcess[str]:
-        taskkill_calls.append((command, kwargs))
-        return install_playwright_browser.subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(install_playwright_browser.subprocess, "run", fake_run)
-    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
-
-    install_playwright_browser._terminate_process_group(process, platform="nt")
-
-    assert len(taskkill_calls) == 1
-    command, kwargs = taskkill_calls[0]
-    assert command == ["taskkill", "/PID", "4815", "/T", "/F"]
-    assert kwargs["timeout"] == 15
-
-
-def test_windows_taskkill_failure_uses_bounded_parent_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    kill_calls = 0
-    wait_timeouts: list[int] = []
-
-    class FakeProcess:
-        pid = 9137
-
-        def poll(self) -> None:
-            return None
+            assert timeout == 600
+            events.append("result-captured")
+            return leader_return_code
 
         def kill(self) -> None:
-            nonlocal kill_calls
-            kill_calls += 1
+            raise AssertionError("assigned process must be terminated through its job")
 
-        def wait(self, timeout: int) -> int:
-            wait_timeouts.append(timeout)
-            return 1
+    class FakeJob:
+        def assign(self, _process: object) -> bool:
+            assert events == []
+            events.append("assigned")
+            return True
 
-    def fake_run(
-        command: list[str], **_kwargs: Any
-    ) -> install_playwright_browser.subprocess.CompletedProcess[str]:
-        return install_playwright_browser.subprocess.CompletedProcess(command, 5)
+        def terminate_and_verify_empty(self) -> bool:
+            assert "result-captured" in events
+            events.append("job-empty")
+            return True
 
-    monkeypatch.setattr(install_playwright_browser.subprocess, "run", fake_run)
+        def close(self) -> bool:
+            assert "job-empty" in events
+            events.append("job-closed")
+            return True
+
     process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+    job = cast("install_playwright_browser._WindowsJobContract", FakeJob())
+    monkeypatch.setattr(
+        install_playwright_browser.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
 
-    install_playwright_browser._terminate_process_group(process, platform="nt")
+    result = install_playwright_browser._run_windows_attempt(
+        ["installer"], timeout_seconds=600, job_factory=lambda: job
+    )
 
-    assert kill_calls == 1
-    assert wait_timeouts == [install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS]
-
-
-def test_windows_final_wait_is_bounded_and_forces_the_parent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    kill_calls = 0
-    wait_timeouts: list[int] = []
-
-    class FakeProcess:
-        pid = 7214
-
-        def poll(self) -> None:
-            return None
-
-        def kill(self) -> None:
-            nonlocal kill_calls
-            kill_calls += 1
-
-        def wait(self, timeout: int) -> int:
-            wait_timeouts.append(timeout)
-            if len(wait_timeouts) == 1:
-                raise install_playwright_browser.subprocess.TimeoutExpired(
-                    "installer", timeout
-                )
-            return 1
-
-    def fake_run(
-        command: list[str], **_kwargs: Any
-    ) -> install_playwright_browser.subprocess.CompletedProcess[str]:
-        return install_playwright_browser.subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(install_playwright_browser.subprocess, "run", fake_run)
-    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
-
-    install_playwright_browser._terminate_process_group(process, platform="nt")
-
-    assert kill_calls == 1
-    assert wait_timeouts == [
-        install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS,
-        install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS,
+    assert result == leader_return_code
+    assert events == [
+        "assigned",
+        "started",
+        "gate-closed",
+        "result-captured",
+        "job-empty",
+        "job-closed",
+        "gate-closed",
     ]
+
+
+def test_windows_timeout_leader_exit_race_still_closes_retained_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leader_exited = False
+    cleanup_calls = 0
+
+    class FakeStdin:
+        def write(self, payload: bytes) -> int:
+            assert payload == b"START\n"
+            return len(payload)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+        def poll(self) -> int | None:
+            return 0 if leader_exited else None
+
+        def wait(self, timeout: int) -> int:
+            nonlocal leader_exited
+            assert timeout == 1
+            leader_exited = True
+            raise install_playwright_browser.subprocess.TimeoutExpired(
+                "installer", timeout
+            )
+
+        def kill(self) -> None:
+            raise AssertionError("assigned process must be terminated through its job")
+
+    class FakeJob:
+        def assign(self, _process: object) -> bool:
+            return True
+
+        def terminate_and_verify_empty(self) -> bool:
+            nonlocal cleanup_calls
+            assert leader_exited
+            cleanup_calls += 1
+            return True
+
+        def close(self) -> bool:
+            return True
+
+    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+    job = cast("install_playwright_browser._WindowsJobContract", FakeJob())
+    monkeypatch.setattr(
+        install_playwright_browser.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    result = install_playwright_browser._run_windows_attempt(
+        ["installer"], timeout_seconds=1, job_factory=lambda: job
+    )
+
+    assert result == 124
+    assert cleanup_calls == 1
+
+
+def test_windows_unproved_job_cleanup_is_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeStdin:
+        def write(self, payload: bytes) -> int:
+            return len(payload)
+
+        def close(self) -> None:
+            return None
+
+    class FakeProcess:
+        stdin = FakeStdin()
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, timeout: int) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    class FakeJob:
+        def assign(self, _process: object) -> bool:
+            return True
+
+        def terminate_and_verify_empty(self) -> bool:
+            return False
+
+        def close(self) -> bool:
+            return True
+
+    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+    job = cast("install_playwright_browser._WindowsJobContract", FakeJob())
+    monkeypatch.setattr(
+        install_playwright_browser.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+
+    assert (
+        install_playwright_browser._run_windows_attempt(
+            ["installer"], timeout_seconds=1, job_factory=lambda: job
+        )
+        == install_playwright_browser.FATAL_CLEANUP_EXIT_CODE
+    )
+
+
+def _windows_lock_is_available(lock_path: Path) -> bool:
+    import msvcrt
+
+    with lock_path.open("r+b", buffering=0) as lock_file:
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    return True
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows Job Object proof")
+@pytest.mark.parametrize("leader_return_code", [0, 7])
+def test_windows_job_kills_child_after_normal_leader_exit(
+    tmp_path: Path, leader_return_code: int
+) -> None:
+    lock_path = tmp_path / "windows-normal-child.lock"
+    pid_path = tmp_path / "windows-normal-child.pid"
+    child_program = """
+import msvcrt
+import os
+from pathlib import Path
+import sys
+import time
+
+with Path(sys.argv[1]).open("w+b", buffering=0) as lock_file:
+    lock_file.write(b"0")
+    lock_file.seek(0)
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    Path(sys.argv[2]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(30)
+"""
+    parent_program = """
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]])
+deadline = time.monotonic() + 10
+while not Path(sys.argv[3]).exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("child did not acquire its lock")
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[4]))
+"""
+
+    result = install_playwright_browser.run_attempt(
+        [
+            sys.executable,
+            "-c",
+            parent_program,
+            child_program,
+            str(lock_path),
+            str(pid_path),
+            str(leader_return_code),
+        ],
+        timeout_seconds=10,
+    )
+
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    try:
+        assert result == leader_return_code
+        assert _windows_lock_is_available(lock_path)
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows Job Object proof")
+def test_windows_job_kills_child_on_timeout(tmp_path: Path) -> None:
+    lock_path = tmp_path / "windows-timeout-child.lock"
+    pid_path = tmp_path / "windows-timeout-child.pid"
+    child_program = """
+import msvcrt
+import os
+from pathlib import Path
+import sys
+import time
+
+with Path(sys.argv[1]).open("w+b", buffering=0) as lock_file:
+    lock_file.write(b"0")
+    lock_file.seek(0)
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+    Path(sys.argv[2]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(30)
+"""
+    parent_program = """
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]])
+deadline = time.monotonic() + 10
+while not Path(sys.argv[3]).exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("child did not acquire its lock")
+    time.sleep(0.01)
+time.sleep(30)
+"""
+
+    result = install_playwright_browser.run_attempt(
+        [
+            sys.executable,
+            "-c",
+            parent_program,
+            child_program,
+            str(lock_path),
+            str(pid_path),
+        ],
+        timeout_seconds=1,
+    )
+
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    try:
+        assert result == 124
+        assert _windows_lock_is_available(lock_path)
+    finally:
+        subprocess.run(
+            ["taskkill", "/PID", str(child_pid), "/T", "/F"],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )

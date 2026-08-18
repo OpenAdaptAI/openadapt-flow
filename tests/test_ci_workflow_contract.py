@@ -65,6 +65,16 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     assert "pytest -q --basetemp=runs/ci" in matrix_job
 
 
+def test_windows_required_job_proves_retained_installer_job_object() -> None:
+    workflow = CI.read_text(encoding="utf-8")
+    windows_start = workflow.index("\n  windows-mock:")
+    wheel_start = workflow.index("\n  wheel:")
+    windows_job = workflow[windows_start:wheel_start]
+
+    assert "Windows retained installer Job Object (non-injecting)" in windows_job
+    assert "pytest -q tests/test_install_playwright_browser.py" in windows_job
+
+
 def test_full_matrix_can_be_dispatched_on_an_exact_branch() -> None:
     workflow = CI.read_text(encoding="utf-8")
     on_start = workflow.index("on:\n")

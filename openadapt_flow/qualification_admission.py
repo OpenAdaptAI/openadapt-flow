@@ -34,9 +34,7 @@ SCHEMA: Final[Literal["openadapt.qualification-admission/v1"]] = (
 SIGNATURE_DOMAIN: Final[bytes] = b"openadapt-qualification-admission-v1\0"
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$")
-_UTC_RE = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
-)
+_UTC_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _KEY_ID_RE = re.compile(r"^qa-ed25519-[a-f0-9]{16}$")
 MAX_ADMISSION_LIFETIME: Final[timedelta] = timedelta(days=30)
 
@@ -209,8 +207,10 @@ class QualificationAdmissionPayload(BaseModel):
         issued = _parse_utc(self.issued_at, field="issued_at")
         not_before = _parse_utc(self.not_before, field="not_before")
         expires = _parse_utc(self.expires_at, field="expires_at")
-        if not issued - timedelta(minutes=5) <= not_before <= issued + timedelta(
-            minutes=5
+        if (
+            not issued - timedelta(minutes=5)
+            <= not_before
+            <= issued + timedelta(minutes=5)
         ):
             raise ValueError("qualification admission start is outside issue skew")
         if expires <= not_before:
@@ -397,9 +397,10 @@ def verify_qualification_admission(
     trust = trusted_signers.get(payload.issuer.key_id)
     if trust is None:
         raise QualificationAdmissionError("qualification signer is not trusted")
-    if qualification_signer_key_id(
-        b64decode(trust.public_key, validate=True)
-    ) != payload.issuer.key_id:
+    if (
+        qualification_signer_key_id(b64decode(trust.public_key, validate=True))
+        != payload.issuer.key_id
+    ):
         raise QualificationAdmissionError("qualification signer key id is invalid")
     if payload.issuer.workflow not in trust.allowed_workflows:
         raise QualificationAdmissionError(

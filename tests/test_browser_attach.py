@@ -9,6 +9,7 @@ import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.request import urlopen
@@ -17,7 +18,10 @@ import pytest
 from PIL import Image
 
 from openadapt_flow.__main__ import main
-from openadapt_flow.backends.playwright_backend import PlaywrightBackend
+from openadapt_flow.backends.playwright_backend import (
+    PlaywrightBackend,
+    ScreenshotMaskStabilityError,
+)
 from openadapt_flow.compiler import compile_recording
 from openadapt_flow.interactive_recorder import (
     BrowserAttachError,
@@ -156,9 +160,26 @@ def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> N
         def __init__(self) -> None:
             self.screenshot_options: list[dict] = []
             self.frames = [Frame("main"), Frame("child")]
+            self.listeners: dict[str, list] = {}
+            self.attach_on_next_screenshot = True
+
+        def on(self, event, listener):
+            self.listeners.setdefault(event, []).append(listener)
+
+        def remove_listener(self, event, listener):
+            self.listeners[event].remove(listener)
+
+        def evaluate(self, _script):
+            return None
 
         def screenshot(self, **kwargs):
             self.screenshot_options.append(kwargs)
+            if self.attach_on_next_screenshot:
+                self.attach_on_next_screenshot = False
+                frame = Frame("late-child")
+                self.frames.append(frame)
+                for listener in self.listeners.get("frameattached", []):
+                    listener(frame)
             return b"png"
 
     selectors = (
@@ -172,9 +193,8 @@ def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> N
     )
 
     assert backend.screenshot() == b"png"
-    page.frames.append(Frame("late-child"))
     assert backend.screenshot() == b"png"
-    assert len(page.screenshot_options) == 2
+    assert len(page.screenshot_options) == 3
     assert page.screenshot_options[0]["mask"] == [
         f"locator:{frame}:{selector}"
         for frame in ("main", "child")
@@ -185,8 +205,11 @@ def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> N
         for frame in ("main", "child", "late-child")
         for selector in selectors
     ]
+    assert page.screenshot_options[2]["mask"] == page.screenshot_options[1]["mask"]
     for options in page.screenshot_options:
         assert options["mask_color"] == "#000000"
+    backend.stop_screenshot_mask_tracking()
+    assert not any(page.listeners.values())
 
 
 def test_declared_secret_selectors_use_css_string_escaping() -> None:
@@ -366,10 +389,6 @@ def test_attached_tab_close_during_finalization_discards_metadata(
         def evaluate(self, _script):
             return {"width": 1280, "height": 800, "dpr": 1}
 
-        def remove_listener(self, event, listener):
-            if event == "close":
-                listener()
-
     session.page = ClosingPage()
     session._page_lifecycle_listeners_installed = True
     session._attached_geometry = (1280, 800, 1.0)
@@ -384,6 +403,7 @@ def test_attached_tab_close_during_finalization_discards_metadata(
             return session._recording_dir
 
     session.recorder = ClosingRecorder()  # type: ignore[assignment]
+    session._pw = SimpleNamespace(stop=lambda: session._handle_page_close())
 
     with pytest.raises(BrowserAttachError, match="selected browser tab closed"):
         session.finish()
@@ -412,10 +432,6 @@ def test_attached_popup_during_finalization_discards_metadata(
         def evaluate(self, _script):
             return {"width": 1280, "height": 800, "dpr": 1}
 
-        def remove_listener(self, event, listener):
-            if event == "popup":
-                listener(SimpleNamespace(url="about:blank"))
-
     session.page = PopupPage()
     session._page_lifecycle_listeners_installed = True
     session._attached_geometry = (1280, 800, 1.0)
@@ -430,8 +446,66 @@ def test_attached_popup_during_finalization_discards_metadata(
             return session._recording_dir
 
     session.recorder = FinalizingRecorder()  # type: ignore[assignment]
+    session._pw = SimpleNamespace(
+        stop=lambda: session._handle_popup(SimpleNamespace(url="about:blank"))
+    )
 
     with pytest.raises(BrowserAttachError, match="popup or new tab"):
+        session.finish()
+    assert not out.exists()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
+@pytest.mark.parametrize("late_event", ["context_page", "origin", "frame"])
+def test_attached_late_lifecycle_event_discards_metadata(
+    tmp_path: Path,
+    late_event: str,
+) -> None:
+    out = tmp_path / f"recording-{late_event}"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+
+    class LifecyclePage:
+        url = "https://app.example.test/"
+        frames: list = []
+
+        def __init__(self) -> None:
+            self.main_frame = SimpleNamespace(url=self.url)
+
+        def evaluate(self, _script):
+            return {"width": 1280, "height": 800, "dpr": 1}
+
+    session.page = LifecyclePage()
+    session._page_lifecycle_listeners_installed = True
+    session._attached_geometry = (1280, 800, 1.0)
+    session._initial_attached_viewport = (1280, 800)
+
+    class FinalizingRecorder:
+        def finish(self):
+            assert session._recording_dir is not None
+            (session._recording_dir / "meta.json").write_text(
+                json.dumps({"viewport": [1280, 800]})
+            )
+            return session._recording_dir
+
+    session.recorder = FinalizingRecorder()  # type: ignore[assignment]
+
+    def emit_late_event() -> None:
+        if late_event == "context_page":
+            session._handle_context_page(SimpleNamespace(url="about:blank"))
+        elif late_event == "origin":
+            session.page.main_frame.url = "https://other.example.test/"
+            session._handle_frame_navigation(session.page.main_frame)
+        else:
+            session._handle_frame_tree_change(SimpleNamespace())
+
+    session._pw = SimpleNamespace(stop=emit_late_event)
+
+    with pytest.raises(BrowserAttachError):
         session.finish()
     assert not out.exists()
     assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
@@ -520,6 +594,48 @@ def test_attached_recorder_refuses_invalid_viewport_evidence(tmp_path: Path) -> 
     assert session._pyq == []
     assert session._listener_error is not None
     assert "invalid viewport evidence" in str(session._listener_error)
+
+
+@pytest.mark.parametrize(
+    "batch",
+    [
+        [{"kind": "click"}, {"kind": "click"}],
+        [
+            {"kind": "input", "field": "note", "_oaflow_input_session": "a"},
+            {"kind": "click"},
+        ],
+        [
+            {"kind": "input", "field": "note", "_oaflow_input_session": "a"},
+            {"kind": "key", "key": "Enter"},
+        ],
+        [{"kind": "scroll", "dy": 10}, {"kind": "click"}],
+        [
+            {"kind": "input", "field": "note", "_oaflow_input_session": "a"},
+            {"kind": "input", "field": "note", "_oaflow_input_session": "b"},
+        ],
+    ],
+)
+def test_browser_event_batch_refuses_multiple_logical_actions(
+    batch: list[dict],
+) -> None:
+    with pytest.raises(BrowserAttachError, match="more than one logical"):
+        InteractiveRecorder._validate_event_batch(batch)
+
+
+@pytest.mark.parametrize(
+    "batch",
+    [
+        [
+            {"kind": "input", "field": "note", "_oaflow_input_session": "a"},
+            {"kind": "input", "field": "note", "_oaflow_input_session": "a"},
+        ],
+        [{"kind": "scroll", "dy": 10}, {"kind": "scroll", "dy": 20}],
+    ],
+)
+def test_browser_event_batch_preserves_one_coalescible_action(
+    batch: list[dict],
+) -> None:
+    InteractiveRecorder._validate_event_batch(batch)
 
 
 def test_cli_threads_attach_contract_to_the_recorder(
@@ -617,6 +733,19 @@ _ATTACH_HTML = b"""<!doctype html>
   <input id="password" name="password" type="text">
   <label for="p&#228;ss">International secret</label>
   <input id="p&#228;ss" name="p&#228;ss" type="text">
+  <label for="sticky-secret">Sticky secret</label>
+  <input id="sticky-secret" name="sticky-secret" type="text"
+         onkeydown="this.removeAttribute('name'); this.removeAttribute('id')">
+  <label for="replacement-secret">Replacement secret</label>
+  <input id="replacement-secret" name="replacement-secret" type="text"
+         oninput="if (!this.dataset.replaced) {
+           const replacement = this.cloneNode(true);
+           replacement.removeAttribute('name');
+           replacement.removeAttribute('id');
+           replacement.dataset.replaced = 'yes';
+           this.replaceWith(replacement);
+           replacement.focus();
+         }">
   <button id="save" onclick="document.body.dataset.saved='yes'">Save</button>
   <button id="open-popup" onclick="window.open('about:blank', '_blank')">
     Open popup
@@ -677,6 +806,8 @@ def _chromium_executable() -> Path | None:
 def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trials(
     attach_app_url: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Three real Chromium trials cover attach, secrets, frames, and detach."""
 
@@ -726,6 +857,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                     }"""
                 )
                 page.click("#note")
+                pump()
                 page.keyboard.type(f"trial-{trial_number}")
                 pump()
                 pump()
@@ -738,6 +870,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                     width=round(box["width"]),
                     height=round(box["height"]),
                 )
+                pump()
                 page.keyboard.type(secret_value)
                 pump()
                 pump()
@@ -806,6 +939,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 height=round(box["height"]),
             )
             field.click()
+            pump()
             page.keyboard.type(unicode_secret)
             pump()
             pump()
@@ -842,6 +976,83 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert all(extrema == (0, 0) for extrema in unicode_crop.getextrema())
         assert process.poll() is None
 
+        def assert_mutating_secret_stays_private(
+            *,
+            field_selector: str,
+            declared_field: str,
+            secret: str,
+            output_name: str,
+        ) -> None:
+            secret_rect: dict[str, int] = {}
+
+            def type_through_mutation(page, pump):
+                field = page.locator(field_selector)
+                box = field.bounding_box()
+                assert box is not None
+                secret_rect.update(
+                    x=round(box["x"]),
+                    y=round(box["y"]),
+                    width=round(box["width"]),
+                    height=round(box["height"]),
+                )
+                field.click()
+                pump()
+                page.keyboard.type(secret)
+                pump()
+                pump()
+                page.click("#save")
+                pump()
+                pump()
+
+            recording = record_interactive(
+                attach_app_url,
+                tmp_path / output_name,
+                secret_fields=(declared_field,),
+                cdp_endpoint=endpoint,
+                script=type_through_mutation,
+            )
+            for artifact in recording.rglob("*"):
+                if artifact.is_file():
+                    assert secret.encode() not in artifact.read_bytes()
+            events = [
+                json.loads(line)
+                for line in (recording / "events.jsonl").read_text().splitlines()
+            ]
+            secret_events = [event for event in events if event.get("secret")]
+            assert secret_events
+            assert all(event.get("text") is None for event in secret_events)
+            for frame_path in (recording / "frames").glob("*.png"):
+                frame = Image.open(frame_path).convert("RGB")
+                crop = frame.crop(
+                    (
+                        secret_rect["x"],
+                        secret_rect["y"],
+                        secret_rect["x"] + secret_rect["width"],
+                        secret_rect["y"] + secret_rect["height"],
+                    )
+                )
+                assert all(extrema == (0, 0) for extrema in crop.getextrema())
+
+        attribute_secret = "ATTRIBUTE-MUTATION-SECRET-NEVER-PERSIST"
+        assert_mutating_secret_stays_private(
+            field_selector="#sticky-secret",
+            declared_field="sticky-secret",
+            secret=attribute_secret,
+            output_name="recording-sticky-secret",
+        )
+        replacement_secret = "REPLACEMENT-SECRET-NEVER-PERSIST"
+        assert_mutating_secret_stays_private(
+            field_selector="#replacement-secret",
+            declared_field="replacement-secret",
+            secret=replacement_secret,
+            output_name="recording-replacement-secret",
+        )
+        captured_output = capsys.readouterr()
+        for secret in (attribute_secret, replacement_secret):
+            assert secret not in captured_output.out
+            assert secret not in captured_output.err
+        assert process.poll() is None
+
         child_secret_rect: dict[str, int] = {}
 
         def retain_top_level_action_with_child_secret(page, pump):
@@ -876,6 +1087,177 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             )
         )
         assert all(extrema == (0, 0) for extrema in child_crop.getextrema())
+        assert process.poll() is None
+
+        frame_race_session = InteractiveRecorder(
+            attach_app_url,
+            tmp_path / "recording-frame-race-probe",
+            cdp_endpoint=endpoint,
+        )
+        frame_race_session.start()
+        try:
+            race_page = frame_race_session.page
+            race_backend = frame_race_session.backend
+            assert race_page is not None and race_backend is not None
+            original_screenshot = race_page.screenshot
+            masked_races = 0
+            for trial in range(30):
+                race_page.evaluate(
+                    """() => {
+                      const previous = document.querySelector('#race-frame');
+                      if (previous) previous.remove();
+                    }"""
+                )
+                race_page.wait_for_timeout(0)
+                state = {"attach": True}
+
+                def attach_after_frame_snapshot(**kwargs):
+                    if state["attach"]:
+                        state["attach"] = False
+                        race_page.evaluate(
+                            """trial => {
+                              const frame = document.createElement('iframe');
+                              frame.id = 'race-frame';
+                              frame.style.cssText = [
+                                'position:fixed', 'left:20px', 'top:160px',
+                                'width:220px', 'height:80px', 'border:0',
+                              ].join(';');
+                              frame.srcdoc = `<input id="race-password"
+                                type="password" value="RACE-${trial}"
+                                style="width:180px;height:40px;border:0">`;
+                              document.body.appendChild(frame);
+                            }""",
+                            trial,
+                        )
+                    return original_screenshot(**kwargs)
+
+                with monkeypatch.context() as patch_context:
+                    patch_context.setattr(
+                        race_page,
+                        "screenshot",
+                        attach_after_frame_snapshot,
+                    )
+                    png = race_backend.screenshot()
+                password = race_page.frame_locator("#race-frame").locator(
+                    "#race-password"
+                )
+                box = password.bounding_box()
+                assert box is not None
+                image = Image.open(BytesIO(png)).convert("RGB")
+                crop = image.crop(
+                    (
+                        round(box["x"]),
+                        round(box["y"]),
+                        round(box["x"] + box["width"]),
+                        round(box["y"] + box["height"]),
+                    )
+                )
+                assert all(extrema == (0, 0) for extrema in crop.getextrema())
+                masked_races += 1
+            assert masked_races == 30
+
+            churn_attempts = 0
+
+            def attach_and_detach_during_every_capture(**kwargs):
+                nonlocal churn_attempts
+                churn_attempts += 1
+                race_page.evaluate(
+                    """attempt => {
+                      const frame = document.createElement('iframe');
+                      frame.id = `churn-${attempt}`;
+                      frame.srcdoc = '<input type="password" value="churn">';
+                      document.body.appendChild(frame);
+                      frame.remove();
+                    }""",
+                    churn_attempts,
+                )
+                return original_screenshot(**kwargs)
+
+            with monkeypatch.context() as patch_context:
+                patch_context.setattr(
+                    race_page,
+                    "screenshot",
+                    attach_and_detach_during_every_capture,
+                )
+                with pytest.raises(ScreenshotMaskStabilityError, match="frame tree"):
+                    race_backend.screenshot()
+                assert churn_attempts == 3
+        finally:
+            if frame_race_session.page is not None:
+                frame_race_session.page.evaluate(
+                    """() => {
+                      const frame = document.querySelector('#race-frame');
+                      if (frame) frame.remove();
+                    }"""
+                )
+            frame_race_session.abort()
+        assert not (tmp_path / "recording-frame-race-probe").exists()
+        assert process.poll() is None
+
+        def rapid_pointer_pointer(page, pump):
+            page.click("#note")
+            page.click("#save")
+            pump()
+
+        def rapid_input_submit(page, pump):
+            page.evaluate("document.querySelector('#note').value = ''")
+            page.click("#note")
+            pump()
+            page.keyboard.type("rapid-input-submit")
+            page.click("#save")
+            pump()
+
+        def rapid_input_enter(page, pump):
+            page.evaluate("document.querySelector('#note').value = ''")
+            page.click("#note")
+            pump()
+            page.keyboard.type("rapid-input-enter")
+            page.keyboard.press("Enter")
+            pump()
+
+        def rapid_scroll_click(page, pump):
+            page.mouse.wheel(0, 40)
+            page.click("#note")
+            pump()
+
+        for case_name, drive_rapid_actions in (
+            ("pointer-pointer", rapid_pointer_pointer),
+            ("input-submit", rapid_input_submit),
+            ("input-enter", rapid_input_enter),
+            ("scroll-click", rapid_scroll_click),
+        ):
+            rapid_recording = tmp_path / f"recording-rapid-{case_name}"
+            with pytest.raises(BrowserAttachError, match="more than one logical"):
+                record_interactive(
+                    attach_app_url,
+                    rapid_recording,
+                    cdp_endpoint=endpoint,
+                    script=drive_rapid_actions,
+                )
+            assert not (rapid_recording / "meta.json").exists()
+            assert process.poll() is None
+
+        def coalesce_one_field(page, pump):
+            page.evaluate("document.querySelector('#note').value = ''")
+            page.click("#note")
+            pump()
+            page.keyboard.type("same-field-input-coalesces")
+            pump()
+            pump()
+
+        coalesced_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-coalesced-input",
+            cdp_endpoint=endpoint,
+            script=coalesce_one_field,
+        )
+        coalesced_events = [
+            json.loads(line)
+            for line in (coalesced_recording / "events.jsonl").read_text().splitlines()
+        ]
+        assert (
+            len([event for event in coalesced_events if event["kind"] == "type"]) == 1
+        )
         assert process.poll() is None
 
         popup_recording = tmp_path / "recording-popup-refusal"
@@ -920,6 +1302,60 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 script=act_inside_popup,
             )
         assert not (popup_activity_recording / "meta.json").exists()
+        assert process.poll() is None
+        with urlopen(f"{endpoint}/json/version", timeout=2) as response:
+            assert response.status == 200
+
+        short_page_recording = tmp_path / "recording-short-page-refusal"
+
+        def act_in_short_lived_context_page(page, pump):
+            temporary = page.context.new_page()
+            temporary.set_content(
+                "<input id='short-note'><button id='short-save'>Save</button>"
+            )
+            temporary.fill("#short-note", "activity-that-must-not-disappear")
+            temporary.click("#short-save")
+            temporary.close()
+            assert len(page.context.pages) >= 1
+            pump()
+
+        with pytest.raises(BrowserAttachError, match="popup or new tab"):
+            record_interactive(
+                attach_app_url,
+                short_page_recording,
+                cdp_endpoint=endpoint,
+                script=act_in_short_lived_context_page,
+            )
+        assert not (short_page_recording / "meta.json").exists()
+        assert process.poll() is None
+        with urlopen(f"{endpoint}/json/version", timeout=2) as response:
+            assert response.status == 200
+
+        late_page_recording = tmp_path / "recording-late-page-refusal"
+        late_page_session = InteractiveRecorder(
+            attach_app_url,
+            late_page_recording,
+            cdp_endpoint=endpoint,
+        )
+        late_page_session.start()
+        assert late_page_session.page is not None
+        assert late_page_session._pw is not None
+        original_playwright_stop = late_page_session._pw.stop
+
+        def stop_after_short_lived_page() -> None:
+            temporary = late_page_session.page.context.new_page()
+            temporary.set_content(
+                "<input id='late-note'><button id='late-save'>Save</button>"
+            )
+            temporary.fill("#late-note", "late-activity-must-not-disappear")
+            temporary.click("#late-save")
+            temporary.close()
+            original_playwright_stop()
+
+        monkeypatch.setattr(late_page_session._pw, "stop", stop_after_short_lived_page)
+        with pytest.raises(BrowserAttachError, match="popup or new tab"):
+            late_page_session.finish()
+        assert not (late_page_recording / "meta.json").exists()
         assert process.poll() is None
         with urlopen(f"{endpoint}/json/version", timeout=2) as response:
             assert response.status == 200

@@ -46,6 +46,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -151,13 +152,21 @@ def _rename_directory_noreplace(source: Path, destination: Path) -> None:
         raise OSError(error_number, os.strerror(error_number), destination)
 
 
-def _secret_screenshot_selectors(secret_fields: set[str]) -> tuple[str, ...]:
+def _secret_screenshot_selectors(
+    secret_fields: set[str],
+    *,
+    marker_attribute: Optional[str] = None,
+) -> tuple[str, ...]:
     """Return selectors that mask password and declared-secret fields."""
 
     selectors = ["input[type='password']"]
     for field in sorted(secret_fields):
         encoded = _css_string_literal(field)
         selectors.append(f"[name={encoded}], [id={encoded}]")
+    if marker_attribute is not None:
+        if not re.fullmatch(r"data-oaflow-secret-[0-9a-f]{32}", marker_attribute):
+            raise BrowserAttachError("the browser secret marker is invalid")
+        selectors.append(f"[{marker_attribute}]")
     return tuple(selectors)
 
 
@@ -350,10 +359,28 @@ _INIT_JS = r"""
     try { previous.cleanup(); } catch (e) {}
   }
   const SECRET_NAMES = __SECRET_NAMES__;
+  const SECRET_MARKER = __SECRET_MARKER__;
   const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
   const listeners = [];
+  const secretStates = new WeakMap();
+  const inputSessions = new WeakMap();
+  const stickySecretElements = new Set();
+  let nextInputSession = 0;
+  let activeSecretElement = null;
+  let activeSecretState = null;
   let resizeTimer = null;
+  const secretObserver = new MutationObserver(() => {
+    for (const el of stickySecretElements) {
+      if (!el.isConnected) continue;
+      try {
+        if (!el.hasAttribute(SECRET_MARKER)) el.setAttribute(SECRET_MARKER, '');
+      } catch (e) {}
+    }
+  });
+  secretObserver.observe(document.documentElement || document, {
+    attributes: true, childList: true, subtree: true,
+  });
 
   function listenOn(target, type, handler) {
     target.addEventListener(type, handler, true);
@@ -366,6 +393,7 @@ _INIT_JS = r"""
 
   function cleanup() {
     if (resizeTimer !== null) clearTimeout(resizeTimer);
+    secretObserver.disconnect();
     for (const [target, type, handler] of listeners) {
       try { target.removeEventListener(type, handler, true); } catch (e) {}
     }
@@ -499,11 +527,57 @@ _INIT_JS = r"""
     } catch (e) { return null; }
   }
 
-  function isSecretEl(el) {
-    if (!el) return false;
-    if ((el.type || '').toLowerCase() === 'password') return true;
+  function isTextEntry(el) {
+    try {
+      return !!el && !!el.matches && el.matches(
+        'input, textarea, [contenteditable=""], [contenteditable="true"],' +
+        ' [role="textbox"]'
+      );
+    } catch (e) { return false; }
+  }
+
+  function bindSecretState(el, state) {
+    secretStates.set(el, state);
+    stickySecretElements.add(el);
+    activeSecretElement = el;
+    activeSecretState = state;
+    try {
+      el.setAttribute(SECRET_MARKER, '');
+      return el.hasAttribute(SECRET_MARKER);
+    } catch (e) { return false; }
+  }
+
+  function inputSessionFor(el) {
+    let session = inputSessions.get(el) || null;
+    if (!session) {
+      nextInputSession += 1;
+      session = SESSION_ID + ':input:' + String(nextInputSession);
+      inputSessions.set(el, session);
+    }
+    return session;
+  }
+
+  function declaredSecretState(el) {
+    if (!el) return null;
     const n = el.name || '', i = el.id || '';
-    return SECRET_NAMES.indexOf(n) >= 0 || SECRET_NAMES.indexOf(i) >= 0;
+    if ((el.type || '').toLowerCase() !== 'password'
+        && SECRET_NAMES.indexOf(n) < 0 && SECRET_NAMES.indexOf(i) < 0) {
+      return null;
+    }
+    return {field: n || i || null, inputSession: inputSessionFor(el)};
+  }
+
+  function secretStateForInput(el) {
+    let state = secretStates.get(el) || null;
+    if (!state) state = declaredSecretState(el);
+    if (!state && activeSecretState && activeSecretElement
+        && !activeSecretElement.isConnected && isTextEntry(el)) {
+      // Some controlled inputs replace their DOM element after each change.
+      // Programmatic focus transfer is still the same input session.
+      state = activeSecretState;
+    }
+    if (!state) return null;
+    return {state, maskBound: bindSecretState(el, state)};
   }
 
   function fieldLabel(el) {
@@ -580,8 +654,36 @@ _INIT_JS = r"""
       emit({kind: 'viewport', url: location.href, title: document.title});
     }, 100);
   });
+  listen('focusin', (e) => {
+    const el = e.target;
+    const declared = declaredSecretState(el);
+    if (declared) {
+      // Bind before the first key event. Application code can remove a
+      // declared name/id during keydown, beforeinput, or input dispatch.
+      bindSecretState(el, declared);
+      return;
+    }
+    if (!activeSecretState || el === activeSecretElement) return;
+    const retained = secretStates.get(el) || null;
+    if (retained) {
+      bindSecretState(el, retained);
+    } else if (activeSecretElement && !activeSecretElement.isConnected
+               && isTextEntry(el)) {
+      bindSecretState(el, activeSecretState);
+    } else {
+      activeSecretElement = null;
+      activeSecretState = null;
+    }
+  });
   listen('pointerdown', (e) => {
     if (e.button !== 0) return;
+    if (activeSecretState && e.target !== activeSecretElement
+        && !secretStates.has(e.target)) {
+      // An explicit operator action on another target ends the sticky input
+      // session. Programmatic replacement without a pointer action does not.
+      activeSecretElement = null;
+      activeSecretState = null;
+    }
     pointerDown = {
       x: Math.round(e.clientX), y: Math.round(e.clientY),
       sid: structuredIdentity(e.clientX, e.clientY),
@@ -632,20 +734,27 @@ _INIT_JS = r"""
 
   listen('input', (e) => {
     const el = e.target;
-    const secret = isSecretEl(el);
+    const secretBinding = secretStateForInput(el);
+    const secret = secretBinding !== null;
     const r = (el.getBoundingClientRect && el.getBoundingClientRect())
       || { left: 0, top: 0, width: 0, height: 0 };
     const o = {
       kind: 'input',
-      field: el.name || el.id || null,
+      field: secret ? secretBinding.state.field : (el.name || el.id || null),
       label: fieldLabel(el),
       secret: secret,
+      __oaflow_input_session: secret
+        ? secretBinding.state.inputSession : inputSessionFor(el),
       rect: [Math.round(r.left), Math.round(r.top),
              Math.round(r.width), Math.round(r.height)],
       url: location.href, title: document.title,
     };
     // The literal value of a SECRET field is never read or transmitted.
-    if (!secret) o.value = (el.value != null ? String(el.value) : '');
+    if (secret) {
+      o.__oaflow_secret_mask_bound = secretBinding.maskBound;
+    } else {
+      o.value = (el.value != null ? String(el.value) : '');
+    }
     emit(o);
   });
 
@@ -733,6 +842,7 @@ class InteractiveRecorder:
         self._owns_browser = self._cdp_endpoint is None
         self._session_id = uuid.uuid4().hex
         self._binding_name = f"__oaflow_emit_{self._session_id}"
+        self._secret_marker_attribute = f"data-oaflow-secret-{self._session_id}"
         self._poll_ms = poll_ms
         self._viewport = viewport
         # Recording-only, read-only observation. This does not add an effect
@@ -759,9 +869,15 @@ class InteractiveRecorder:
         self.page = None
         self._page_close_listener = self._handle_page_close
         self._frame_navigation_listener = self._handle_frame_navigation
+        self._frame_attached_listener = self._handle_frame_tree_change
+        self._frame_detached_listener = self._handle_frame_tree_change
         self._popup_listener = self._handle_popup
+        self._context_page_listener = self._handle_context_page
         self._page_lifecycle_listeners_installed = False
+        self._context_page_listener_installed = False
+        self._context = None
         self._context_pages_at_start: tuple[Any, ...] = ()
+        self._finalizing = False
         self.backend: Optional[PlaywrightBackend] = None
         self.recorder: Optional[Recorder] = None
         self._last_frame: bytes = b""
@@ -811,9 +927,16 @@ class InteractiveRecorder:
                     page_url=self._browser_page_url,
                 )
 
-            self._context_pages_at_start = tuple(self.page.context.pages)
+            self._context = self.page.context
+            self._context.on("page", self._context_page_listener)
+            self._context_page_listener_installed = True
+            self._context_pages_at_start = tuple(self._context.pages)
+            if self._listener_error is not None:
+                raise self._listener_error
             self.page.on("close", self._page_close_listener)
             self.page.on("framenavigated", self._frame_navigation_listener)
+            self.page.on("frameattached", self._frame_attached_listener)
+            self.page.on("framedetached", self._frame_detached_listener)
             self.page.on("popup", self._popup_listener)
             self._page_lifecycle_listeners_installed = True
             self.page.expose_binding(
@@ -827,6 +950,10 @@ class InteractiveRecorder:
                 _INIT_JS.replace("__SESSION_ID__", json.dumps(self._session_id))
                 .replace("__BINDING_NAME__", json.dumps(self._binding_name))
                 .replace("__SECRET_NAMES__", json.dumps(sorted(self._secret_fields)))
+                .replace(
+                    "__SECRET_MARKER__",
+                    json.dumps(self._secret_marker_attribute),
+                )
                 .replace(
                     "__IDENT_NAMES__",
                     json.dumps(sorted(self._identifier_fields)),
@@ -865,7 +992,8 @@ class InteractiveRecorder:
                 self.page,
                 screenshot_scale="device" if self._owns_browser else "css",
                 screenshot_mask_selectors=_secret_screenshot_selectors(
-                    self._secret_fields
+                    self._secret_fields,
+                    marker_attribute=self._secret_marker_attribute,
                 ),
             )
             assert self._recording_dir is not None
@@ -935,6 +1063,7 @@ class InteractiveRecorder:
         try:
             self._cleanup_page_listeners()
             self._drain_event_queue()
+            self._finalizing = True
             self._flush_type()
             self._flush_scroll()
             assert self.recorder is not None
@@ -1042,6 +1171,8 @@ class InteractiveRecorder:
             return
         try:
             if frame is not self.page.main_frame:
+                if self._finalizing:
+                    self._retain_late_frame_error()
                 return
             current_origin = _http_origin(
                 str(frame.url),
@@ -1049,12 +1180,31 @@ class InteractiveRecorder:
             )
         except Exception:
             current_origin = None
-        if current_origin != self._attached_origin:
+        if self._finalizing or current_origin != self._attached_origin:
             self._listener_error = BrowserAttachError(
-                "the selected browser tab left the declared application origin; "
-                "recording was refused"
+                "the selected browser tab changed frame state after Flow "
+                "retained its final evidence; recording was refused"
+                if self._finalizing
+                else "the selected browser tab left the declared application "
+                "origin; recording was refused"
             )
             self.done = True
+
+    def _retain_late_frame_error(self) -> None:
+        """Retain one refusal for a post-snapshot frame-tree change."""
+
+        if self._listener_error is None:
+            self._listener_error = BrowserAttachError(
+                "the selected browser tab changed frame state after Flow "
+                "retained its final evidence; recording was refused"
+            )
+        self.done = True
+
+    def _handle_frame_tree_change(self, _frame: Any = None) -> None:
+        """Refuse a frame attach/detach after the final evidence snapshot."""
+
+        if not self._owns_browser and self._finalizing:
+            self._retain_late_frame_error()
 
     def _handle_popup(self, _popup: Any = None) -> None:
         """Refuse a second page that the selected recording tab opens."""
@@ -1065,6 +1215,17 @@ class InteractiveRecorder:
                 "the selected browser tab opened a popup or new tab; this "
                 "recording is bound to one tab, so Flow stopped before "
                 "publishing incomplete metadata"
+            )
+
+    def _handle_context_page(self, _page: Any = None) -> None:
+        """Irreversibly refuse any page created after context binding."""
+
+        self.done = True
+        if self._listener_error is None:
+            self._listener_error = BrowserAttachError(
+                "the selected browser context opened a popup or new tab; this "
+                "recording is bound to its accepted page baseline, so Flow "
+                "stopped before publishing incomplete metadata"
             )
 
     def _assert_no_new_pages(self) -> None:
@@ -1102,6 +1263,33 @@ class InteractiveRecorder:
         if event.pop("__oaflow_session", None) != self._session_id:
             return
         kind = event.get("kind")
+        secret_mask_bound = event.pop("__oaflow_secret_mask_bound", None)
+        if (
+            kind == "input"
+            and bool(event.get("secret"))
+            and secret_mask_bound is not True
+        ):
+            self._listener_error = BrowserAttachError(
+                "a secret input could not retain its screenshot mask identity; "
+                "recording stopped before accepting the event"
+            )
+            self.done = True
+            return
+        raw_input_session = event.pop("__oaflow_input_session", None)
+        if kind == "input":
+            expected_prefix = f"{self._session_id}:input:"
+            if (
+                not isinstance(raw_input_session, str)
+                or not raw_input_session.startswith(expected_prefix)
+                or not raw_input_session.removeprefix(expected_prefix).isdigit()
+            ):
+                self._listener_error = BrowserAttachError(
+                    "the browser emitted an input without a valid bound field "
+                    "session; recording stopped before accepting the event"
+                )
+                self.done = True
+                return
+            event["_oaflow_input_session"] = raw_input_session
         reported_top_level = bool(event.pop("__oaflow_top_level", True))
         source_is_selected_top_level = reported_top_level
         if source is not None:
@@ -1212,29 +1400,53 @@ class InteractiveRecorder:
             except Exception:
                 continue
 
+    def _cleanup_secret_markers(self) -> None:
+        """Remove this session's temporary secret-mask attributes."""
+
+        if self.page is None:
+            return
+        try:
+            frames = list(self.page.frames)
+        except Exception:
+            frames = []
+        for frame in frames:
+            try:
+                frame.evaluate(
+                    """marker => {
+                      for (const element of document.querySelectorAll('*')) {
+                        if (element.hasAttribute(marker)) {
+                          element.removeAttribute(marker);
+                        }
+                      }
+                    }""",
+                    self._secret_marker_attribute,
+                )
+            except Exception:
+                continue
+
     def _stop_browser_connection(self) -> None:
         """Close an owned browser or detach without closing an external one."""
 
         self._cleanup_page_listeners()
-        if self.page is not None and self._page_lifecycle_listeners_installed:
-            for event, listener in (
-                ("close", self._page_close_listener),
-                ("framenavigated", self._frame_navigation_listener),
-                ("popup", self._popup_listener),
-            ):
-                try:
-                    self.page.remove_listener(event, listener)
-                except Exception:
-                    pass
-            self._page_lifecycle_listeners_installed = False
+        self._cleanup_secret_markers()
         browser, self._browser = self._browser, None
         playwright, self._pw = self._pw, None
         try:
             if self._owns_browser and browser is not None:
                 browser.close()
         finally:
-            if playwright is not None:
-                playwright.stop()
+            try:
+                if playwright is not None:
+                    playwright.stop()
+            finally:
+                # Keep all local lifecycle latches active until the external
+                # Playwright connection has detached. They do not remain in
+                # Chromium after the connection closes.
+                if self.backend is not None:
+                    self.backend.stop_screenshot_mask_tracking()
+                self._page_lifecycle_listeners_installed = False
+                self._context_page_listener_installed = False
+                self._context = None
 
     def _drain_event_queue(self) -> bool:
         """Process all events already delivered by the page binding."""
@@ -1244,6 +1456,7 @@ class InteractiveRecorder:
         self._assert_no_new_pages()
         batch = self._pyq[:]
         del self._pyq[:]
+        self._validate_event_batch(batch)
         rebased = False
         if not self._owns_browser:
             current_geometry = self._read_attached_geometry()
@@ -1279,6 +1492,25 @@ class InteractiveRecorder:
         if self._listener_error is not None:
             raise self._listener_error
         return bool(batch) or rebased
+
+    @staticmethod
+    def _validate_event_batch(batch: list[dict[str, Any]]) -> None:
+        """Refuse a batch that lacks an exact frame between logical actions."""
+
+        if len(batch) <= 1:
+            return
+        kinds = {event.get("kind") for event in batch}
+        if kinds == {"scroll"}:
+            return
+        if kinds == {"input"}:
+            sessions = {event.get("_oaflow_input_session") for event in batch}
+            fields = {event.get("field") for event in batch}
+            if len(sessions) == 1 and None not in sessions and len(fields) == 1:
+                return
+        raise BrowserAttachError(
+            "more than one logical browser action arrived before Flow could "
+            "retain an exact intermediate frame; recording was refused"
+        )
 
     # -- event pump ----------------------------------------------------------
 
@@ -1327,11 +1559,16 @@ class InteractiveRecorder:
 
     def _accumulate_input(self, ev: dict[str, Any]) -> None:
         field = ev.get("field")
-        if self._pending_type is not None and self._pending_type.get("field") != field:
+        input_session = ev.get("_oaflow_input_session")
+        if self._pending_type is not None and (
+            self._pending_type.get("field") != field
+            or self._pending_type.get("input_session") != input_session
+        ):
             self._flush_type()  # focus moved to a different field
         if self._pending_type is None:
             self._pending_type = {
                 "field": field,
+                "input_session": input_session,
                 "label": ev.get("label"),
                 "secret": bool(ev.get("secret")),
                 "value": "",

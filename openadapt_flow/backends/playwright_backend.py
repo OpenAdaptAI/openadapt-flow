@@ -33,6 +33,7 @@ from openadapt_flow.runtime.resolver import (
 )
 
 VIEWPORT: tuple[int, int] = (1280, 800)
+_MASKED_SCREENSHOT_ATTEMPTS = 3
 
 _MODIFIER_ALIASES = {
     "meta": "Meta",
@@ -86,6 +87,10 @@ _APPLICATION_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}
 _WORKFLOW_STATE_IDENTITY_PATTERN = re.compile(
     r"^[a-z0-9](?:[a-z0-9._:-]{0,126}[a-z0-9])?$"
 )
+
+
+class ScreenshotMaskStabilityError(RuntimeError):
+    """The browser frame tree changed across every masked screenshot attempt."""
 
 
 @dataclass
@@ -730,6 +735,13 @@ class PlaywrightBackend:
         self.page = page
         self._screenshot_scale = screenshot_scale
         self._screenshot_mask_selectors = screenshot_mask_selectors
+        self._screenshot_frame_generation = 0
+        self._screenshot_frame_listener = self._handle_screenshot_frame_lifecycle
+        self._screenshot_frame_tracking = False
+        if self._screenshot_mask_selectors:
+            for event in ("frameattached", "framedetached", "framenavigated"):
+                self.page.on(event, self._screenshot_frame_listener)
+            self._screenshot_frame_tracking = True
         # Opaque per-backend key keeps the WeakMap private from ordinary page
         # code. Python retains only token material keyed by the public
         # SHA-256 fingerprint; target/row text stays page-local and ephemeral.
@@ -2233,24 +2245,69 @@ class PlaywrightBackend:
             deliver=lambda locator: locator.press_sequentially(text, timeout=1000),
         )
 
+    def _handle_screenshot_frame_lifecycle(self, _frame: Any = None) -> None:
+        """Advance the irreversible frame-tree generation."""
+
+        self._screenshot_frame_generation += 1
+
+    def stop_screenshot_mask_tracking(self) -> None:
+        """Remove recording-only frame listeners from an external page."""
+
+        if not self._screenshot_frame_tracking:
+            return
+        for event in ("frameattached", "framedetached", "framenavigated"):
+            try:
+                self.page.remove_listener(event, self._screenshot_frame_listener)
+            except Exception:
+                pass
+        self._screenshot_frame_tracking = False
+
+    @staticmethod
+    def _same_frames(left: tuple[Any, ...], right: tuple[Any, ...]) -> bool:
+        return len(left) == len(right) and all(
+            before is after for before, after in zip(left, right)
+        )
+
     def screenshot(self) -> bytes:
-        """Return the current full-viewport frame as PNG bytes."""
-        options: dict[str, Any] = {}
+        """Return a stable current full-viewport frame as PNG bytes."""
+        base_options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
-            options["scale"] = "css"
-        if self._screenshot_mask_selectors:
-            # A Page locator does not cross an iframe boundary. Rebuild the
-            # masks from the live frame inventory for every capture so both
-            # existing and newly attached frames use the same secret contract.
-            # If a frame detaches while Playwright resolves these locators, the
-            # screenshot fails closed instead of retaining an unmasked frame.
+            base_options["scale"] = "css"
+        if not self._screenshot_mask_selectors:
+            return self.page.screenshot(type="png", full_page=False, **base_options)
+
+        for _attempt in range(_MASKED_SCREENSHOT_ATTEMPTS):
+            generation = self._screenshot_frame_generation
+            frames = tuple(self.page.frames)
+            if generation != self._screenshot_frame_generation:
+                continue
+            options = dict(base_options)
             options["mask"] = [
                 frame.locator(selector)
-                for frame in list(self.page.frames)
+                for frame in frames
                 for selector in self._screenshot_mask_selectors
             ]
             options["mask_color"] = "#000000"
-        return self.page.screenshot(type="png", full_page=False, **options)
+            try:
+                png = self.page.screenshot(type="png", full_page=False, **options)
+                # Flush lifecycle events that Chromium sent with or before the
+                # screenshot response before accepting the in-memory bytes.
+                self.page.evaluate("() => null")
+            except Exception:
+                if generation != self._screenshot_frame_generation:
+                    continue
+                raise
+            current_frames = tuple(self.page.frames)
+            if generation == self._screenshot_frame_generation and self._same_frames(
+                frames, current_frames
+            ):
+                return png
+            # ``png`` is intentionally discarded here. It never reaches the
+            # recorder, disk, or a compiled bundle.
+        raise ScreenshotMaskStabilityError(
+            "the browser frame tree changed during every secret-masked "
+            "screenshot attempt; recording was refused"
+        )
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at pixel coordinates via the mouse."""

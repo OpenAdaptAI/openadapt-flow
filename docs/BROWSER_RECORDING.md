@@ -105,9 +105,11 @@ sensitive recording data.
   cross-origin navigation stops the recording and does not produce complete
   metadata.
 - Do not open a popup or a new tab in the selected tab's browser context while
-  recording. Flow currently binds one page. It refuses a new page instead of
-  omitting actions performed there. A refusal leaves the external browser and
-  its tabs open.
+  recording. Flow currently binds one page. A context-level listener records
+  every new-page signal, including a tab that acts and closes between recorder
+  polls. Flow keeps this refusal active through the final Playwright detach so
+  a late tab cannot produce complete metadata. A refusal leaves the external
+  browser and its tabs open.
 - Attach mode does not combine with `--headless`. The external browser owns
   its display mode.
 - The `--out` path must not exist. Flow writes to a new temporary sibling and
@@ -115,6 +117,11 @@ sensitive recording data.
   removes the temporary output and does not change an existing recording.
 - Input event payloads carry a unique recording-session binding and have a
   1 MB limit. Flow removes the current document listeners when it detaches.
+- Flow retains one exact frame boundary per logical action. It coalesces only
+  consecutive input changes from the same bound field session or consecutive
+  scroll deltas from one observed gesture. If two distinct actions arrive in
+  one recorder poll, Flow refuses the recording before it captures a shared,
+  incorrect after-frame.
 - Attached screenshots use CSS pixels and the actual live viewport. Thus, DOM
   coordinates and retained frame coordinates stay aligned on high-density
   displays.
@@ -128,10 +135,21 @@ sensitive recording data.
   so the recording stops without complete metadata. Stop interacting for a
   moment after a resize. Recording then continues automatically.
 - `input[type=password]` and fields declared with `--secret FIELD` never send
-  their values to Python. Flow redacts their field rectangle in the retained
-  evidence frames. Other typed values and visible page content are recording
-  evidence and can contain sensitive data. Keep raw recordings inside the
-  approved local boundary.
+  their values to Python. Flow binds a private input-session identity and a
+  temporary screenshot-mask marker when a declared secret field receives
+  focus. The identity remains secret if application code changes the field name
+  or ID, or replaces the active input element during the same input session.
+  Flow removes the marker when it detaches. Other typed values and visible page
+  content are recording evidence and can contain sensitive data. Keep raw
+  recordings inside the approved local boundary.
+- Secret masks cover every frame in the selected page. Before each masked
+  screenshot, Flow snapshots the frame inventory and its lifecycle generation.
+  It accepts the in-memory image only when the inventory stays unchanged
+  through capture. It retries a bounded number of times and refuses persistent
+  frame churn. A discarded unstable image never reaches disk or metadata.
+- The close, new-page, origin, and frame lifecycle guards stay active until
+  Flow detaches from the external browser. Flow promotes the temporary output
+  only after detach succeeds and every guard remains clear.
 
 ## Why the Capture Chrome extension is not this path
 

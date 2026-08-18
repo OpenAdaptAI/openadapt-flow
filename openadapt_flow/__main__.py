@@ -895,7 +895,16 @@ def _cmd_record(args: argparse.Namespace) -> int:
         print(demo_default_notice(backend, from_last_used=last is not None))
     elif profile == "demo":
         store_last_surface(_report_backend_kind(backend))
+    browser_attach_requested = bool(
+        getattr(args, "browser_cdp_endpoint", None)
+        or getattr(args, "browser_page_url", None)
+    )
     if backend in ("windows", "macos", "linux", "rdp", "citrix"):
+        if browser_attach_requested:
+            raise SystemExit(
+                "record: --browser-cdp-endpoint and --browser-page-url apply "
+                "only to --backend web"
+            )
         return _cmd_record_desktop(args, backend)
 
     if (
@@ -920,17 +929,35 @@ def _cmd_record(args: argparse.Namespace) -> int:
         raise SystemExit(
             "record --backend web requires --url (the app to record against)."
         )
+    if getattr(args, "browser_page_url", None) and not getattr(
+        args, "browser_cdp_endpoint", None
+    ):
+        raise SystemExit("record: --browser-page-url requires --browser-cdp-endpoint")
+    if getattr(args, "browser_cdp_endpoint", None) and args.headless:
+        raise SystemExit(
+            "record: --headless cannot be combined with "
+            "--browser-cdp-endpoint; the attached browser controls its own "
+            "display mode"
+        )
 
-    from openadapt_flow.interactive_recorder import record_interactive
-
-    out = record_interactive(
-        args.url,
-        Path(args.out),
-        secret_fields=tuple(args.secret or ()),
-        param_fields=tuple(args.param or ()),
-        identifier_fields=tuple(getattr(args, "identifier", None) or ()),
-        headless=args.headless,
+    from openadapt_flow.interactive_recorder import (
+        BrowserAttachError,
+        record_interactive,
     )
+
+    try:
+        out = record_interactive(
+            args.url,
+            Path(args.out),
+            secret_fields=tuple(args.secret or ()),
+            param_fields=tuple(args.param or ()),
+            identifier_fields=tuple(getattr(args, "identifier", None) or ()),
+            headless=args.headless,
+            cdp_endpoint=getattr(args, "browser_cdp_endpoint", None),
+            browser_page_url=getattr(args, "browser_page_url", None),
+        )
+    except BrowserAttachError as exc:
+        raise SystemExit(f"record: browser attachment refused: {exc}") from exc
     _stamp_recording_surface(out, "web")
     print(f"Recording written to {out}")
     secrets = sorted(args.secret or ())
@@ -4490,6 +4517,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--url",
         default=None,
         help="URL of the app to record against (required for --backend web)",
+    )
+    p.add_argument(
+        "--browser-cdp-endpoint",
+        default=None,
+        metavar="URL",
+        help=(
+            "Attach the web recorder to an already-running local Chromium "
+            "browser through its loopback DevTools endpoint (for example, "
+            "http://127.0.0.1:9222). The recorder selects a tab on the "
+            "--url origin and does not launch, navigate, or close the browser."
+        ),
+    )
+    p.add_argument(
+        "--browser-page-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "Exact current URL of the existing tab to record. Use this with "
+            "--browser-cdp-endpoint when more than one open tab has the "
+            "--url origin."
+        ),
     )
     p.add_argument("--out", required=True, help="Recording output directory")
     p.add_argument(

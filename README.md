@@ -187,6 +187,10 @@ openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
 openadapt-flow replay bundle --backend web --url https://your.app
 
+# Browser with an existing local SSO/2FA session: attach one open tab.
+openadapt-flow record --backend web --url https://your.app \
+  --browser-cdp-endpoint http://127.0.0.1:9222 --out rec
+
 # Native Windows: Capture records the local target window. WAA drives replay.
 openadapt-flow record --backend windows --window "Target App" \
   --task "add a patient note" --out rec
@@ -240,6 +244,17 @@ ignoring them; pass them to `replay` or `run`. Drive a real deployment with
 `openadapt-flow run bundle --config deploy.yaml`, which reads the backend,
 effects, actuation, durable, and policy sections from one config. Recorded
 parameter values are the defaults, and `--param` overrides them at replay.
+
+The browser recorder can launch a clean Playwright browser or attach to one
+existing local Chromium tab. Attach mode preserves a browser profile that has
+already completed sign-in, SSO, or 2FA. It refuses remote CDP endpoints and
+ambiguous same-origin tabs. It does not navigate or close the attached browser.
+You can resize the tab or move its window between monitors. Flow waits for a
+stable CSS-pixel frame and binds the next event to the new viewport. It refuses
+an action only if that action overlaps the coordinate-space transition.
+See the [browser recording guide](docs/BROWSER_RECORDING.md) for setup, exact
+tab selection, secret handling, and the boundary with the Capture Chrome
+extension prototype.
 
 **You don't have to name parameters up front.** The recorder passively
 captures each typed field's label (DOM/accessibility, or nearby OCR on pixel

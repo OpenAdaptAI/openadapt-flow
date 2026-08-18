@@ -1,11 +1,13 @@
 """Interactive recorder: capture a demonstration the USER drives live.
 
 ``openadapt-flow record --url <app>`` opens a real (headed) Playwright browser
-pointed at the user's OWN app and simply watches: it listens to the user's
-real clicks, typing, key presses and scrolls via in-page capture-phase DOM
-listeners (the same technique ``playwright codegen`` uses) and writes the
-EXACT recording format the compiler already consumes (``meta.json`` +
-``events.jsonl`` + ``frames/{i:04d}_before.png`` / ``_after.png``).
+pointed at the user's OWN app. With ``--browser-cdp-endpoint`` it instead
+attaches to one explicitly bound tab in an already-running local Chromium
+browser, which preserves an existing SSO or 2FA session. Both modes listen to
+the user's real clicks, typing, key presses and scrolls via in-page
+capture-phase DOM listeners and write the EXACT recording format the compiler
+already consumes (``meta.json`` + ``events.jsonl`` +
+``frames/{i:04d}_before.png`` / ``_after.png``).
 
     record --url … → compile → replay
 
@@ -38,9 +40,15 @@ pipe, never written to meta/events/frames/bundle. See ``ir.Step.secret`` and
 
 from __future__ import annotations
 
+import io
+import ipaddress
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit
+
+from PIL import Image
 
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 from openadapt_flow.recorder import Recorder
@@ -62,16 +70,192 @@ _SPECIAL_KEYS = (
     "End",
 )
 
+
+class BrowserAttachError(RuntimeError):
+    """A safe browser-attachment precondition was not met."""
+
+
+def _http_origin(url: str, *, label: str) -> tuple[str, str, int]:
+    """Return a normalized HTTP origin or refuse an unsafe attach target."""
+
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as exc:
+        raise BrowserAttachError(f"{label} is not a valid URL") from exc
+    scheme = parsed.scheme.lower()
+    host = (parsed.hostname or "").lower()
+    if scheme not in {"http", "https"} or not host:
+        raise BrowserAttachError(f"{label} must be an http:// or https:// URL")
+    return (scheme, host, port or (443 if scheme == "https" else 80))
+
+
+def _origin_label(origin: tuple[str, str, int]) -> str:
+    scheme, host, port = origin
+    default_port = 443 if scheme == "https" else 80
+    rendered_host = f"[{host}]" if ":" in host else host
+    suffix = "" if port == default_port else f":{port}"
+    return f"{scheme}://{rendered_host}{suffix}"
+
+
+def _safe_page_label(url: str) -> str:
+    """Describe a tab without exposing URL credentials, query, or fragment."""
+
+    try:
+        parsed = urlsplit(url)
+        origin = _http_origin(url, label="browser tab URL")
+    except BrowserAttachError:
+        return "<non-web page>"
+    path = parsed.path or "/"
+    if len(path) > 120:
+        path = path[:117] + "..."
+    return _origin_label(origin) + path
+
+
+def validate_browser_cdp_endpoint(endpoint: str) -> str:
+    """Require an explicit loopback CDP endpoint.
+
+    Browser attachment is local-only. A remote CDP endpoint is effectively a
+    remote-control credential and can also expose every page in that browser.
+    The supported recorder does not accept that boundary implicitly.
+    """
+
+    try:
+        parsed = urlsplit(endpoint)
+        port = parsed.port
+    except ValueError as exc:
+        raise BrowserAttachError("the browser CDP endpoint is not a valid URL") from exc
+    if parsed.scheme.lower() not in {"http", "https", "ws", "wss"}:
+        raise BrowserAttachError(
+            "the browser CDP endpoint must use http, https, ws, or wss"
+        )
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise BrowserAttachError(
+            "the browser CDP endpoint must not contain credentials, a query, "
+            "or a fragment"
+        )
+    host = (parsed.hostname or "").lower()
+    is_loopback = host == "localhost"
+    if not is_loopback:
+        try:
+            is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            is_loopback = False
+    if not is_loopback:
+        raise BrowserAttachError(
+            "the browser CDP endpoint must use localhost or a loopback IP address"
+        )
+    if port is None:
+        raise BrowserAttachError("the browser CDP endpoint must include a port")
+    return endpoint
+
+
+def select_attached_page(
+    browser: Any,
+    *,
+    app_url: str,
+    page_url: Optional[str] = None,
+) -> Any:
+    """Bind one existing same-origin web tab without guessing.
+
+    A sole tab on the declared application origin is unambiguous. If two or
+    more tabs use that origin, the operator must give the exact current URL.
+    Query and fragment values are never included in an error message.
+    """
+
+    app_origin = _http_origin(app_url, label="the declared app URL")
+    if (
+        page_url is not None
+        and _http_origin(page_url, label="the selected browser page URL") != app_origin
+    ):
+        raise BrowserAttachError(
+            "the selected browser page URL must have the same origin as "
+            f"the declared app URL ({_origin_label(app_origin)})"
+        )
+
+    matches: list[tuple[Any, str]] = []
+    for context in browser.contexts:
+        for page in context.pages:
+            try:
+                current_url = str(page.url)
+                current_origin = _http_origin(current_url, label="browser tab URL")
+            except Exception:
+                continue
+            if current_origin == app_origin:
+                matches.append((page, current_url))
+
+    if page_url is not None:
+        exact = [page for page, current_url in matches if current_url == page_url]
+        if len(exact) == 1:
+            return exact[0]
+        if not exact:
+            raise BrowserAttachError(
+                "no open tab has the exact --browser-page-url on the declared "
+                f"app origin ({_origin_label(app_origin)})"
+            )
+        raise BrowserAttachError(
+            "more than one open tab has the exact --browser-page-url; close "
+            "the duplicate tabs and retry"
+        )
+
+    if len(matches) == 1:
+        return matches[0][0]
+    if not matches:
+        raise BrowserAttachError(
+            "no open tab matches the declared app origin "
+            f"({_origin_label(app_origin)}); open the app in the attached "
+            "browser and retry"
+        )
+    labels = sorted({_safe_page_label(current_url) for _, current_url in matches})
+    rendered = ", ".join(labels[:5])
+    if len(labels) > 5:
+        rendered += f", and {len(labels) - 5} more"
+    raise BrowserAttachError(
+        f"{len(matches)} open tabs match the declared app origin; supply the "
+        "exact current URL with --browser-page-url. Candidate paths "
+        f"(query and fragment hidden): {rendered}"
+    )
+
+
 # In-page recorder script. Installed via add_init_script so it re-arms on every
 # document (navigations). Emits raw events to the Python side via the
 # __oaflow_emit binding. __SECRET_NAMES__ / __SPECIAL_KEYS__ are substituted in.
 _INIT_JS = r"""
 (() => {
-  if (window.__oaflowInstalled) return;
-  window.__oaflowInstalled = true;
+  const SESSION_ID = __SESSION_ID__;
+  const BINDING_NAME = __BINDING_NAME__;
+  const GLOBAL_KEY = '__oaflowRecorder';
+  const previous = window[GLOBAL_KEY];
+  if (previous && previous.sessionId === SESSION_ID) return;
+  if (previous && typeof previous.cleanup === 'function') {
+    try { previous.cleanup(); } catch (e) {}
+  }
   const SECRET_NAMES = __SECRET_NAMES__;
   const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
+  const listeners = [];
+  let resizeTimer = null;
+
+  function listenOn(target, type, handler) {
+    target.addEventListener(type, handler, true);
+    listeners.push([target, type, handler]);
+  }
+
+  function listen(type, handler) {
+    listenOn(document, type, handler);
+  }
+
+  function cleanup() {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    for (const [target, type, handler] of listeners) {
+      try { target.removeEventListener(type, handler, true); } catch (e) {}
+    }
+    const current = window[GLOBAL_KEY];
+    if (current && current.sessionId === SESSION_ID) {
+      try { delete window[GLOBAL_KEY]; } catch (e) { window[GLOBAL_KEY] = null; }
+    }
+  }
+  window[GLOBAL_KEY] = {sessionId: SESSION_ID, cleanup};
 
   function identifierRect() {
     // Bounding rect of the operator-marked record-identifying field
@@ -256,11 +440,28 @@ _INIT_JS = r"""
     return null;
   }
 
-  function emit(o) { try { window.__oaflow_emit(o); } catch (e) {} }
+  function emit(o) {
+    try {
+      o.__oaflow_session = SESSION_ID;
+      o.__oaflow_top_level = window === window.top;
+      o.__oaflow_viewport = [Math.round(window.innerWidth),
+                             Math.round(window.innerHeight)];
+      o.__oaflow_dpr = Number(window.devicePixelRatio || 1);
+      const binding = window[BINDING_NAME];
+      if (typeof binding === 'function') binding(o);
+    } catch (e) {}
+  }
 
   let pointerDown = null;
   let suppressClick = false;
-  document.addEventListener('pointerdown', (e) => {
+  listenOn(window, 'resize', () => {
+    if (resizeTimer !== null) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      emit({kind: 'viewport', url: location.href, title: document.title});
+    }, 100);
+  });
+  listen('pointerdown', (e) => {
     if (e.button !== 0) return;
     pointerDown = {
       x: Math.round(e.clientX), y: Math.round(e.clientY),
@@ -268,9 +469,9 @@ _INIT_JS = r"""
       structural: structuralTarget(e.clientX, e.clientY),
       idr: identifierRect(),
     };
-  }, true);
+  });
 
-  document.addEventListener('pointerup', (e) => {
+  listen('pointerup', (e) => {
     if (e.button !== 0 || !pointerDown) return;
     const start = pointerDown;
     pointerDown = null;
@@ -284,9 +485,9 @@ _INIT_JS = r"""
       end_structural: structuralTarget(endX, endY), idr: start.idr,
       url: location.href, title: document.title,
     });
-  }, true);
+  });
 
-  document.addEventListener('click', (e) => {
+  listen('click', (e) => {
     if (e.button !== 0) return;
     if (suppressClick) { suppressClick = false; return; }
     emit({
@@ -297,9 +498,9 @@ _INIT_JS = r"""
       idr: identifierRect(),
       url: location.href, title: document.title,
     });
-  }, true);
+  });
 
-  document.addEventListener('contextmenu', (e) => {
+  listen('contextmenu', (e) => {
     emit({
       kind: 'right_click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
@@ -308,9 +509,9 @@ _INIT_JS = r"""
       idr: identifierRect(),
       url: location.href, title: document.title,
     });
-  }, true);
+  });
 
-  document.addEventListener('input', (e) => {
+  listen('input', (e) => {
     const el = e.target;
     const secret = isSecretEl(el);
     const r = (el.getBoundingClientRect && el.getBoundingClientRect())
@@ -327,9 +528,9 @@ _INIT_JS = r"""
     // The literal value of a SECRET field is never read or transmitted.
     if (!secret) o.value = (el.value != null ? String(el.value) : '');
     emit(o);
-  }, true);
+  });
 
-  document.addEventListener('keydown', (e) => {
+  listen('keydown', (e) => {
     const modifiers = [];
     if (e.ctrlKey) modifiers.push('ctrl');
     if (e.altKey) modifiers.push('alt');
@@ -347,15 +548,15 @@ _INIT_JS = r"""
     }
     if (SPECIAL.indexOf(e.key) < 0) return;
     emit({ kind: 'key', key: e.key, url: location.href, title: document.title });
-  }, true);
+  });
 
-  document.addEventListener('wheel', (e) => {
+  listen('wheel', (e) => {
     emit({
       kind: 'scroll',
       dx: Math.round(e.deltaX), dy: Math.round(e.deltaY),
       url: location.href, title: document.title,
     });
-  }, true);
+  });
 })();
 """
 
@@ -377,6 +578,8 @@ class InteractiveRecorder:
         param_fields: tuple[str, ...] = (),
         identifier_fields: tuple[str, ...] = (),
         headless: bool = False,
+        cdp_endpoint: Optional[str] = None,
+        browser_page_url: Optional[str] = None,
         poll_ms: int = 60,
         settle_timeout_s: float = 5.0,
         settle_stable_frames: int = 2,
@@ -393,6 +596,24 @@ class InteractiveRecorder:
         self._param_fields = set(param_fields)
         self._identifier_fields = set(identifier_fields)
         self._headless = headless
+        if browser_page_url and not cdp_endpoint:
+            raise BrowserAttachError("browser_page_url requires a browser CDP endpoint")
+        if cdp_endpoint and headless:
+            raise BrowserAttachError(
+                "headless mode cannot be combined with an attached browser"
+            )
+        self._cdp_endpoint = (
+            validate_browser_cdp_endpoint(cdp_endpoint) if cdp_endpoint else None
+        )
+        self._attached_origin = (
+            _http_origin(url, label="the declared app URL")
+            if self._cdp_endpoint
+            else None
+        )
+        self._browser_page_url = browser_page_url
+        self._owns_browser = self._cdp_endpoint is None
+        self._session_id = uuid.uuid4().hex
+        self._binding_name = f"__oaflow_emit_{self._session_id}"
         self._poll_ms = poll_ms
         self._viewport = viewport
         # Recording-only, read-only observation. This does not add an effect
@@ -409,6 +630,7 @@ class InteractiveRecorder:
         self._pyq: list[dict[str, Any]] = []
         self._pending_type: Optional[dict[str, Any]] = None
         self._pending_scroll: Optional[dict[str, Any]] = None
+        self._listener_error: Optional[BrowserAttachError] = None
         self.done = False
 
         # Set on start().
@@ -419,61 +641,123 @@ class InteractiveRecorder:
         self.recorder: Optional[Recorder] = None
         self._last_frame: bytes = b""
         self._last_structural: dict[str, Any] = {}
+        self._attached_geometry: Optional[tuple[int, int, float]] = None
+        self._initial_attached_viewport: Optional[tuple[int, int]] = None
+        self._viewport_dirty = False
+        self._viewport_history: list[dict[str, Any]] = []
 
     # -- lifecycle -----------------------------------------------------------
 
     def start(self) -> None:
-        """Launch the browser, install the in-page listeners, capture the
-        initial settled frame."""
-        from openadapt_flow._browser_setup import ensure_chromium_installed
+        """Launch or attach, install listeners, and capture the first frame."""
 
-        ensure_chromium_installed()
+        if self._owns_browser:
+            from openadapt_flow._browser_setup import ensure_chromium_installed
+
+            ensure_chromium_installed()
         from playwright.sync_api import sync_playwright
 
         self._pw = sync_playwright().start()
         try:
-            self._browser = self._pw.chromium.launch(headless=self._headless)
-        except Exception:
-            self._pw.stop()
-            raise
-        self.page = self._browser.new_page(
-            viewport={"width": self._viewport[0], "height": self._viewport[1]},
-            device_scale_factor=1,
-        )
-        self.page.on("close", lambda _=None: setattr(self, "done", True))
-        self.page.expose_binding(
-            "__oaflow_emit",
-            lambda source, detail: self._pyq.append(detail),
-        )
-        init_js = (
-            _INIT_JS.replace(
-                "__SECRET_NAMES__", json.dumps(sorted(self._secret_fields))
+            if self._owns_browser:
+                self._browser = self._pw.chromium.launch(headless=self._headless)
+                self.page = self._browser.new_page(
+                    viewport={
+                        "width": self._viewport[0],
+                        "height": self._viewport[1],
+                    },
+                    device_scale_factor=1,
+                )
+            else:
+                try:
+                    self._browser = self._pw.chromium.connect_over_cdp(
+                        self._cdp_endpoint
+                    )
+                except Exception as exc:
+                    raise BrowserAttachError(
+                        "could not connect to the local Chromium CDP endpoint; "
+                        "confirm that the browser was started with remote "
+                        "debugging and that the endpoint is ready"
+                    ) from exc
+                self.page = select_attached_page(
+                    self._browser,
+                    app_url=self._url,
+                    page_url=self._browser_page_url,
+                )
+
+            self.page.on("close", lambda _=None: setattr(self, "done", True))
+            self.page.expose_binding(
+                self._binding_name,
+                lambda source, detail: self._enqueue_browser_event(
+                    detail,
+                    source=source,
+                ),
             )
-            .replace("__IDENT_NAMES__", json.dumps(sorted(self._identifier_fields)))
-            .replace("__SPECIAL_KEYS__", json.dumps(list(_SPECIAL_KEYS)))
-        )
-        self.page.add_init_script(init_js)
-        self.page.goto(self._url)
-        try:
-            self.page.wait_for_load_state("load")
+            init_js = (
+                _INIT_JS.replace("__SESSION_ID__", json.dumps(self._session_id))
+                .replace("__BINDING_NAME__", json.dumps(self._binding_name))
+                .replace("__SECRET_NAMES__", json.dumps(sorted(self._secret_fields)))
+                .replace(
+                    "__IDENT_NAMES__",
+                    json.dumps(sorted(self._identifier_fields)),
+                )
+                .replace("__SPECIAL_KEYS__", json.dumps(list(_SPECIAL_KEYS)))
+            )
+            self.page.add_init_script(init_js)
+            if self._owns_browser:
+                self.page.goto(self._url)
+                try:
+                    self.page.wait_for_load_state("load")
+                except Exception:
+                    pass
+            else:
+                # add_init_script applies after the next navigation. Install
+                # the same session in every already-open document now. This
+                # includes child frames, whose local coordinates cannot yet be
+                # bound to top-level evidence and therefore emit an explicit
+                # refusal instead of disappearing from the recording.
+                for frame in list(self.page.frames):
+                    try:
+                        frame.evaluate(init_js)
+                    except Exception as exc:
+                        try:
+                            detached = frame.is_detached()
+                        except Exception:
+                            detached = False
+                        if detached:
+                            continue
+                        raise BrowserAttachError(
+                            "could not install the recording listener in every "
+                            "existing browser frame; recording was refused"
+                        ) from exc
+
+            self.backend = PlaywrightBackend(
+                self.page,
+                screenshot_scale="device" if self._owns_browser else "css",
+            )
+            self.recorder = Recorder(
+                self.backend,
+                self._out_dir,
+                app_url=self._url,
+                system_of_record_reader=self._system_of_record_reader,
+                **self._settle,
+            )
+            if self._owns_browser:
+                self._last_frame = self.recorder._wait_settled()
+                self._last_structural = self._structural_state()
+            else:
+                self._rebaseline_attached_viewport()
         except Exception:
-            pass
-        self.backend = PlaywrightBackend(self.page)
-        self.recorder = Recorder(
-            self.backend,
-            self._out_dir,
-            app_url=self._url,
-            system_of_record_reader=self._system_of_record_reader,
-            **self._settle,
-        )
-        self._last_frame = self.recorder._wait_settled()
-        self._last_structural = self._structural_state()
+            self._stop_browser_connection()
+            raise
 
     def run(self) -> Path:
         """Pump until completion, an operator stop, or a closed window."""
         if self._stop_when is None:
             finish_instruction = (
-                "Press Ctrl-C here (or close the browser window) to finish."
+                "Press Ctrl-C here (or close the selected browser tab) to finish."
+                if not self._owns_browser
+                else "Press Ctrl-C here (or close the browser window) to finish."
             )
         else:
             finish_instruction = (
@@ -482,8 +766,12 @@ class InteractiveRecorder:
             )
         print(
             f"Recording {self._url}\n"
-            "  Perform your workflow in the browser window.\n"
-            f"  {finish_instruction}"
+            + (
+                "  Perform your workflow in the selected existing browser tab.\n"
+                if not self._owns_browser
+                else "  Perform your workflow in the browser window.\n"
+            )
+            + f"  {finish_instruction}"
         )
         try:
             while not self.done:
@@ -491,30 +779,238 @@ class InteractiveRecorder:
                     break
         except KeyboardInterrupt:
             print("\n[record] stopping…")
+        except Exception:
+            self.abort()
+            raise
         return self.finish()
 
     def run_script(self, script: Callable[[Any, Callable[[], None]], None]) -> Path:
         """Scripted loop (tests): run ``script(page, pump)`` — which performs
         synthetic input and calls ``pump()`` to let the recorder drain — then
         flush and finish."""
-        script(self.page, self.pump)
+        try:
+            script(self.page, self.pump)
+        except Exception:
+            self.abort()
+            raise
         return self.finish()
 
     def finish(self) -> Path:
-        """Flush trailing input, write meta.json, tear the browser down."""
+        """Flush input, write metadata, and close or detach as appropriate."""
         try:
+            self._cleanup_page_listeners()
+            self._drain_event_queue()
             self._flush_type()
             self._flush_scroll()
-        finally:
-            assert self.recorder is not None
+        except Exception:
+            self.abort()
+            raise
+        assert self.recorder is not None
+        try:
             out = self.recorder.finish()
-            try:
-                if self._browser is not None:
-                    self._browser.close()
-            finally:
-                if self._pw is not None:
-                    self._pw.stop()
+            meta_path = out / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            meta["source"] = (
+                "openadapt-flow-playwright"
+                if self._owns_browser
+                else "openadapt-flow-playwright-cdp"
+            )
+            if not self._owns_browser:
+                assert self._initial_attached_viewport is not None
+                meta["viewport"] = list(self._initial_attached_viewport)
+                meta["viewport_mode"] = "per-event"
+                meta["viewport_history"] = list(self._viewport_history)
+            meta_path.write_text(json.dumps(meta, indent=2))
+        finally:
+            self._stop_browser_connection()
         return out
+
+    def abort(self) -> None:
+        """Detach after a refused or failed recording without writing meta.json."""
+
+        self.done = True
+        self._cleanup_page_listeners()
+        self._pyq.clear()
+        self._stop_browser_connection()
+
+    def _enqueue_browser_event(
+        self,
+        detail: Any,
+        *,
+        source: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Accept only a bounded event from this recorder session."""
+
+        if not isinstance(detail, dict):
+            return
+        event = dict(detail)
+        if event.pop("__oaflow_session", None) != self._session_id:
+            return
+        kind = event.get("kind")
+        reported_top_level = bool(event.pop("__oaflow_top_level", True))
+        source_is_selected_top_level = reported_top_level
+        if source is not None:
+            try:
+                source_is_selected_top_level = (
+                    source.get("page") is self.page
+                    and source.get("frame") is self.page.main_frame
+                )
+            except Exception:
+                source_is_selected_top_level = False
+        if not source_is_selected_top_level and kind == "viewport":
+            return
+        if not source_is_selected_top_level:
+            self._listener_error = BrowserAttachError(
+                "an event came from an iframe; cross-frame recording is not "
+                "qualified, so recording stopped before accepting the event"
+            )
+            self.done = True
+            return
+        if kind not in {
+            "click",
+            "right_click",
+            "drag",
+            "input",
+            "key",
+            "hotkey",
+            "scroll",
+            "viewport",
+        }:
+            return
+        if not self._owns_browser:
+            try:
+                event_origin = _http_origin(
+                    str(event["url"]),
+                    label="the browser event URL",
+                )
+            except Exception:
+                event_origin = None
+            if event_origin != self._attached_origin:
+                self._listener_error = BrowserAttachError(
+                    "a browser event came from outside the declared application "
+                    "origin; recording stopped before accepting the event"
+                )
+                self.done = True
+                return
+            raw_viewport = event.pop("__oaflow_viewport", None)
+            raw_dpr = event.pop("__oaflow_dpr", None)
+            try:
+                event_geometry = (
+                    int(raw_viewport[0]),
+                    int(raw_viewport[1]),
+                    round(float(raw_dpr), 6),
+                )
+            except (IndexError, TypeError, ValueError):
+                event_geometry = (0, 0, 0.0)
+            if (
+                event_geometry[0] <= 0
+                or event_geometry[1] <= 0
+                or not 0.1 <= event_geometry[2] <= 16.0
+            ):
+                self._listener_error = BrowserAttachError(
+                    "the browser emitted invalid viewport evidence; recording "
+                    "stopped before accepting the event"
+                )
+                self.done = True
+                return
+            event["_oaflow_geometry"] = event_geometry
+            if kind == "viewport":
+                self._viewport_dirty = True
+                return
+        else:
+            event.pop("__oaflow_viewport", None)
+            event.pop("__oaflow_dpr", None)
+        try:
+            encoded_size = len(json.dumps(event).encode("utf-8"))
+        except (TypeError, ValueError):
+            return
+        if encoded_size > 1_000_000:
+            self._listener_error = BrowserAttachError(
+                "the browser emitted an event larger than 1 MB; recording "
+                "stopped without accepting the event"
+            )
+            self.done = True
+            return
+        self._pyq.append(event)
+
+    def _cleanup_page_listeners(self) -> None:
+        """Remove this session's current-document listeners before detach."""
+
+        if self.page is None:
+            return
+        try:
+            frames = list(self.page.frames)
+        except Exception:
+            frames = []
+        for frame in frames:
+            try:
+                frame.evaluate(
+                    """sessionId => {
+                      const current = window.__oaflowRecorder;
+                      if (current && current.sessionId === sessionId
+                          && typeof current.cleanup === 'function') {
+                        current.cleanup();
+                      }
+                    }""",
+                    self._session_id,
+                )
+            except Exception:
+                continue
+
+    def _stop_browser_connection(self) -> None:
+        """Close an owned browser or detach without closing an external one."""
+
+        self._cleanup_page_listeners()
+        browser, self._browser = self._browser, None
+        playwright, self._pw = self._pw, None
+        try:
+            if self._owns_browser and browser is not None:
+                browser.close()
+        finally:
+            if playwright is not None:
+                playwright.stop()
+
+    def _drain_event_queue(self) -> bool:
+        """Process all events already delivered by the page binding."""
+
+        if self._listener_error is not None:
+            raise self._listener_error
+        batch = self._pyq[:]
+        del self._pyq[:]
+        rebased = False
+        if not self._owns_browser:
+            current_geometry = self._read_attached_geometry()
+            if self._viewport_dirty or current_geometry != self._attached_geometry:
+                if batch:
+                    raise BrowserAttachError(
+                        "an action overlapped a browser resize or monitor-scale "
+                        "change; recording stopped because no exact pre-action "
+                        "frame exists in the new coordinate space"
+                    )
+                self._rebaseline_attached_viewport()
+                rebased = True
+        for event in batch:
+            if not self._owns_browser:
+                event_geometry = event.pop("_oaflow_geometry", None)
+                if event_geometry != self._attached_geometry:
+                    raise BrowserAttachError(
+                        "an action overlapped a browser resize or monitor-scale "
+                        "change; recording stopped because no exact pre-action "
+                        "frame exists in the new coordinate space"
+                    )
+            self._process(event)
+            if not self._owns_browser and (
+                self._viewport_dirty
+                or self._read_attached_geometry() != self._attached_geometry
+            ):
+                raise BrowserAttachError(
+                    "the browser resized or changed monitor scale while an "
+                    "action was being retained; recording stopped without "
+                    "complete metadata"
+                )
+        if self._listener_error is not None:
+            raise self._listener_error
+        return bool(batch) or rebased
 
     # -- event pump ----------------------------------------------------------
 
@@ -524,6 +1020,8 @@ class InteractiveRecorder:
         return self._pump()
 
     def _pump(self) -> bool:
+        if self._listener_error is not None:
+            raise self._listener_error
         if self.done:
             return False
         try:
@@ -531,17 +1029,13 @@ class InteractiveRecorder:
         except Exception:
             self.done = True
             return False
-        batch = self._pyq[:]
-        del self._pyq[:]
-        if not batch:
+        if not self._drain_event_queue():
             # Distinct scroll gestures are separated by pauses; flush a
             # completed scroll on idle so each becomes its own step. A type run
             # is NOT idle-flushed (a mid-word pause must not split it) — it
             # flushes on the next boundary event or at finish().
             self._flush_scroll()
             return not self._stop_condition_reached()
-        for ev in batch:
-            self._process(ev)
         return not self._stop_condition_reached()
 
     def _process(self, ev: dict[str, Any]) -> None:
@@ -724,6 +1218,102 @@ class InteractiveRecorder:
 
     # -- internals -----------------------------------------------------------
 
+    def _read_attached_geometry(self) -> tuple[int, int, float]:
+        """Read the selected tab's origin, CSS viewport, and monitor scale."""
+
+        assert not self._owns_browser
+        assert self.page is not None
+        try:
+            current_origin = _http_origin(
+                str(self.page.url),
+                label="the selected browser tab URL",
+            )
+        except Exception as exc:
+            raise BrowserAttachError(
+                "the selected browser tab left the declared application origin; "
+                "recording was refused"
+            ) from exc
+        if current_origin != self._attached_origin:
+            raise BrowserAttachError(
+                "the selected browser tab left the declared application origin; "
+                "recording was refused"
+            )
+        try:
+            raw = self.page.evaluate(
+                """() => ({
+                  width: window.innerWidth,
+                  height: window.innerHeight,
+                  dpr: window.devicePixelRatio || 1,
+                })"""
+            )
+            geometry = (
+                int(raw["width"]),
+                int(raw["height"]),
+                round(float(raw["dpr"]), 6),
+            )
+        except Exception as exc:
+            raise BrowserAttachError(
+                "the attached tab geometry could not be read; recording was refused"
+            ) from exc
+        if geometry[0] <= 0 or geometry[1] <= 0 or not 0.1 <= geometry[2] <= 16.0:
+            raise BrowserAttachError(
+                "the attached tab reported invalid viewport or monitor-scale "
+                "geometry; recording was refused"
+            )
+        return geometry
+
+    def _rebaseline_attached_viewport(self) -> None:
+        """Resume after an idle resize with a fresh exact CSS-pixel baseline."""
+
+        assert not self._owns_browser
+        assert self.recorder is not None
+        # A deferred input or scroll already has its exact old-space after
+        # frame. Persist it before the new coordinate space becomes current.
+        self._flush_type()
+        self._flush_scroll()
+        for _attempt in range(3):
+            before = self._read_attached_geometry()
+            frame = self.recorder._wait_settled()
+            after = self._read_attached_geometry()
+            if self._pyq or self._listener_error is not None:
+                raise BrowserAttachError(
+                    "an action occurred before the resized browser viewport was "
+                    "rebound to a fresh frame; recording stopped without "
+                    "complete metadata"
+                )
+            with Image.open(io.BytesIO(frame)) as image:
+                frame_size = image.size
+            if before == after and frame_size == after[:2]:
+                self._attached_geometry = after
+                self._last_frame = frame
+                self._last_structural = self._structural_state()
+                self._viewport_dirty = False
+                viewport = after[:2]
+                if self._initial_attached_viewport is None:
+                    self._initial_attached_viewport = viewport
+                entry = {
+                    "before_event": self.recorder.event_count,
+                    "viewport": list(viewport),
+                    "device_scale_factor": after[2],
+                }
+                if (
+                    self._viewport_history
+                    and self._viewport_history[-1]["before_event"]
+                    == entry["before_event"]
+                ):
+                    self._viewport_history[-1] = entry
+                elif not self._viewport_history or (
+                    self._viewport_history[-1]["viewport"] != entry["viewport"]
+                    or self._viewport_history[-1]["device_scale_factor"]
+                    != entry["device_scale_factor"]
+                ):
+                    self._viewport_history.append(entry)
+                return
+        raise BrowserAttachError(
+            "the attached browser viewport did not settle long enough to bind "
+            "a new exact frame and coordinate space"
+        )
+
     def _advance(self) -> None:
         """After an IMMEDIATE step (click/key), the current settled frame
         becomes the next step's BEFORE frame."""
@@ -788,6 +1378,8 @@ def record_interactive(
     param_fields: tuple[str, ...] = (),
     identifier_fields: tuple[str, ...] = (),
     headless: bool = False,
+    cdp_endpoint: Optional[str] = None,
+    browser_page_url: Optional[str] = None,
     script: Optional[Callable[[Any, Callable[[], None]], None]] = None,
     system_of_record_reader: Optional[
         Callable[[], Optional[list[dict[str, Any]]]]
@@ -817,6 +1409,13 @@ def record_interactive(
             remote-display/pixel substrate (Citrix/RDP).
         headless: Run the browser headless (used by scripted/CI recording;
             a human recording is headed).
+        cdp_endpoint: Optional local-loopback Chromium DevTools endpoint. When
+            set, the recorder attaches to an existing browser and never
+            launches, navigates, or closes it.
+        browser_page_url: Exact current tab URL used to disambiguate two or
+            more open tabs on the declared app origin. Requires
+            ``cdp_endpoint``. Query and fragment values are not written to
+            recorder diagnostics.
         script: Test hook — ``script(page, pump)`` drives synthetic input and
             pumps the loop; when given, the human wait loop is skipped.
         system_of_record_reader: Optional read-only observation of the
@@ -837,6 +1436,8 @@ def record_interactive(
         param_fields=param_fields,
         identifier_fields=identifier_fields,
         headless=headless,
+        cdp_endpoint=cdp_endpoint,
+        browser_page_url=browser_page_url,
         system_of_record_reader=system_of_record_reader,
         stop_when=stop_when,
         **kwargs,

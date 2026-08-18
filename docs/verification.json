@@ -1,5 +1,5 @@
 {
-  "generated_at": "committed registry state (regenerate: scripts/validate_claims.py --report)",
+  "generated_at": "2026-08-15T00:03:37+02:00 (git HEAD commit date)",
   "green_check_run": false,
   "green_check_job": null,
   "green_check_scope": [],
@@ -19,7 +19,8 @@
       "strongest_evidence": "supported",
       "caveats": [
         "\"Supported\" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and code-qualified claims below.",
-        "The full record->compile->replay browser suite runs in the required e2e-browser PR gate and repeats in the weekly compatibility matrix."
+        "The full record->compile->replay browser suite runs in the required e2e-browser PR gate and repeats in the weekly compatibility matrix.",
+        "Existing-session attachment is Chromium-only and loopback-only. It requires a dedicated browser process started with remote debugging. It does not claim support for the Capture Chrome extension prototype or direct extension replay."
       ],
       "evidence": [
         {
@@ -57,6 +58,17 @@
           "ci_job": "test",
           "junit_status": null,
           "proves": "The deterministic replayer resolves steps, substitutes parameters, enforces postconditions and the risk gate \u2014 no model in the loop."
+        },
+        {
+          "path": "tests/test_browser_attach.py",
+          "kind": "test",
+          "exists": true,
+          "strength": "supported",
+          "gating": "ci (required PR gate (test))",
+          "node": "test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trials",
+          "node_found": true,
+          "junit_status": null,
+          "proves": "Three real Chromium CDP-attach trials record and compile the same synthetic workflow, exclude password values before persistence, preserve CSS-pixel frame/coordinate alignment, and detach without closing the external browser. A live case records and compiles actions across viewport and monitor-scale changes. It binds each event to its exact frame dimensions. A separate live case refuses an action that overlaps the transition. Unit cases refuse remote endpoints, cross-origin selectors and navigation, iframe events, invalid viewport evidence, and ambiguous same-origin tabs."
         }
       ],
       "errors": []

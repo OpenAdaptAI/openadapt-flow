@@ -15,7 +15,7 @@ import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 from urllib.parse import urlsplit
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -703,13 +703,24 @@ class PlaywrightBackend:
             such as the demo driver may use locators; replay never does).
     """
 
-    def __init__(self, page: "Page") -> None:
+    def __init__(
+        self,
+        page: "Page",
+        *,
+        screenshot_scale: Literal["css", "device"] = "device",
+    ) -> None:
         """Wrap an existing Playwright page.
 
         Args:
-            page: A page created with viewport 1280x800, deviceScaleFactor=1.
+            page: A Playwright page.
+            screenshot_scale: Pixel scale for retained screenshots. The
+                ordinary launched-browser path uses Playwright's ``device``
+                default. A browser attached through CDP uses ``css`` so DOM
+                event coordinates and retained frame pixels stay in the same
+                coordinate system even on a high-density display.
         """
         self.page = page
+        self._screenshot_scale = screenshot_scale
         # Opaque per-backend key keeps the WeakMap private from ordinary page
         # code. Python retains only token material keyed by the public
         # SHA-256 fingerprint; target/row text stays page-local and ephemeral.
@@ -726,7 +737,21 @@ class PlaywrightBackend:
     def viewport(self) -> tuple[int, int]:
         """(width, height) of the page viewport in pixels."""
         size = self.page.viewport_size
-        if size is None:  # pragma: no cover - viewport always set by launch()
+        if size is None:
+            # A Chromium page reached through ``connect_over_cdp`` normally
+            # has no Playwright viewport emulation. Reading the live CSS
+            # viewport avoids both the old fixed 1280x800 fallback and any
+            # mutation of the operator's browser window.
+            try:
+                live = self.page.evaluate(
+                    "() => ({width: window.innerWidth, height: window.innerHeight})"
+                )
+                width = int(live["width"])
+                height = int(live["height"])
+                if width > 0 and height > 0:
+                    return (width, height)
+            except Exception:
+                pass
             return VIEWPORT
         return (size["width"], size["height"])
 
@@ -2091,11 +2116,15 @@ class PlaywrightBackend:
         """
 
         def capture() -> bytes:
+            options: dict[str, Any] = {}
+            if self._screenshot_scale == "css":
+                options["scale"] = "css"
             return self.page.screenshot(
                 type="png",
                 full_page=False,
                 caret="initial",
                 style="* { caret-color: transparent !important; }",
+                **options,
             )
 
         previous = capture()
@@ -2197,7 +2226,10 @@ class PlaywrightBackend:
 
     def screenshot(self) -> bytes:
         """Return the current full-viewport frame as PNG bytes."""
-        return self.page.screenshot(type="png", full_page=False)
+        options: dict[str, Any] = {}
+        if self._screenshot_scale == "css":
+            options["scale"] = "css"
+        return self.page.screenshot(type="png", full_page=False, **options)
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at pixel coordinates via the mouse."""

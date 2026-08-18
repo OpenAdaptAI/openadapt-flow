@@ -30,11 +30,13 @@
 | `tests/e2e/test_record_compile_replay.py` | test | ci (required PR gate (e2e-browser)) | supported | Records the MockMed browser demo once, compiles it, and replays it under baseline + theme/move/rename drift and parameter substitution through the headless-browser Backend. |
 | `tests/test_mockmed.py` | test | ci (required PR gate (test)) | supported | The reference browser demo app and its drift screens render deterministically (no CSS transitions), so replay is repeatable. |
 | `tests/test_replayer.py` | test | ci (required PR gate (test)) | supported | The deterministic replayer resolves steps, substitutes parameters, enforces postconditions and the risk gate — no model in the loop. |
+| `tests/test_browser_attach.py` | test | ci (required PR gate (test)) | supported | Three real Chromium CDP-attach trials record and compile the same synthetic workflow, exclude password values before persistence, preserve CSS-pixel frame/coordinate alignment, and detach without closing the external browser. A live case records and compiles actions across viewport and monitor-scale changes. It binds each event to its exact frame dimensions. A separate live case refuses an action that overlaps the transition. Unit cases refuse remote endpoints, cross-origin selectors and navigation, iframe events, invalid viewport evidence, and ambiguous same-origin tabs. |
 
 **Caveats (honest limits):**
 
 - "Supported" is scoped to the reference headless-browser backend in this registry. Desktop and remote-display workflows use the separately scoped acceptance and code-qualified claims below.
 - The full record->compile->replay browser suite runs in the required e2e-browser PR gate and repeats in the weekly compatibility matrix.
+- Existing-session attachment is Chromium-only and loopback-only. It requires a dedicated browser process started with remote debugging. It does not claim support for the Capture Chrome extension prototype or direct extension replay.
 
 ### `deterministic-zero-model-replay` — supported — bound to required CI pass evidence
 

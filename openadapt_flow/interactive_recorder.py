@@ -40,11 +40,14 @@ pipe, never written to meta/events/frames/bundle. See ``ir.Step.secret`` and
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import io
 import ipaddress
 import json
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -79,6 +82,83 @@ class BrowserAttachError(RuntimeError):
 
 
 _PARTIAL_RECORDING_PREFIX = ".openadapt-recording-partial-"
+
+
+def _rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically rename a directory without replacing any destination."""
+
+    if os.name == "nt":
+        os.rename(source, destination)
+        return
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    result: int
+    if sys.platform == "linux":
+        try:
+            renameat2 = libc.renameat2
+        except AttributeError as exc:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace directory promotion is unavailable",
+                destination,
+            ) from exc
+        renameat2.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameat2.restype = ctypes.c_int
+        result = int(
+            renameat2(
+                -100,  # AT_FDCWD
+                source_bytes,
+                -100,  # AT_FDCWD
+                destination_bytes,
+                1,  # RENAME_NOREPLACE
+            )
+        )
+    elif sys.platform == "darwin":
+        try:
+            renamex_np = libc.renamex_np
+        except AttributeError as exc:
+            raise OSError(
+                errno.ENOTSUP,
+                "atomic no-replace directory promotion is unavailable",
+                destination,
+            ) from exc
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        result = int(
+            renamex_np(
+                source_bytes,
+                destination_bytes,
+                0x00000004,  # RENAME_EXCL
+            )
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory promotion is unavailable",
+            destination,
+        )
+
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise OSError(error_number, os.strerror(error_number), destination)
+
+
+def _secret_screenshot_selectors(secret_fields: set[str]) -> tuple[str, ...]:
+    """Return selectors that mask password and declared-secret fields."""
+
+    selectors = ["input[type='password']"]
+    for field in sorted(secret_fields):
+        encoded = json.dumps(field)
+        selectors.append(f"[name={encoded}], [id={encoded}]")
+    return tuple(selectors)
 
 
 def _http_origin(url: str, *, label: str) -> tuple[str, str, int]:
@@ -747,6 +827,9 @@ class InteractiveRecorder:
             self.backend = PlaywrightBackend(
                 self.page,
                 screenshot_scale="device" if self._owns_browser else "css",
+                screenshot_mask_selectors=_secret_screenshot_selectors(
+                    self._secret_fields
+                ),
             )
             assert self._recording_dir is not None
             self.recorder = Recorder(
@@ -819,6 +902,8 @@ class InteractiveRecorder:
             self._flush_scroll()
             assert self.recorder is not None
             out = self.recorder.finish()
+            if self._listener_error is not None:
+                raise self._listener_error
             meta_path = out / "meta.json"
             meta = json.loads(meta_path.read_text())
             meta["source"] = (
@@ -832,7 +917,11 @@ class InteractiveRecorder:
                 meta["viewport_mode"] = "per-event"
                 meta["viewport_history"] = list(self._viewport_history)
             meta_path.write_text(json.dumps(meta, indent=2))
+            if self._listener_error is not None:
+                raise self._listener_error
             self._stop_browser_connection()
+            if self._listener_error is not None:
+                raise self._listener_error
             return self._promote_recording()
         except Exception:
             self.abort()
@@ -876,14 +965,14 @@ class InteractiveRecorder:
         """Atomically publish the complete recording at the requested path."""
 
         assert self._recording_dir is not None
-        if os.path.lexists(self._out_dir):
-            raise BrowserAttachError(
-                "the recording output appeared during capture; Flow refused to "
-                "replace it"
-            )
         try:
-            self._recording_dir.rename(self._out_dir)
+            _rename_directory_noreplace(self._recording_dir, self._out_dir)
         except OSError as exc:
+            if exc.errno in {errno.EEXIST, errno.ENOTEMPTY}:
+                raise BrowserAttachError(
+                    "the recording output appeared during capture; Flow refused to "
+                    "replace it"
+                ) from exc
             raise BrowserAttachError(
                 "the complete recording could not be published atomically"
             ) from exc

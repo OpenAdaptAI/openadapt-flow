@@ -73,6 +73,8 @@ EPHEMERAL_BUILD_EXCLUDES = {"/.hypothesis"}
 LOCAL_SENSITIVE_EXCLUDES = {
     "/.openadapt-chrome-profile",
     "/.openadapt-recording-partial-*",
+    "/**/.openadapt-chrome-profile",
+    "/**/.openadapt-recording-partial-*",
 }
 GENERATED_BENCHMARK_EXCLUDES = {
     "/benchmark/**/api-delta-probe-*",
@@ -152,8 +154,8 @@ def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
     assert LOCAL_SENSITIVE_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert LOCAL_SENSITIVE_EXCLUDES <= set(targets["sdist"]["exclude"])
     assert {
-        "/.openadapt-chrome-profile/",
-        "/.openadapt-recording-partial-*/",
+        ".openadapt-chrome-profile/",
+        ".openadapt-recording-partial-*/",
     } <= gitignore
     assert GENERATED_BENCHMARK_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert GENERATED_BENCHMARK_EXCLUDES <= set(targets["sdist"]["exclude"])
@@ -174,6 +176,21 @@ def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
     assert "reliability_corpus" in REPOSITORY_ONLY_EVALUATION_PATH_TOKENS
     assert "benchmark/reliability/" in REPOSITORY_ONLY_EVALUATION_PATH_PREFIXES
     assert "tests/test_reliability.py" in REPOSITORY_ONLY_EVALUATION_EXACT_PATHS
+
+
+def test_local_sensitive_exclusions_apply_at_nested_paths() -> None:
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    targets = pyproject["tool"]["hatch"]["build"]["targets"]
+    gitignore = set((ROOT / ".gitignore").read_text().splitlines())
+    recursive = {
+        "/**/.openadapt-chrome-profile",
+        "/**/.openadapt-recording-partial-*",
+    }
+
+    assert recursive <= set(targets["wheel"]["exclude"])
+    assert recursive <= set(targets["sdist"]["exclude"])
+    assert ".openadapt-chrome-profile/" in gitignore
+    assert ".openadapt-recording-partial-*/" in gitignore
 
 
 def test_public_source_tree_excludes_private_data_and_recipes(tmp_path: Path) -> None:

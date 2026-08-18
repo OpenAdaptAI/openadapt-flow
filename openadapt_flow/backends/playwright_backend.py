@@ -708,6 +708,7 @@ class PlaywrightBackend:
         page: "Page",
         *,
         screenshot_scale: Literal["css", "device"] = "device",
+        screenshot_mask_selectors: tuple[str, ...] = (),
     ) -> None:
         """Wrap an existing Playwright page.
 
@@ -718,9 +719,16 @@ class PlaywrightBackend:
                 default. A browser attached through CDP uses ``css`` so DOM
                 event coordinates and retained frame pixels stay in the same
                 coordinate system even on a high-density display.
+            screenshot_mask_selectors: CSS selectors whose matching elements
+                are blacked out by Chromium before screenshot bytes reach
+                Python. The interactive recorder uses this for password and
+                declared-secret fields on every retained frame.
         """
         self.page = page
         self._screenshot_scale = screenshot_scale
+        self._screenshot_masks = [
+            page.locator(selector) for selector in screenshot_mask_selectors
+        ]
         # Opaque per-backend key keeps the WeakMap private from ordinary page
         # code. Python retains only token material keyed by the public
         # SHA-256 fingerprint; target/row text stays page-local and ephemeral.
@@ -2229,6 +2237,9 @@ class PlaywrightBackend:
         options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
             options["scale"] = "css"
+        if self._screenshot_masks:
+            options["mask"] = self._screenshot_masks
+            options["mask_color"] = "#000000"
         return self.page.screenshot(type="png", full_page=False, **options)
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:

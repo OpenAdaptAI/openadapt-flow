@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from urllib.request import urlopen
 
 import pytest
+from PIL import Image
 
 from openadapt_flow.__main__ import main
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
@@ -140,6 +141,38 @@ def test_attached_backend_uses_live_css_viewport_and_css_screenshot() -> None:
     assert page.screenshot_options["scale"] == "css"
 
 
+def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> None:
+    class Page:
+        viewport_size = {"width": 1280, "height": 800}
+
+        def __init__(self) -> None:
+            self.screenshot_options: list[dict] = []
+
+        def locator(self, selector):
+            return f"locator:{selector}"
+
+        def screenshot(self, **kwargs):
+            self.screenshot_options.append(kwargs)
+            return b"png"
+
+    selectors = (
+        "input[type='password']",
+        '[name="token"], [id="token"]',
+    )
+    page = Page()
+    backend = PlaywrightBackend(  # type: ignore[arg-type]
+        page,
+        screenshot_mask_selectors=selectors,
+    )
+
+    assert backend.screenshot() == b"png"
+    assert backend.screenshot() == b"png"
+    assert len(page.screenshot_options) == 2
+    for options in page.screenshot_options:
+        assert options["mask"] == [f"locator:{selector}" for selector in selectors]
+        assert options["mask_color"] == "#000000"
+
+
 def test_attached_recorder_api_refuses_incompatible_options(tmp_path: Path) -> None:
     with pytest.raises(BrowserAttachError, match="requires a browser CDP"):
         InteractiveRecorder(
@@ -236,6 +269,34 @@ def test_attached_recorder_refuses_existing_output_without_changing_it(
     assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
 
 
+def test_attached_recorder_refuses_output_created_during_promotion(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "recording"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+    assert session._recording_dir is not None
+    (session._recording_dir / "complete.txt").write_text("new recording")
+
+    out.mkdir()
+    original_identity = out.stat()
+    with pytest.raises(BrowserAttachError, match="appeared during capture"):
+        session._promote_recording()
+
+    current_identity = out.stat()
+    assert (current_identity.st_dev, current_identity.st_ino) == (
+        original_identity.st_dev,
+        original_identity.st_ino,
+    )
+    session.abort()
+    assert out.is_dir()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
 def test_attached_tab_close_discards_partial_output(tmp_path: Path) -> None:
     out = tmp_path / "recording"
     session = InteractiveRecorder(
@@ -248,6 +309,52 @@ def test_attached_tab_close_discards_partial_output(tmp_path: Path) -> None:
     (session._recording_dir / "meta.json").write_text('{"id":"not-final"}\n')
 
     session._handle_page_close()
+
+    with pytest.raises(BrowserAttachError, match="selected browser tab closed"):
+        session.finish()
+    assert not out.exists()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
+def test_attached_tab_close_during_finalization_discards_metadata(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "recording"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+
+    class ClosingPage:
+        url = "https://app.example.test/"
+        frames: list = []
+
+        def __init__(self) -> None:
+            self.main_frame = SimpleNamespace(url=self.url)
+
+        def evaluate(self, _script):
+            return {"width": 1280, "height": 800, "dpr": 1}
+
+        def remove_listener(self, event, listener):
+            if event == "close":
+                listener()
+
+    session.page = ClosingPage()
+    session._page_lifecycle_listeners_installed = True
+    session._attached_geometry = (1280, 800, 1.0)
+    session._initial_attached_viewport = (1280, 800)
+
+    class ClosingRecorder:
+        def finish(self):
+            assert session._recording_dir is not None
+            (session._recording_dir / "meta.json").write_text(
+                json.dumps({"viewport": [1280, 800]})
+            )
+            return session._recording_dir
+
+    session.recorder = ClosingRecorder()  # type: ignore[assignment]
 
     with pytest.raises(BrowserAttachError, match="selected browser tab closed"):
         session.finish()
@@ -413,7 +520,7 @@ _ATTACH_HTML = b"""<!doctype html>
 <body>
   <label for="note">Note</label><input id="note" name="note">
   <label for="password">Password</label>
-  <input id="password" name="password" type="password">
+  <input id="password" name="password" type="text">
   <button id="save" onclick="document.body.dataset.saved='yes'">Save</button>
   <iframe id="child" srcdoc="<button id='inside'>Inside frame</button>"></iframe>
 </body></html>"""
@@ -505,6 +612,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
 
         for trial in range(3):
             secret = f"ATTACH-SECRET-{trial}-NEVER-PERSIST"
+            secret_rect: dict[str, int] = {}
 
             def drive(page, pump, *, secret_value=secret, trial_number=trial):
                 page.evaluate(
@@ -519,6 +627,14 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 pump()
                 pump()
                 page.click("#password")
+                box = page.locator("#password").bounding_box()
+                assert box is not None
+                secret_rect.update(
+                    x=round(box["x"]),
+                    y=round(box["y"]),
+                    width=round(box["width"]),
+                    height=round(box["height"]),
+                )
                 page.keyboard.type(secret_value)
                 pump()
                 pump()
@@ -530,6 +646,7 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             recording = record_interactive(
                 attach_app_url,
                 tmp_path / f"recording-{trial}",
+                secret_fields=("password",),
                 param_fields=("note",),
                 cdp_endpoint=endpoint,
                 script=drive,
@@ -541,6 +658,20 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             assert secret not in json.dumps(meta)
             assert secret not in events_text
             assert meta["viewport"][0] > 0 and meta["viewport"][1] > 0
+            events = [json.loads(line) for line in events_text.splitlines()]
+            secret_event = next(event for event in events if event.get("secret"))
+            next_before = Image.open(
+                recording / "frames" / f"{int(secret_event['i']) + 1:04d}_before.png"
+            ).convert("RGB")
+            crop = next_before.crop(
+                (
+                    secret_rect["x"],
+                    secret_rect["y"],
+                    secret_rect["x"] + secret_rect["width"],
+                    secret_rect["y"] + secret_rect["height"],
+                )
+            )
+            assert all(extrema == (0, 0) for extrema in crop.getextrema())
 
             bundle = tmp_path / f"bundle-{trial}"
             workflow = compile_recording(

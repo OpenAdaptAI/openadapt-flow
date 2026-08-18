@@ -397,12 +397,19 @@ def test_manual_publish_requires_dispatched_exact_target_full_matrix() -> None:
     assert validate_index < publish_index
 
 
-def _metadata_bytes(*, version: str = "1.0", license_name: str = "MIT") -> bytes:
+def _metadata_bytes(
+    *,
+    version: str = "1.0",
+    license_name: str = "MIT",
+    lifecycle: str | None = "Development Status :: 4 - Beta",
+) -> bytes:
+    lifecycle_metadata = f"Classifier: {lifecycle}\n" if lifecycle else ""
     return (
         f"Metadata-Version: 2.4\n"
         f"Name: openadapt-flow\n"
         f"Version: {version}\n"
         f"License: {license_name}\n"
+        f"{lifecycle_metadata}"
         f"License-File: LICENSE\n"
         f"\n"
     ).encode()
@@ -499,6 +506,16 @@ def test_wheel_requires_mit_license_and_excludes_openimis_surface(
     with pytest.raises(ValueError, match="License: MIT"):
         validate_wheel_license_boundary(changed_metadata)
 
+    for lifecycle in (None, "Development Status :: 2 - Pre-Alpha"):
+        changed_lifecycle = tmp_path / f"changed-lifecycle-{lifecycle}.whl"
+        _write_wheel(
+            changed_lifecycle,
+            {license_path, metadata_path},
+            metadata_bytes=_metadata_bytes(lifecycle=lifecycle),
+        )
+        with pytest.raises(ValueError, match="Development Status :: 4 - Beta"):
+            validate_wheel_license_boundary(changed_lifecycle)
+
     for index, forbidden in enumerate(
         (
             "benchmark/openimis_claims/compose.yml",
@@ -551,6 +568,16 @@ def test_sdist_requires_mit_license_and_excludes_openimis_surface(
     )
     with pytest.raises(ValueError, match="License: MIT"):
         validate_sdist_license_boundary(changed_metadata)
+
+    for lifecycle in (None, "Development Status :: 2 - Pre-Alpha"):
+        changed_lifecycle = tmp_path / f"changed-lifecycle-{lifecycle}.tar.gz"
+        _write_sdist(
+            changed_lifecycle,
+            clean_members,
+            metadata_bytes=_metadata_bytes(lifecycle=lifecycle),
+        )
+        with pytest.raises(ValueError, match="Development Status :: 4 - Beta"):
+            validate_sdist_license_boundary(changed_lifecycle)
 
     forbidden_members = {
         *FORBIDDEN_SDIST_PATHS,

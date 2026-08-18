@@ -1117,6 +1117,17 @@ def _validate_package_metadata(
         )
     if metadata.get("License") != "MIT":
         raise ValueError(f"{source} does not declare License: MIT")
+    lifecycle_classifiers = [
+        classifier
+        for classifier in metadata.get_all("Classifier", [])
+        if classifier.startswith("Development Status ::")
+    ]
+    expected_lifecycle = "Development Status :: 4 - Beta"
+    if lifecycle_classifiers != [expected_lifecycle]:
+        raise ValueError(
+            f"{source} must declare exactly {expected_lifecycle!r}; "
+            f"found {lifecycle_classifiers}"
+        )
     license_files = metadata.get_all("License-File", [])
     if license_files != ["LICENSE"]:
         raise ValueError(

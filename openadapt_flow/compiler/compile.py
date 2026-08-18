@@ -1793,12 +1793,22 @@ def compile_recording(
             png=before_png,
             event_index=i,
         )
-        _validated_event_viewport(
+        after_viewport = _validated_event_viewport(
             event,
             key="viewport_after",
             png=after_png,
             event_index=i,
         )
+        if (
+            before_viewport is not None
+            and after_viewport is not None
+            and before_viewport != after_viewport
+        ):
+            raise ValueError(
+                f"viewport changed during event {i}: before "
+                f"{before_viewport[0]}x{before_viewport[1]}, after "
+                f"{after_viewport[0]}x{after_viewport[1]}"
+            )
 
         if kind in ("click", "double_click", "right_click", "drag"):
             if before_png is None:

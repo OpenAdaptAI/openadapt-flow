@@ -177,6 +177,84 @@ def test_attached_recorder_reads_geometry_and_refuses_origin_drift(
     assert "DO_NOT_PRINT" not in str(caught.value)
 
 
+def test_attached_recorder_retains_main_frame_origin_violation(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "recording"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+    frame = SimpleNamespace(url="https://other.example.test/temporary")
+    session.page = SimpleNamespace(main_frame=frame)
+
+    session._handle_frame_navigation(frame)
+    frame.url = "https://app.example.test/returned"
+    session._handle_frame_navigation(frame)
+
+    assert session.done is True
+    assert session._listener_error is not None
+    assert "left the declared application origin" in str(session._listener_error)
+    with pytest.raises(BrowserAttachError, match="left the declared"):
+        session.finish()
+    assert not out.exists()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
+def test_attached_recorder_refuses_existing_output_without_changing_it(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "recording"
+    frames = out / "frames"
+    frames.mkdir(parents=True)
+    (out / "meta.json").write_text('{"id":"complete-existing"}\n')
+    (out / "events.jsonl").write_text('{"i":0,"kind":"key"}\n')
+    (frames / "0000_before.png").write_bytes(b"SENSITIVE-FRAME")
+    before = {
+        path.relative_to(out): path.read_bytes()
+        for path in out.rglob("*")
+        if path.is_file()
+    }
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+
+    with pytest.raises(BrowserAttachError, match="output already exists"):
+        session._prepare_recording_dir()
+    session.abort()
+
+    after = {
+        path.relative_to(out): path.read_bytes()
+        for path in out.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
+def test_attached_tab_close_discards_partial_output(tmp_path: Path) -> None:
+    out = tmp_path / "recording"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+    assert session._recording_dir is not None
+    (session._recording_dir / "meta.json").write_text('{"id":"not-final"}\n')
+
+    session._handle_page_close()
+
+    with pytest.raises(BrowserAttachError, match="selected browser tab closed"):
+        session.finish()
+    assert not out.exists()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
 def test_attached_recorder_refuses_iframe_events(tmp_path: Path) -> None:
     session = InteractiveRecorder(
         "https://app.example.test/",
@@ -493,6 +571,24 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 script=click_inside_existing_iframe,
             )
         assert not (iframe_recording / "meta.json").exists()
+        assert process.poll() is None
+
+        origin_bounce_recording = tmp_path / "recording-origin-bounce-refusal"
+        other_origin = attach_app_url.replace("127.0.0.1", "localhost")
+
+        def leave_origin_and_return(page, pump):
+            page.goto(other_origin)
+            page.goto(attach_app_url)
+            pump()
+
+        with pytest.raises(BrowserAttachError, match="left the declared"):
+            record_interactive(
+                attach_app_url,
+                origin_bounce_recording,
+                cdp_endpoint=endpoint,
+                script=leave_origin_and_return,
+            )
+        assert not origin_bounce_recording.exists()
         assert process.poll() is None
 
         overlap_recording = tmp_path / "recording-resize-overlap-refusal"

@@ -204,6 +204,46 @@ class TestCompileRecording:
         assert len(workflow.steps) == 2
         assert workflow.viewport == VIEWPORT
 
+    def test_per_event_viewport_cannot_change_within_one_step(
+        self, tmp_path: Path
+    ) -> None:
+        recording = tmp_path / "recording"
+        (recording / "frames").mkdir(parents=True)
+        write_frame(recording, 0, "before", blank())
+        write_frame(
+            recording,
+            0,
+            "after",
+            np.full((600, 900, 3), 245, dtype=np.uint8),
+        )
+        (recording / "events.jsonl").write_text(
+            json.dumps(
+                {
+                    "i": 0,
+                    "kind": "key",
+                    "key": "Enter",
+                    "t": 1.0,
+                    "viewport_before": [1280, 800],
+                    "viewport_after": [900, 600],
+                }
+            )
+            + "\n"
+        )
+        (recording / "meta.json").write_text(
+            json.dumps(
+                {
+                    "id": "mid-event-resize",
+                    "created_at": "2026-08-18T00:00:00+00:00",
+                    "viewport": list(VIEWPORT),
+                    "viewport_mode": "per-event",
+                    "params": {},
+                }
+            )
+        )
+
+        with pytest.raises(ValueError, match="viewport changed during event 0"):
+            compile_recording(recording, tmp_path / "bundle", name="mid-resize")
+
     def test_per_event_viewport_must_match_retained_png(self, tmp_path: Path) -> None:
         recording = tmp_path / "recording"
         (recording / "frames").mkdir(parents=True)

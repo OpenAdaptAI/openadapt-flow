@@ -70,6 +70,10 @@ SOURCE_BOUNDARY_EXCLUDES = {
     "/tests/test_reliability.py",
 }
 EPHEMERAL_BUILD_EXCLUDES = {"/.hypothesis"}
+LOCAL_SENSITIVE_EXCLUDES = {
+    "/.openadapt-chrome-profile",
+    "/.openadapt-recording-partial-*",
+}
 GENERATED_BENCHMARK_EXCLUDES = {
     "/benchmark/**/api-delta-probe-*",
     "/benchmark/**/bundle-live*",
@@ -139,11 +143,18 @@ def test_required_wheel_job_builds_and_validates_actual_sdist() -> None:
 def test_wheel_and_sdist_exclude_repository_only_evidence() -> None:
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
     targets = pyproject["tool"]["hatch"]["build"]["targets"]
+    gitignore = set((ROOT / ".gitignore").read_text().splitlines())
 
     assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert SOURCE_BOUNDARY_EXCLUDES <= set(targets["sdist"]["exclude"])
     assert EPHEMERAL_BUILD_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert EPHEMERAL_BUILD_EXCLUDES <= set(targets["sdist"]["exclude"])
+    assert LOCAL_SENSITIVE_EXCLUDES <= set(targets["wheel"]["exclude"])
+    assert LOCAL_SENSITIVE_EXCLUDES <= set(targets["sdist"]["exclude"])
+    assert {
+        "/.openadapt-chrome-profile/",
+        "/.openadapt-recording-partial-*/",
+    } <= gitignore
     assert GENERATED_BENCHMARK_EXCLUDES <= set(targets["wheel"]["exclude"])
     assert GENERATED_BENCHMARK_EXCLUDES <= set(targets["sdist"]["exclude"])
 
@@ -571,6 +582,30 @@ def test_sdist_requires_mit_license_and_excludes_openimis_surface(
         )
         with pytest.raises(ValueError, match="repository-only openIMIS"):
             validate_sdist_license_boundary(mixed)
+
+
+def test_release_artifacts_refuse_local_browser_and_partial_recordings(
+    tmp_path: Path,
+) -> None:
+    sdist_base = {*REQUIRED_SDIST_PATHS, "PKG-INFO"}
+    wheel_base = {
+        "openadapt_flow-1.0.dist-info/licenses/LICENSE",
+        "openadapt_flow-1.0.dist-info/METADATA",
+    }
+    sensitive_paths = (
+        ".openadapt-chrome-profile/Cookies",
+        ".openadapt-recording-partial-session/events.jsonl",
+    )
+    for index, sensitive in enumerate(sensitive_paths):
+        sdist = tmp_path / f"sensitive-{index}.tar.gz"
+        _write_sdist(sdist, {*sdist_base, sensitive})
+        with pytest.raises(ValueError, match="browser profile, unpublished"):
+            validate_sdist_license_boundary(sdist)
+
+        wheel = tmp_path / f"sensitive-{index}.whl"
+        _write_wheel(wheel, {*wheel_base, sensitive})
+        with pytest.raises(ValueError, match="browser profile, unpublished"):
+            validate_wheel_license_boundary(wheel)
 
 
 def test_wheel_refuses_private_corpus_material(tmp_path: Path) -> None:

@@ -20,7 +20,7 @@ change.
 ```bash
 openadapt-flow record --backend web \
   --url https://your.app \
-  --out recording
+  --out recordings/browser-session
 ```
 
 Flow opens the URL. Perform the workflow. Then press Ctrl-C in the terminal or
@@ -38,7 +38,7 @@ macOS with Google Chrome:
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
-  --user-data-dir="./.openadapt-chrome-profile"
+  --user-data-dir="$HOME/Library/Application Support/OpenAdapt/ChromeRecorderProfile"
 ```
 
 Linux with Google Chrome or Chromium:
@@ -47,7 +47,7 @@ Linux with Google Chrome or Chromium:
 google-chrome \
   --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 \
-  --user-data-dir="./.openadapt-chrome-profile"
+  --user-data-dir="${XDG_DATA_HOME:-$HOME/.local/share}/openadapt/chrome-recorder-profile"
 ```
 
 Windows PowerShell with Google Chrome:
@@ -56,7 +56,7 @@ Windows PowerShell with Google Chrome:
 & "$env:ProgramFiles\Google\Chrome\Application\chrome.exe" `
   --remote-debugging-address=127.0.0.1 `
   --remote-debugging-port=9222 `
-  --user-data-dir="$PWD\.openadapt-chrome-profile"
+  --user-data-dir="$env:LOCALAPPDATA\OpenAdapt\ChromeRecorderProfile"
 ```
 
 Open and sign in to the application in that browser. Then attach the recorder:
@@ -65,8 +65,12 @@ Open and sign in to the application in that browser. Then attach the recorder:
 openadapt-flow record --backend web \
   --url https://your.app \
   --browser-cdp-endpoint http://127.0.0.1:9222 \
-  --out recording
+  --out recordings/browser-session
 ```
+
+Keep the selected tab open during recording. Press `Ctrl-C` in the terminal to
+finish. Flow retains the final evidence and then confirms the output path. It
+refuses a closed tab and does not publish incomplete metadata.
 
 Flow selects the sole open HTTP or HTTPS tab on the `--url` origin. It does not
 navigate the tab. It also does not close the tab or browser when recording
@@ -80,7 +84,7 @@ openadapt-flow record --backend web \
   --url https://your.app \
   --browser-cdp-endpoint http://127.0.0.1:9222 \
   --browser-page-url 'https://your.app/work/items?view=open' \
-  --out recording
+  --out recordings/browser-session-selected
 ```
 
 Diagnostic messages omit URL query and fragment values. The exact selector is
@@ -102,6 +106,9 @@ sensitive recording data.
   metadata.
 - Attach mode does not combine with `--headless`. The external browser owns
   its display mode.
+- The `--out` path must not exist. Flow writes to a new temporary sibling and
+  publishes that directory only after it writes the final metadata. A refusal
+  removes the temporary output and does not change an existing recording.
 - Input event payloads carry a unique recording-session binding and have a
   1 MB limit. Flow removes the current document listeners when it detaches.
 - Attached screenshots use CSS pixels and the actual live viewport. Thus, DOM

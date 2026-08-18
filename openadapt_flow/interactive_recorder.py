@@ -43,6 +43,9 @@ from __future__ import annotations
 import io
 import ipaddress
 import json
+import os
+import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -73,6 +76,9 @@ _SPECIAL_KEYS = (
 
 class BrowserAttachError(RuntimeError):
     """A safe browser-attachment precondition was not met."""
+
+
+_PARTIAL_RECORDING_PREFIX = ".openadapt-recording-partial-"
 
 
 def _http_origin(url: str, *, label: str) -> tuple[str, str, int]:
@@ -634,9 +640,13 @@ class InteractiveRecorder:
         self.done = False
 
         # Set on start().
+        self._recording_dir: Optional[Path] = None
         self._pw = None
         self._browser = None
         self.page = None
+        self._page_close_listener = self._handle_page_close
+        self._frame_navigation_listener = self._handle_frame_navigation
+        self._page_lifecycle_listeners_installed = False
         self.backend: Optional[PlaywrightBackend] = None
         self.recorder: Optional[Recorder] = None
         self._last_frame: bytes = b""
@@ -651,14 +661,15 @@ class InteractiveRecorder:
     def start(self) -> None:
         """Launch or attach, install listeners, and capture the first frame."""
 
-        if self._owns_browser:
-            from openadapt_flow._browser_setup import ensure_chromium_installed
-
-            ensure_chromium_installed()
-        from playwright.sync_api import sync_playwright
-
-        self._pw = sync_playwright().start()
+        self._prepare_recording_dir()
         try:
+            if self._owns_browser:
+                from openadapt_flow._browser_setup import ensure_chromium_installed
+
+                ensure_chromium_installed()
+            from playwright.sync_api import sync_playwright
+
+            self._pw = sync_playwright().start()
             if self._owns_browser:
                 self._browser = self._pw.chromium.launch(headless=self._headless)
                 self.page = self._browser.new_page(
@@ -685,7 +696,9 @@ class InteractiveRecorder:
                     page_url=self._browser_page_url,
                 )
 
-            self.page.on("close", lambda _=None: setattr(self, "done", True))
+            self.page.on("close", self._page_close_listener)
+            self.page.on("framenavigated", self._frame_navigation_listener)
+            self._page_lifecycle_listeners_installed = True
             self.page.expose_binding(
                 self._binding_name,
                 lambda source, detail: self._enqueue_browser_event(
@@ -735,9 +748,10 @@ class InteractiveRecorder:
                 self.page,
                 screenshot_scale="device" if self._owns_browser else "css",
             )
+            assert self._recording_dir is not None
             self.recorder = Recorder(
                 self.backend,
-                self._out_dir,
+                self._recording_dir,
                 app_url=self._url,
                 system_of_record_reader=self._system_of_record_reader,
                 **self._settle,
@@ -748,14 +762,15 @@ class InteractiveRecorder:
             else:
                 self._rebaseline_attached_viewport()
         except Exception:
-            self._stop_browser_connection()
+            self.abort()
             raise
 
     def run(self) -> Path:
         """Pump until completion, an operator stop, or a closed window."""
         if self._stop_when is None:
             finish_instruction = (
-                "Press Ctrl-C here (or close the selected browser tab) to finish."
+                "Press Ctrl-C here to finish. Keep the selected browser tab open "
+                "until Flow confirms the recording."
                 if not self._owns_browser
                 else "Press Ctrl-C here (or close the browser window) to finish."
             )
@@ -802,11 +817,7 @@ class InteractiveRecorder:
             self._drain_event_queue()
             self._flush_type()
             self._flush_scroll()
-        except Exception:
-            self.abort()
-            raise
-        assert self.recorder is not None
-        try:
+            assert self.recorder is not None
             out = self.recorder.finish()
             meta_path = out / "meta.json"
             meta = json.loads(meta_path.read_text())
@@ -821,17 +832,102 @@ class InteractiveRecorder:
                 meta["viewport_mode"] = "per-event"
                 meta["viewport_history"] = list(self._viewport_history)
             meta_path.write_text(json.dumps(meta, indent=2))
-        finally:
             self._stop_browser_connection()
-        return out
+            return self._promote_recording()
+        except Exception:
+            self.abort()
+            raise
 
     def abort(self) -> None:
-        """Detach after a refused or failed recording without writing meta.json."""
+        """Detach and remove only this session's unpublished temporary output."""
 
         self.done = True
-        self._cleanup_page_listeners()
         self._pyq.clear()
-        self._stop_browser_connection()
+        try:
+            self._cleanup_page_listeners()
+        finally:
+            try:
+                self._stop_browser_connection()
+            finally:
+                self._discard_recording_dir()
+
+    def _prepare_recording_dir(self) -> None:
+        """Reserve a fresh sibling directory without changing the final path."""
+
+        if self._recording_dir is not None:
+            return
+        if os.path.lexists(self._out_dir):
+            raise BrowserAttachError(
+                "the recording output already exists; choose a new --out directory"
+            )
+        try:
+            self._out_dir.parent.mkdir(parents=True, exist_ok=True)
+            temporary = tempfile.mkdtemp(
+                prefix=f"{_PARTIAL_RECORDING_PREFIX}{self._out_dir.name}-",
+                dir=self._out_dir.parent,
+            )
+        except OSError as exc:
+            raise BrowserAttachError(
+                "the temporary recording output could not be created"
+            ) from exc
+        self._recording_dir = Path(temporary)
+
+    def _promote_recording(self) -> Path:
+        """Atomically publish the complete recording at the requested path."""
+
+        assert self._recording_dir is not None
+        if os.path.lexists(self._out_dir):
+            raise BrowserAttachError(
+                "the recording output appeared during capture; Flow refused to "
+                "replace it"
+            )
+        try:
+            self._recording_dir.rename(self._out_dir)
+        except OSError as exc:
+            raise BrowserAttachError(
+                "the complete recording could not be published atomically"
+            ) from exc
+        self._recording_dir = None
+        return self._out_dir
+
+    def _discard_recording_dir(self) -> None:
+        """Delete only the temporary directory that this session created."""
+
+        recording_dir, self._recording_dir = self._recording_dir, None
+        if recording_dir is None or not recording_dir.exists():
+            return
+        shutil.rmtree(recording_dir)
+
+    def _handle_page_close(self, _page: Any = None) -> None:
+        """Retain a refusal when an attached tab closes before finalization."""
+
+        self.done = True
+        if not self._owns_browser and self._listener_error is None:
+            self._listener_error = BrowserAttachError(
+                "the selected browser tab closed before Flow could retain the "
+                "final evidence; recording stopped without complete metadata"
+            )
+
+    def _handle_frame_navigation(self, frame: Any) -> None:
+        """Retain the first selected-main-frame origin violation."""
+
+        if self._owns_browser or self.page is None or self._listener_error is not None:
+            return
+        try:
+            if frame is not self.page.main_frame:
+                return
+            current_origin = _http_origin(
+                str(frame.url),
+                label="the selected browser tab URL",
+            )
+        except Exception:
+            current_origin = None
+        if current_origin != self._attached_origin:
+            self._listener_error = BrowserAttachError(
+                "the selected browser tab left the declared application origin; "
+                "recording was refused"
+            )
+            self.done = True
 
     def _enqueue_browser_event(
         self,
@@ -961,6 +1057,16 @@ class InteractiveRecorder:
         """Close an owned browser or detach without closing an external one."""
 
         self._cleanup_page_listeners()
+        if self.page is not None and self._page_lifecycle_listeners_installed:
+            for event, listener in (
+                ("close", self._page_close_listener),
+                ("framenavigated", self._frame_navigation_listener),
+            ):
+                try:
+                    self.page.remove_listener(event, listener)
+                except Exception:
+                    pass
+            self._page_lifecycle_listeners_installed = False
         browser, self._browser = self._browser, None
         playwright, self._pw = self._pw, None
         try:

@@ -310,17 +310,27 @@ Route a production receipt through
 `sanitize` / `review-sanitized` / `approve-sanitized` before it crosses a trust
 boundary.
 
-**Secrets never get recorded.** An `input[type=password]` field (or any field
-named with `--secret <name>`) is a secret parameter: its value is never written
-to the recording, the events log, the compiled bundle, or the saved frames (its
-region is redacted). At replay it is injected from the environment and a missing
-one fails fast:
+**Secret input values stay page-local.** An `input[type=password]` field (or a
+field named with `--secret <name>`) becomes a secret parameter. Flow does not
+send its literal to Python. It masks the bound field region in saved frames and
+removes the literal and its common URL-encoded forms from later URL, title,
+label, and structural text in the same document. A shadow field whose identity
+can change must use a host with the same declared name or ID; Flow masks the
+complete host. It refuses an unbound shadow input before it accepts a value. At
+replay, Flow injects the secret from the environment and fails fast when it is
+absent:
 
 ```bash
 openadapt-flow record --backend web --url https://your.app --out rec --secret password
 export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
+
+This source-time contract does not track an application-defined transform of a
+secret, an application copy into an unrelated visible element, or a reflection
+that first appears after a document navigation. Those pixels and new-document
+metadata remain raw recording evidence. Keep every raw recording inside its
+approved local boundary.
 
 **Compiled is not the same as certified safe.** `lint` reports a bundle's
 coverage gaps (clicks that act with no identity check, steps that assert

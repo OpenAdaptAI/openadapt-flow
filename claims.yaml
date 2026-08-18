@@ -71,12 +71,14 @@ claims:
           Three real Chromium CDP-attach trials record and compile the same
           synthetic workflow, exclude password values before persistence,
           preserve CSS-pixel frame/coordinate alignment, and detach without
-          closing the external browser. A live case records and compiles actions
-          across viewport and monitor-scale changes. It binds each event to its
-          exact frame dimensions. A separate live case refuses an action that
-          overlaps the transition. Unit cases refuse remote endpoints,
-          cross-origin selectors and navigation, iframe events, invalid viewport
-          evidence, and ambiguous same-origin tabs.
+          closing the external browser. The same live campaign covers same-task
+          replacement, declared open and closed shadow hosts, contenteditable
+          click metadata, and URL/title reflection. A live case records and
+          compiles actions across viewport and monitor-scale changes. It binds
+          each event to its exact frame dimensions. A separate live case
+          refuses an action that overlaps the transition. Unit cases refuse
+          remote endpoints, cross-origin selectors and navigation, iframe
+          events, invalid viewport evidence, and ambiguous same-origin tabs.
     caveats:
       - >-
         "Supported" is scoped to the reference headless-browser backend in this

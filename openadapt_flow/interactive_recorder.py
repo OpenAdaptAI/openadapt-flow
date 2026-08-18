@@ -30,12 +30,12 @@ Design (why it looks the way it does):
   mirroring ``PlaywrightBackend.structured_text_at`` exactly, so the compiler's
   DOM-identity tier arms on interactively-recorded bundles too.
 
-Secrets never touch Python: a field is secret when it is ``input[type=
-password]`` or its name/id is passed via ``--secret``. For a secret field the
-in-page listener emits NO value at all (only that a secret was typed, plus the
-field rectangle for redaction); the literal is never read, never sent over the
-pipe, never written to meta/events/frames/bundle. See ``ir.Step.secret`` and
-``docs`` for the full contract.
+Secret literals never touch Python: a field is secret when it is ``input[type=
+password]`` or its name/id is passed via ``--secret``. The page closure retains
+the current literal only to remove its exact and URL-encoded forms from later
+URL, title, label, and structural text. It emits no value for the secret input.
+The bound field or declared shadow host is masked in every retained frame. See
+``ir.Step.secret`` and ``docs`` for the full contract and reflection boundary.
 """
 
 from __future__ import annotations
@@ -364,13 +364,20 @@ _INIT_JS = r"""
   const SPECIAL = __SPECIAL_KEYS__;
   const listeners = [];
   const secretStates = new WeakMap();
+  const closedSecretHosts = new WeakMap();
+  const secretBoundaryStates = new WeakMap();
   const inputSessions = new WeakMap();
+  const trustedSecretFieldLabels = new WeakMap();
   const stickySecretElements = new Set();
+  const stickySecretValues = new Set();
+  const observedSecretRoots = new WeakSet();
   let nextInputSession = 0;
   let activeSecretElement = null;
   let activeSecretState = null;
   let resizeTimer = null;
   let secretObserver = null;
+  let privacyBoundaryError = null;
+  let opaqueSecretActive = false;
   let eventsStopped = false;
   let cleaned = false;
 
@@ -404,6 +411,7 @@ _INIT_JS = r"""
       try { el.removeAttribute(SECRET_MARKER); } catch (e) {}
     }
     stickySecretElements.clear();
+    stickySecretValues.clear();
     activeSecretElement = null;
     activeSecretState = null;
     const current = window[GLOBAL_KEY];
@@ -411,7 +419,15 @@ _INIT_JS = r"""
       try { delete window[GLOBAL_KEY]; } catch (e) { window[GLOBAL_KEY] = null; }
     }
   }
-  window[GLOBAL_KEY] = {sessionId: SESSION_ID, stopEvents, cleanup};
+  window[GLOBAL_KEY] = {
+    sessionId: SESSION_ID,
+    stopEvents,
+    cleanup,
+    privacyStatus: () => ({ok: privacyBoundaryError === null,
+                           error: privacyBoundaryError}),
+    registerExistingClosedShadowHost,
+    structuralState: safePageState,
+  };
 
   function identifierRect() {
     // Bounding rect of the operator-marked record-identifying field
@@ -434,11 +450,55 @@ _INIT_JS = r"""
     return null;
   }
 
-  function structuredIdentity(px, py) {
+  function currentSecretValue(el) {
+    try {
+      if (el && el.value != null) return String(el.value);
+      if (el && el.isContentEditable) return String(el.innerText || '');
+    } catch (e) {}
+    return '';
+  }
+
+  function rememberSecretValue(el) {
+    const value = currentSecretValue(el);
+    if (value) stickySecretValues.add(value);
+  }
+
+  function scrubSecretText(value) {
+    if (value == null) return value;
+    if (opaqueSecretActive) return String(value) ? '[secret]' : '';
+    let scrubbed = String(value);
+    const values = Array.from(stickySecretValues).sort(
+      (left, right) => right.length - left.length
+    );
+    for (const secret of values) {
+      const variants = new Set([secret]);
+      try { variants.add(encodeURIComponent(secret)); } catch (e) {}
+      try {
+        variants.add(new URLSearchParams([['value', secret]]).toString().slice(6));
+      } catch (e) {}
+      for (const variant of variants) {
+        if (variant) scrubbed = scrubbed.split(variant).join('[secret]');
+      }
+    }
+    return scrubbed;
+  }
+
+  function safePageState() {
+    if (opaqueSecretActive) {
+      return {url: location.origin + '/', title: ''};
+    }
+    return {
+      url: scrubSecretText(location.href),
+      title: scrubSecretText(document.title),
+    };
+  }
+
+  function structuredIdentity(px, py, eventTarget = null) {
     // Mirrors PlaywrightBackend.structured_text_at: the REAL characters of the
     // clicked row (MRN/name/DOB), excluding the clicked target's own cell.
     try {
-      const el = document.elementFromPoint(px, py);
+      refreshSecretBindings();
+      const el = eventTarget || document.elementFromPoint(px, py);
       if (!el) return null;
       const row = el.closest('tr, [role="row"], li, [role="listitem"]');
       if (!row) return null;
@@ -447,7 +507,7 @@ _INIT_JS = r"""
         || row.getAttribute('aria-label')
         || ''
       ).replace(/\s+/g, ' ').trim();
-      if (declared) return declared;
+      if (declared) return scrubSecretText(declared);
       const own = el.closest('td, th, [role="cell"], [role="gridcell"]') || el;
       own.setAttribute('data-oaflow-own', '1');
       let body = '';
@@ -459,14 +519,14 @@ _INIT_JS = r"""
       } finally {
         own.removeAttribute('data-oaflow-own');
       }
-      const joined = body.replace(/\s+/g, ' ').trim();
+      const joined = scrubSecretText(body.replace(/\s+/g, ' ').trim());
       return joined || null;
     } catch (e) { return null; }
   }
 
   function targetRole(el) {
     const explicit = el.getAttribute('role');
-    if (explicit) return explicit;
+    if (explicit) return scrubSecretText(explicit);
     const tag = el.tagName.toLowerCase();
     if (tag === 'button') return 'button';
     if (tag === 'a' && el.hasAttribute('href')) return 'link';
@@ -483,49 +543,57 @@ _INIT_JS = r"""
   }
 
   function targetName(el) {
+    // Never inspect visible text from a secret-bound contenteditable or one of
+    // its descendants. Its innerText is the secret value, not target identity.
+    if (secretTextEntryForNode(el)) return null;
     const aria = (el.getAttribute('aria-label') || '').trim();
-    if (aria) return aria;
+    if (aria) return scrubSecretText(aria);
     const labelledBy = (el.getAttribute('aria-labelledby') || '').trim();
     if (labelledBy) {
       const value = labelledBy.split(/\s+/).map((id) => {
         const node = document.getElementById(id);
         return node ? (node.textContent || '').trim() : '';
       }).filter(Boolean).join(' ');
-      if (value) return value;
+      if (value) return scrubSecretText(value);
     }
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-      if (label && (label.textContent || '').trim()) return label.textContent.trim();
+      if (label && (label.textContent || '').trim()) {
+        return scrubSecretText(label.textContent.trim());
+      }
     }
     const wrapping = el.closest('label');
     if (wrapping && wrapping !== el && (wrapping.textContent || '').trim()) {
-      return wrapping.textContent.trim();
+      return scrubSecretText(wrapping.textContent.trim());
     }
     for (const attr of ['alt', 'title', 'placeholder']) {
       const value = (el.getAttribute(attr) || '').trim();
-      if (value) return value;
+      if (value) return scrubSecretText(value);
     }
     const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
-    return text ? text.slice(0, 200) : null;
+    return text ? scrubSecretText(text.slice(0, 200)) : null;
   }
 
   function uniqueSelector(el) {
     if (el.id) {
+      if (scrubSecretText(el.id) !== el.id) return null;
       const selector = `#${CSS.escape(el.id)}`;
       if (document.querySelectorAll(selector).length === 1) return selector;
     }
     for (const attr of ['data-testid', 'data-test', 'name']) {
       const value = el.getAttribute(attr);
       if (!value) continue;
+      if (scrubSecretText(value) !== value) continue;
       const selector = `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(value)}"]`;
       if (document.querySelectorAll(selector).length === 1) return selector;
     }
     return null;
   }
 
-  function structuralTarget(px, py) {
+  function structuralTarget(px, py, eventTarget = null) {
     try {
-      const el = document.elementFromPoint(px, py);
+      refreshSecretBindings();
+      const el = eventTarget || document.elementFromPoint(px, py);
       if (!el) return null;
       const target = {
         selector: uniqueSelector(el),
@@ -545,9 +613,35 @@ _INIT_JS = r"""
     } catch (e) { return false; }
   }
 
+  function secretTextEntryForNode(node) {
+    try {
+      const el = isTextEntry(node) ? node : (
+        node && node.closest && node.closest(
+          'input, textarea, [contenteditable=""], [contenteditable="true"],' +
+          ' [role="textbox"]'
+        )
+      );
+      if (!el) return null;
+      let state = secretStates.get(el) || declaredSecretState(el);
+      if (!state) state = secretBoundaryStates.get(el.getRootNode()) || null;
+      if (!state) return null;
+      if (!secretStates.has(el)) bindSecretState(el, state, false);
+      return el;
+    } catch (e) { return null; }
+  }
+
   function bindSecretState(el, state, activate = true) {
+    if (!secretStates.has(el) && !currentSecretValue(el)) {
+      // A static label observed before typing is field identity, not secret
+      // text. Cache it before short password prefixes could over-redact it.
+      const label = fieldLabel(el);
+      if (label) trustedSecretFieldLabels.set(el, label);
+    }
     secretStates.set(el, state);
     stickySecretElements.add(el);
+    // The value stays inside this closure. Retain an existing value now so a
+    // pre-filled secret cannot later enter URL, title, or structural metadata.
+    rememberSecretValue(el);
     if (activate) {
       activeSecretElement = el;
       activeSecretState = state;
@@ -568,9 +662,16 @@ _INIT_JS = r"""
     return session;
   }
 
+  function elementName(el) {
+    if (!el) return '';
+    try {
+      return (el.getAttribute && el.getAttribute('name')) || el.name || '';
+    } catch (e) { return ''; }
+  }
+
   function declaredSecretState(el) {
     if (!el) return null;
-    const n = el.name || '', i = el.id || '';
+    const n = elementName(el), i = el.id || '';
     if ((el.type || '').toLowerCase() !== 'password'
         && SECRET_NAMES.indexOf(n) < 0 && SECRET_NAMES.indexOf(i) < 0) {
       return null;
@@ -578,9 +679,42 @@ _INIT_JS = r"""
     return {field: n || i || null, inputSession: inputSessionFor(el)};
   }
 
+  function declaredSecretHostState(host) {
+    if (!host) return null;
+    const n = elementName(host);
+    const i = host.id || '';
+    if (SECRET_NAMES.indexOf(n) < 0 && SECRET_NAMES.indexOf(i) < 0) return null;
+    return {field: n || i, inputSession: inputSessionFor(host)};
+  }
+
+  function registerExistingClosedShadowHost(host) {
+    const state = declaredSecretHostState(host);
+    if (!state) return false;
+    // A closed root does not expose its literal. Remove all text metadata for
+    // the rest of this recording because an exact-value scrub is impossible.
+    opaqueSecretActive = true;
+    closedSecretHosts.set(host, state);
+    return bindSecretState(host, state, false);
+  }
+
   function secretStateForInput(el) {
     let state = secretStates.get(el) || null;
+    if (!state) state = closedSecretHosts.get(el) || null;
     if (!state) state = declaredSecretState(el);
+    if (!state && el && el.getRootNode) {
+      state = secretBoundaryStates.get(el.getRootNode()) || null;
+    }
+    if (!state && el && el.getRootNode) {
+      const root = el.getRootNode();
+      const hostState = root && root.host
+        ? declaredSecretHostState(root.host) : null;
+      if (hostState) {
+        closedSecretHosts.set(root.host, hostState);
+        bindSecretState(root.host, hostState, false);
+        observeSecretRoot(root, hostState);
+        state = hostState;
+      }
+    }
     if (!state && activeSecretState && activeSecretElement
         && !activeSecretElement.isConnected && isTextEntry(el)) {
       // Some controlled inputs replace their DOM element after each change.
@@ -591,7 +725,7 @@ _INIT_JS = r"""
     return {state, maskBound: bindSecretState(el, state)};
   }
 
-  function discoverDeclaredSecrets(root) {
+  function textEntryCandidates(root) {
     const candidates = [];
     try {
       if (root && root.nodeType === 1 && isTextEntry(root)) candidates.push(root);
@@ -602,9 +736,61 @@ _INIT_JS = r"""
         ));
       }
     } catch (e) {}
+    return candidates;
+  }
+
+  function discoverDeclaredSecretHosts(root) {
+    const candidates = [];
+    try {
+      if (root && root.nodeType === 1) candidates.push(root);
+      if (root && root.querySelectorAll) {
+        candidates.push(...root.querySelectorAll('[name], [id]'));
+      }
+    } catch (e) {}
+    for (const host of candidates) {
+      if (isTextEntry(host) || closedSecretHosts.has(host)) continue;
+      const state = declaredSecretHostState(host);
+      if (!state) continue;
+      // A declared non-text element is a complete shadow-host boundary. Its
+      // internal value can be opaque, so do not retain later text metadata.
+      opaqueSecretActive = true;
+      closedSecretHosts.set(host, state);
+      bindSecretState(host, state, false);
+    }
+  }
+
+  function discoverOpenShadowRoots(root) {
+    if (!root || !root.querySelectorAll) return;
+    let elements = [];
+    try { elements = Array.from(root.querySelectorAll('*')); } catch (e) {}
+    if (root.nodeType === 1) elements.unshift(root);
+    for (const el of elements) {
+      try {
+        if (el.shadowRoot) observeSecretRoot(el.shadowRoot, null);
+      } catch (e) {}
+    }
+  }
+
+  function observeSecretRoot(root, boundaryState) {
+    if (!root) return;
+    if (boundaryState) secretBoundaryStates.set(root, boundaryState);
+    if (!observedSecretRoots.has(root)) {
+      secretObserver.observe(root, {
+        attributes: true, attributeOldValue: true, childList: true, subtree: true,
+      });
+      observedSecretRoots.add(root);
+    }
+    discoverDeclaredSecrets(root);
+    discoverOpenShadowRoots(root);
+  }
+
+  function discoverDeclaredSecrets(root) {
+    discoverDeclaredSecretHosts(root);
+    const candidates = textEntryCandidates(root);
     for (const el of candidates) {
       if (secretStates.has(el)) continue;
-      const state = declaredSecretState(el);
+      const state = declaredSecretState(el)
+        || secretBoundaryStates.get(el.getRootNode()) || null;
       if (state) bindSecretState(el, state, false);
     }
   }
@@ -619,7 +805,7 @@ _INIT_JS = r"""
     const oldPasswordType = mutation.attributeName === 'type'
       && oldValue.toLowerCase() === 'password';
     if (!oldDeclaredName && !oldPasswordType) return null;
-    const currentField = el.name || el.id || null;
+    const currentField = elementName(el) || el.id || null;
     return {
       field: oldDeclaredName ? oldValue : currentField,
       inputSession: inputSessionFor(el),
@@ -635,7 +821,40 @@ _INIT_JS = r"""
         }
         discoverDeclaredSecrets(mutation.target);
       } else {
-        for (const node of mutation.addedNodes) discoverDeclaredSecrets(node);
+        const removedEntries = [];
+        const addedEntries = [];
+        for (const node of mutation.removedNodes) {
+          for (const el of textEntryCandidates(node)) {
+            removedEntries.push({el, state: secretStates.get(el) || null});
+          }
+        }
+        for (const node of mutation.addedNodes) {
+          discoverDeclaredSecrets(node);
+          addedEntries.push(...textEntryCandidates(node));
+        }
+        const removedSecretStates = removedEntries
+          .map((entry) => entry.state).filter((state) => state !== null);
+        if (removedSecretStates.length && addedEntries.length) {
+          // A controlled input can replace a declared secret before its first
+          // input event. Mutation records retain the removed node, so transfer
+          // its sticky state before the event handler can read a replacement.
+          // If a subtree rewrite is ambiguous, mark every possible replacement
+          // secret. Extra redaction is safer than persisting a secret value.
+          if (removedEntries.length === 1 && addedEntries.length === 1) {
+            for (let index = 0; index < addedEntries.length; index += 1) {
+              const state = removedEntries[index].state;
+              const el = addedEntries[index];
+              if (state && !secretStates.has(el)) bindSecretState(el, state, false);
+            }
+          } else {
+            // A multi-node rewrite can reorder its text entries. Index mapping
+            // is not proof of identity, even when the two counts are equal.
+            const state = removedSecretStates[0];
+            for (const el of addedEntries) {
+              if (!secretStates.has(el)) bindSecretState(el, state, false);
+            }
+          }
+        }
       }
     }
     for (const el of stickySecretElements) {
@@ -648,16 +867,17 @@ _INIT_JS = r"""
 
   function refreshSecretBindings() {
     if (secretObserver === null) return;
+    // A document observer cannot see inside a shadow tree. Traverse every open
+    // root at the event boundary, then synchronously consume its queued records.
+    discoverOpenShadowRoots(document);
     processSecretMutations(secretObserver.takeRecords());
   }
 
   secretObserver = new MutationObserver((mutations) => {
     processSecretMutations(mutations);
   });
-  secretObserver.observe(document.documentElement || document, {
-    attributes: true, attributeOldValue: true, childList: true, subtree: true,
-  });
-  discoverDeclaredSecrets(document);
+  observeSecretRoot(document.documentElement || document, null);
+  discoverOpenShadowRoots(document);
 
   function fieldLabel(el) {
     // Best available human label for the receiving field, best-first:
@@ -666,7 +886,12 @@ _INIT_JS = r"""
     // PlaywrightBackend.focused_field_label exactly. Passive metadata for
     // the compile-time parameter-proposal pass; NEVER the field's value.
     try {
-      const clean = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      if (trustedSecretFieldLabels.has(el)) {
+        return trustedSecretFieldLabels.get(el);
+      }
+      const clean = (s) => scrubSecretText(
+        (s || '').replace(/\s+/g, ' ').trim()
+      );
       if (el.id) {
         try {
           const forLabel = document.querySelector(
@@ -714,6 +939,9 @@ _INIT_JS = r"""
 
   function emit(o) {
     try {
+      const state = safePageState();
+      o.url = state.url;
+      o.title = state.title;
       o.__oaflow_session = SESSION_ID;
       o.__oaflow_top_level = window === window.top;
       o.__oaflow_viewport = [Math.round(window.innerWidth),
@@ -722,6 +950,22 @@ _INIT_JS = r"""
       const binding = window[BINDING_NAME];
       if (typeof binding === 'function') binding(o);
     } catch (e) {}
+  }
+
+  function inputEventTarget(event) {
+    try {
+      const path = event.composedPath ? event.composedPath() : [];
+      if (path.length && isTextEntry(path[0])) return path[0];
+    } catch (e) {}
+    return event.target;
+  }
+
+  function deepEventTarget(event) {
+    try {
+      const path = event.composedPath ? event.composedPath() : [];
+      if (path.length && path[0] && path[0].nodeType === 1) return path[0];
+    } catch (e) {}
+    return event.target;
   }
 
   let pointerDown = null;
@@ -738,7 +982,7 @@ _INIT_JS = r"""
     // records now so a page cannot add a declared field, remove its identity,
     // and focus or type into it in one JavaScript task before classification.
     refreshSecretBindings();
-    const el = e.target;
+    const el = inputEventTarget(e);
     const declared = declaredSecretState(el);
     if (declared) {
       // Bind before the first key event. Application code can remove a
@@ -767,10 +1011,11 @@ _INIT_JS = r"""
       activeSecretElement = null;
       activeSecretState = null;
     }
+    const target = deepEventTarget(e);
     pointerDown = {
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY),
-      structural: structuralTarget(e.clientX, e.clientY),
+      sid: structuredIdentity(e.clientX, e.clientY, target),
+      structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
     };
   });
@@ -786,7 +1031,8 @@ _INIT_JS = r"""
     emit({
       kind: 'drag', x: start.x, y: start.y, end_x: endX, end_y: endY,
       sid: start.sid, structural: start.structural,
-      end_structural: structuralTarget(endX, endY), idr: start.idr,
+      end_structural: structuralTarget(endX, endY, deepEventTarget(e)),
+      idr: start.idr,
       url: location.href, title: document.title,
     });
   });
@@ -794,22 +1040,24 @@ _INIT_JS = r"""
   listen('click', (e) => {
     if (e.button !== 0) return;
     if (suppressClick) { suppressClick = false; return; }
+    const target = deepEventTarget(e);
     emit({
       kind: 'click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY),
-      structural: structuralTarget(e.clientX, e.clientY),
+      sid: structuredIdentity(e.clientX, e.clientY, target),
+      structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
       url: location.href, title: document.title,
     });
   });
 
   listen('contextmenu', (e) => {
+    const target = deepEventTarget(e);
     emit({
       kind: 'right_click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY),
-      structural: structuralTarget(e.clientX, e.clientY),
+      sid: structuredIdentity(e.clientX, e.clientY, target),
+      structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
       url: location.href, title: document.title,
     });
@@ -817,14 +1065,32 @@ _INIT_JS = r"""
 
   listen('input', (e) => {
     refreshSecretBindings();
-    const el = e.target;
+    const el = inputEventTarget(e);
+    const root = el && el.getRootNode ? el.getRootNode() : null;
+    const isUnboundShadowInput = root && root.host
+      && !secretStates.has(el) && !secretBoundaryStates.has(root)
+      && !declaredSecretState(el) && !declaredSecretHostState(root.host);
+    if ((!isTextEntry(el) && !closedSecretHosts.has(el))
+        || (isUnboundShadowInput && SECRET_NAMES.length)) {
+      privacyBoundaryError = (
+        'a shadow input event did not have a declared secret host boundary'
+      );
+      emit({kind: 'privacy_refusal'});
+      return;
+    }
     const secretBinding = secretStateForInput(el);
     const secret = secretBinding !== null;
+    if (secret) {
+      if (!isTextEntry(el) && closedSecretHosts.has(el)) opaqueSecretActive = true;
+      rememberSecretValue(el);
+    }
     const r = (el.getBoundingClientRect && el.getBoundingClientRect())
       || { left: 0, top: 0, width: 0, height: 0 };
     const o = {
       kind: 'input',
-      field: secret ? secretBinding.state.field : (el.name || el.id || null),
+      field: secret
+        ? secretBinding.state.field
+        : scrubSecretText(elementName(el) || el.id || null),
       label: fieldLabel(el),
       secret: secret,
       __oaflow_input_session: secret
@@ -833,7 +1099,8 @@ _INIT_JS = r"""
              Math.round(r.width), Math.round(r.height)],
       url: location.href, title: document.title,
     };
-    // The literal value of a SECRET field is never read or transmitted.
+    // A secret literal stays in this page closure only. It is retained here so
+    // later URL, title, and structural evidence can be scrubbed before emit.
     if (secret) {
       o.__oaflow_secret_mask_bound = secretBinding.maskBound;
     } else {
@@ -1080,6 +1347,8 @@ class InteractiveRecorder:
                             "could not install the recording listener in every "
                             "existing browser frame; recording was refused"
                         ) from exc
+                self._register_existing_closed_shadow_boundaries()
+                self._assert_page_privacy_safe()
 
             self.backend = PlaywrightBackend(
                 self.page,
@@ -1088,6 +1357,7 @@ class InteractiveRecorder:
                     self._secret_fields,
                     marker_attribute=self._secret_marker_attribute,
                 ),
+                structural_state_reader=self._read_scrubbed_page_state,
             )
             assert self._recording_dir is not None
             self.recorder = Recorder(
@@ -1105,6 +1375,152 @@ class InteractiveRecorder:
         except Exception:
             self.abort()
             raise
+
+    def _register_existing_closed_shadow_boundaries(self) -> None:
+        """Bind or refuse declared fields inside pre-existing closed roots.
+
+        Page JavaScript cannot traverse a closed shadow root that existed before
+        attachment. Chromium's DOM search can identify only the declared field
+        nodes without returning their values. A function executed on each match
+        performs the root/host check inside that document. No node content or
+        secret literal crosses the CDP boundary.
+        """
+
+        assert not self._owns_browser
+        assert self.page is not None
+        assert self._context is not None
+        queries = ["input[type='password']"]
+        for field in sorted(self._secret_fields):
+            encoded = _css_string_literal(field)
+            queries.append(f"[name={encoded}], [id={encoded}]")
+        try:
+            cdp = self._context.new_cdp_session(self.page)
+        except Exception as exc:
+            raise BrowserAttachError(
+                "could not inspect pre-existing closed shadow boundaries; "
+                "recording was refused before the first frame"
+            ) from exc
+        try:
+            cdp.send("DOM.enable")
+            # Populate stable frontend node ids. Depth zero returns only the
+            # document node; it does not send page attributes or text to Python.
+            cdp.send("DOM.getDocument", {"depth": 0, "pierce": True})
+            for query in queries:
+                search = cdp.send(
+                    "DOM.performSearch",
+                    {"query": query, "includeUserAgentShadowDOM": False},
+                )
+                search_id = str(search["searchId"])
+                try:
+                    count = int(search.get("resultCount", 0))
+                    if count <= 0:
+                        continue
+                    results = cdp.send(
+                        "DOM.getSearchResults",
+                        {
+                            "searchId": search_id,
+                            "fromIndex": 0,
+                            "toIndex": count,
+                        },
+                    )
+                    for node_id in results.get("nodeIds", []):
+                        resolved = cdp.send("DOM.resolveNode", {"nodeId": int(node_id)})
+                        object_id = resolved.get("object", {}).get("objectId")
+                        if not object_id:
+                            raise BrowserAttachError(
+                                "a declared secret node could not be bound before "
+                                "the first frame"
+                            )
+                        outcome = cdp.send(
+                            "Runtime.callFunctionOn",
+                            {
+                                "objectId": object_id,
+                                "functionDeclaration": r"""function(sessionId) {
+                                  const root = this.getRootNode && this.getRootNode();
+                                  if (!root || root.mode !== 'closed') {
+                                    return {closed: false, registered: true};
+                                  }
+                                  const ownerWindow = this.ownerDocument.defaultView;
+                                  const recorder = ownerWindow.__oaflowRecorder;
+                                  if (!recorder || recorder.sessionId !== sessionId
+                                      || typeof recorder.registerExistingClosedShadowHost
+                                         !== 'function') {
+                                    return {closed: true, registered: false};
+                                  }
+                                  return {
+                                    closed: true,
+                                    registered: Boolean(
+                                      recorder.registerExistingClosedShadowHost(root.host)
+                                    ),
+                                  };
+                                }""",
+                                "arguments": [{"value": self._session_id}],
+                                "returnByValue": True,
+                            },
+                        )
+                        value = outcome.get("result", {}).get("value", {})
+                        if value.get("closed") and not value.get("registered"):
+                            raise BrowserAttachError(
+                                "a declared secret is inside a pre-existing closed "
+                                "shadow root whose host is not declared with the "
+                                "same --secret name or id; recording was refused "
+                                "before the first frame"
+                            )
+                finally:
+                    cdp.send("DOM.discardSearchResults", {"searchId": search_id})
+        except BrowserAttachError:
+            raise
+        except Exception as exc:
+            raise BrowserAttachError(
+                "could not prove pre-existing closed shadow secret boundaries; "
+                "recording was refused before the first frame"
+            ) from exc
+        finally:
+            try:
+                cdp.detach()
+            except Exception:
+                pass
+
+    def _assert_page_privacy_safe(self) -> None:
+        """Refuse a screenshot after an undeclared closed root appears."""
+
+        if self.page is None:
+            raise BrowserAttachError("the browser page is unavailable")
+        try:
+            frames = list(self.page.frames)
+        except Exception as exc:
+            raise BrowserAttachError(
+                "could not inventory browser privacy guards"
+            ) from exc
+        for frame in frames:
+            try:
+                status = frame.evaluate(
+                    """sessionId => {
+                      const recorder = window.__oaflowRecorder;
+                      if (!recorder || recorder.sessionId !== sessionId
+                          || typeof recorder.privacyStatus !== 'function') {
+                        return {ok: false, error: 'the privacy guard is unavailable'};
+                      }
+                      return recorder.privacyStatus();
+                    }""",
+                    self._session_id,
+                )
+            except Exception as exc:
+                try:
+                    detached = frame.is_detached()
+                except Exception:
+                    detached = False
+                if detached:
+                    continue
+                raise BrowserAttachError(
+                    "could not verify every browser secret boundary before "
+                    "retaining a frame"
+                ) from exc
+            if not isinstance(status, dict) or status.get("ok") is not True:
+                raise BrowserAttachError(
+                    str(status.get("error") if isinstance(status, dict) else "")
+                    or "the browser secret boundary is not safe"
+                )
 
     def run(self) -> Path:
         """Pump until completion, an operator stop, or a closed window."""
@@ -1421,6 +1837,14 @@ class InteractiveRecorder:
         if event.pop("__oaflow_session", None) != self._session_id:
             return
         kind = event.get("kind")
+        if kind == "privacy_refusal":
+            self._listener_error = BrowserAttachError(
+                "a shadow input did not have a declared secret host boundary; "
+                "recording stopped before accepting its value or retaining "
+                "another frame"
+            )
+            self.done = True
+            return
         secret_mask_bound = event.pop("__oaflow_secret_mask_bound", None)
         if (
             kind == "input"
@@ -2013,19 +2437,45 @@ class InteractiveRecorder:
         if structural_after is not None:
             self._last_structural = structural_after
 
-    def _structural_state(self) -> dict[str, Any]:
-        state: dict[str, Any] = {}
-        for attr, key in (
-            ("url", "url"),
-            ("page_title", "title"),
-            ("page_count", "pages"),
-        ):
-            try:
-                value = getattr(self.backend, attr, None)
-            except Exception:
-                value = None
-            if value is not None:
+    def _read_scrubbed_page_state(self) -> dict[str, str]:
+        """Read only the page-closure URL/title sanitized at the source."""
+
+        assert self.page is not None
+        try:
+            safe_page_state = self.page.evaluate(
+                """sessionId => {
+                  const recorder = window.__oaflowRecorder;
+                  if (!recorder || recorder.sessionId !== sessionId
+                      || typeof recorder.structuralState !== 'function') {
+                    return null;
+                  }
+                  return recorder.structuralState();
+                }""",
+                self._session_id,
+            )
+        except Exception as exc:
+            raise BrowserAttachError(
+                "could not read scrubbed browser structural state"
+            ) from exc
+        if not isinstance(safe_page_state, dict):
+            raise BrowserAttachError(
+                "the page-local secret scrubber did not return structural state"
+            )
+        state: dict[str, str] = {}
+        for key in ("url", "title"):
+            value = safe_page_state.get(key)
+            if isinstance(value, str):
                 state[key] = value
+        return state
+
+    def _structural_state(self) -> dict[str, Any]:
+        state: dict[str, Any] = dict(self._read_scrubbed_page_state())
+        try:
+            page_count = self.backend.page_count
+        except Exception:
+            page_count = None
+        if page_count is not None:
+            state["pages"] = page_count
         if self._system_of_record_reader is not None:
             try:
                 records = self._system_of_record_reader()

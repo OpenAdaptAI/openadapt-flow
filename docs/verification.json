@@ -1,5 +1,5 @@
 {
-  "generated_at": "committed registry state (regenerate: scripts/validate_claims.py --report)",
+  "generated_at": "2026-08-18T15:05:23-04:00 (git HEAD commit date)",
   "green_check_run": false,
   "green_check_job": null,
   "green_check_scope": [],
@@ -68,7 +68,7 @@
           "node": "test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trials",
           "node_found": true,
           "junit_status": null,
-          "proves": "Three real Chromium CDP-attach trials record and compile the same synthetic workflow, exclude password values before persistence, preserve CSS-pixel frame/coordinate alignment, and detach without closing the external browser. A live case records and compiles actions across viewport and monitor-scale changes. It binds each event to its exact frame dimensions. A separate live case refuses an action that overlaps the transition. Unit cases refuse remote endpoints, cross-origin selectors and navigation, iframe events, invalid viewport evidence, and ambiguous same-origin tabs."
+          "proves": "Three real Chromium CDP-attach trials record and compile the same synthetic workflow, exclude password values before persistence, preserve CSS-pixel frame/coordinate alignment, and detach without closing the external browser. The same live campaign covers same-task replacement, declared open and closed shadow hosts, contenteditable click metadata, and URL/title reflection. A live case records and compiles actions across viewport and monitor-scale changes. It binds each event to its exact frame dimensions. A separate live case refuses an action that overlaps the transition. Unit cases refuse remote endpoints, cross-origin selectors and navigation, iframe events, invalid viewport evidence, and ambiguous same-origin tabs."
         }
       ],
       "errors": []

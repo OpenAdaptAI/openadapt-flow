@@ -714,6 +714,7 @@ class PlaywrightBackend:
         *,
         screenshot_scale: Literal["css", "device"] = "device",
         screenshot_mask_selectors: tuple[str, ...] = (),
+        structural_state_reader: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         """Wrap an existing Playwright page.
 
@@ -731,10 +732,14 @@ class PlaywrightBackend:
                 rebuilt from every current document frame for each screenshot
                 so a child-frame field or a frame added after startup cannot
                 bypass the mask.
+            structural_state_reader: Optional source-time sanitized URL/title
+                reader. Recording paths use it to keep raw reflected secrets
+                out of Python-side structural evidence.
         """
         self.page = page
         self._screenshot_scale = screenshot_scale
         self._screenshot_mask_selectors = screenshot_mask_selectors
+        self._structural_state_reader = structural_state_reader
         self._screenshot_frame_generation = 0
         self._screenshot_frame_listener = self._handle_screenshot_frame_lifecycle
         self._screenshot_frame_tracking = False
@@ -808,6 +813,12 @@ class PlaywrightBackend:
     @property
     def url(self) -> Optional[str]:
         """Current page URL, or None if momentarily unobservable."""
+        if self._structural_state_reader is not None:
+            try:
+                value = self._structural_state_reader().get("url")
+                return value if isinstance(value, str) else None
+            except Exception:
+                return None
         try:
             return self.page.url
         except Exception:
@@ -816,6 +827,12 @@ class PlaywrightBackend:
     @property
     def page_title(self) -> Optional[str]:
         """Current page title, or None if momentarily unobservable."""
+        if self._structural_state_reader is not None:
+            try:
+                value = self._structural_state_reader().get("title")
+                return value if isinstance(value, str) else None
+            except Exception:
+                return None
         try:
             return self.page.title()
         except Exception:

@@ -147,6 +147,23 @@ def test_attached_backend_uses_live_css_viewport_and_css_screenshot() -> None:
     assert page.screenshot_options["scale"] == "css"
 
 
+def test_attached_backend_uses_source_sanitized_structural_state() -> None:
+    page = SimpleNamespace(
+        url="https://app.example.test/?token=RAW-SECRET",
+        title=lambda: "RAW-SECRET",
+    )
+    backend = PlaywrightBackend(  # type: ignore[arg-type]
+        page,
+        structural_state_reader=lambda: {
+            "url": "https://app.example.test/?token=[secret]",
+            "title": "[secret]",
+        },
+    )
+
+    assert backend.url == "https://app.example.test/?token=[secret]"
+    assert backend.page_title == "[secret]"
+
+
 def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> None:
     class Frame:
         def __init__(self, name: str) -> None:
@@ -805,7 +822,132 @@ def _chromium_executable() -> Path | None:
     return next((candidate for candidate in candidates if candidate.is_file()), None)
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.timeout(30)
+def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
+    """Real Chromium proves the page-local guard before screenshot handling."""
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-privacy-test"
+    binding_name = "__oaflow_emit_page_closure_test"
+    secret_fields = (
+        "prefilled-secret",
+        "reordered-secret",
+        "reflected-secret",
+        "contenteditable-secret",
+    )
+    init_js = (
+        interactive_recorder_module._INIT_JS.replace(
+            "__SESSION_ID__", json.dumps(session_id)
+        )
+        .replace("__BINDING_NAME__", json.dumps(binding_name))
+        .replace("__SECRET_NAMES__", json.dumps(secret_fields))
+        .replace("__SECRET_MARKER__", json.dumps("data-oaflow-secret-test"))
+        .replace("__IDENT_NAMES__", "[]")
+        .replace("__SPECIAL_KEYS__", "[]")
+    )
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            prefilled = "PREFILLED SECRET MUST NOT CROSS"
+            page.route(
+                "http://privacy.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<input name='prefilled-secret'>"
+                        "<div id='rewrite'></div><button>save</button>"
+                    ),
+                ),
+            )
+            page.goto("http://privacy.test/")
+            page.locator("[name='prefilled-secret']").evaluate(
+                "(element, secret) => { element.value = secret; document.title = secret; }",
+                prefilled,
+            )
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            state = page.evaluate("() => window.__oaflowRecorder.structuralState()")
+            assert prefilled not in json.dumps(state)
+
+            reordered = "REORDERED SECRET MUST NOT CROSS"
+            page.evaluate(
+                """secret => {
+                  const parent = document.querySelector('#rewrite');
+                  const declared = document.createElement('input');
+                  declared.name = 'reordered-secret';
+                  const ordinary = document.createElement('input');
+                  parent.append(declared, ordinary);
+                  const replacement = document.createElement('input');
+                  parent.replaceChildren(document.createElement('input'), replacement);
+                  replacement.value = secret;
+                  replacement.dispatchEvent(new Event('input', {bubbles: true}));
+                }""",
+                reordered,
+            )
+
+            reflected = "REFLECTED SECRET MUST NOT CROSS"
+            page.evaluate(
+                """secret => {
+                  const field = document.createElement('input');
+                  field.name = 'reflected-secret';
+                  document.body.appendChild(field);
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+                  history.replaceState({}, '', '/?token=' + encodeURIComponent(secret));
+                  document.title = secret;
+                  const button = document.querySelector('button');
+                  button.id = secret;
+                  button.setAttribute('role', secret);
+                  button.setAttribute('aria-label', secret);
+                  button.click();
+                }""",
+                reflected,
+            )
+            contenteditable = "CONTENTEDITABLE SECRET MUST NOT CROSS"
+            page.evaluate(
+                """secret => {
+                  const field = document.createElement('div');
+                  field.contentEditable = 'true';
+                  field.setAttribute('name', 'contenteditable-secret');
+                  field.innerText = secret;
+                  document.body.appendChild(field);
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+                  field.click();
+                }""",
+                contenteditable,
+            )
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert prefilled not in payload
+    assert reordered not in payload
+    assert reflected not in payload
+    assert contenteditable not in payload
+    input_events = [event for event in events if event.get("kind") == "input"]
+    assert len(input_events) == 3
+    assert all(event.get("secret") is True for event in input_events)
+    click = next(event for event in events if event.get("kind") == "click")
+    assert click["structural"]["selector"] is None
+    assert click["structural"]["role"] == "[secret]"
+    assert click["structural"]["name"] == "[secret]"
+
+
+@pytest.mark.timeout(300)
 def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trials(
     attach_app_url: str,
     tmp_path: Path,
@@ -1128,6 +1270,369 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             )
         )
         assert all(extrema == (0, 0) for extrema in dynamic_crop.getextrema())
+        assert process.poll() is None
+
+        pre_input_replacement_secret = (
+            "PRE-INPUT-REPLACEMENT-SECRET-LITERAL-NEVER-PERSIST"
+        )
+        pre_input_replacement_rect: dict[str, int] = {}
+
+        def replace_dynamic_secret_before_first_input(page, pump):
+            rect = page.evaluate(
+                """secret => {
+                  const declared = document.createElement('input');
+                  declared.id = 'pre-input-replacement-secret';
+                  declared.name = 'pre-input-replacement-secret';
+                  declared.style.cssText = 'width:220px;height:40px;border:0';
+                  document.body.appendChild(declared);
+                  const replacement = declared.cloneNode(true);
+                  replacement.removeAttribute('name');
+                  replacement.removeAttribute('id');
+                  declared.replaceWith(replacement);
+                  replacement.value = secret;
+                  replacement.dispatchEvent(new Event('input', {bubbles: true}));
+                  const box = replacement.getBoundingClientRect();
+                  return {
+                    x: Math.round(box.left), y: Math.round(box.top),
+                    width: Math.round(box.width), height: Math.round(box.height),
+                  };
+                }""",
+                pre_input_replacement_secret,
+            )
+            pre_input_replacement_rect.update(rect)
+            pump()
+            pump()
+
+        pre_input_replacement_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-pre-input-replacement-secret",
+            secret_fields=("pre-input-replacement-secret",),
+            cdp_endpoint=endpoint,
+            script=replace_dynamic_secret_before_first_input,
+        )
+        for artifact in pre_input_replacement_recording.rglob("*"):
+            if artifact.is_file():
+                assert (
+                    pre_input_replacement_secret.encode() not in artifact.read_bytes()
+                )
+        pre_input_replacement_events = [
+            json.loads(line)
+            for line in (pre_input_replacement_recording / "events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert len(pre_input_replacement_events) == 1
+        assert pre_input_replacement_events[0].get("secret") is True
+        pre_input_replacement_after = Image.open(
+            pre_input_replacement_recording / "frames" / "0000_after.png"
+        ).convert("RGB")
+        pre_input_replacement_crop = pre_input_replacement_after.crop(
+            (
+                pre_input_replacement_rect["x"],
+                pre_input_replacement_rect["y"],
+                pre_input_replacement_rect["x"] + pre_input_replacement_rect["width"],
+                pre_input_replacement_rect["y"] + pre_input_replacement_rect["height"],
+            )
+        )
+        assert all(
+            extrema == (0, 0) for extrema in pre_input_replacement_crop.getextrema()
+        )
+        assert process.poll() is None
+
+        open_shadow_secret = "OPEN-SHADOW-SECRET-LITERAL-NEVER-PERSIST"
+
+        def type_open_shadow_secret_after_identity_removal(page, pump):
+            page.evaluate(
+                """secret => {
+                  const host = document.createElement('x-open-secret');
+                  host.id = 'open-shadow-secret';
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'open'});
+                  const field = document.createElement('input');
+                  field.name = 'open-shadow-secret';
+                  field.style.cssText = 'width:220px;height:40px;border:0';
+                  root.appendChild(field);
+                  field.removeAttribute('name');
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {
+                    bubbles: true, composed: true,
+                  }));
+                }""",
+                open_shadow_secret,
+            )
+            pump()
+            pump()
+            page.evaluate("() => document.querySelector('x-open-secret').remove()")
+
+        open_shadow_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-open-shadow-secret",
+            secret_fields=("open-shadow-secret",),
+            cdp_endpoint=endpoint,
+            script=type_open_shadow_secret_after_identity_removal,
+        )
+        for artifact in open_shadow_recording.rglob("*"):
+            if artifact.is_file():
+                assert open_shadow_secret.encode() not in artifact.read_bytes()
+        open_shadow_events = [
+            json.loads(line)
+            for line in (open_shadow_recording / "events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert len(open_shadow_events) == 1
+        assert open_shadow_events[0].get("secret") is True
+
+        future_closed_secret = "FUTURE-CLOSED-SECRET-LITERAL-NEVER-PERSIST"
+        future_closed_rect: dict[str, int] = {}
+
+        def type_future_closed_shadow_secret(page, pump):
+            rect = page.evaluate(
+                """secret => {
+                  const host = document.createElement('x-future-closed-secret');
+                  host.id = 'future-closed-secret';
+                  host.style.cssText = 'display:block;width:240px;height:50px';
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'closed'});
+                  const field = document.createElement('input');
+                  field.style.cssText = 'width:220px;height:40px;border:0';
+                  root.appendChild(field);
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {
+                    bubbles: true, composed: true,
+                  }));
+                  const box = host.getBoundingClientRect();
+                  return {
+                    x: Math.round(box.left), y: Math.round(box.top),
+                    width: Math.round(box.width), height: Math.round(box.height),
+                  };
+                }""",
+                future_closed_secret,
+            )
+            future_closed_rect.update(rect)
+            pump()
+            pump()
+            page.evaluate(
+                "() => document.querySelector('x-future-closed-secret').remove()"
+            )
+
+        future_closed_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-future-closed-secret",
+            secret_fields=("future-closed-secret",),
+            cdp_endpoint=endpoint,
+            script=type_future_closed_shadow_secret,
+        )
+        for artifact in future_closed_recording.rglob("*"):
+            if artifact.is_file():
+                assert future_closed_secret.encode() not in artifact.read_bytes()
+        future_closed_events = [
+            json.loads(line)
+            for line in (future_closed_recording / "events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert len(future_closed_events) == 1
+        assert future_closed_events[0].get("secret") is True
+        future_closed_after = Image.open(
+            future_closed_recording / "frames" / "0000_after.png"
+        ).convert("RGB")
+        future_closed_crop = future_closed_after.crop(
+            (
+                future_closed_rect["x"],
+                future_closed_rect["y"],
+                future_closed_rect["x"] + future_closed_rect["width"],
+                future_closed_rect["y"] + future_closed_rect["height"],
+            )
+        )
+        assert all(extrema == (0, 0) for extrema in future_closed_crop.getextrema())
+
+        contenteditable_secret = "CONTENTEDITABLE-SECRET-LITERAL-NEVER-PERSIST"
+
+        def type_and_click_secret_contenteditable(page, pump):
+            page.evaluate(
+                """secret => {
+                  const field = document.createElement('div');
+                  field.contentEditable = 'true';
+                  field.setAttribute('name', 'contenteditable-secret');
+                  field.setAttribute('role', 'textbox');
+                  field.style.cssText = 'width:260px;height:40px;border:0';
+                  document.body.appendChild(field);
+                  field.innerText = secret;
+                  field.dispatchEvent(new Event('input', {
+                    bubbles: true, composed: true,
+                  }));
+                }""",
+                contenteditable_secret,
+            )
+            pump()
+            pump()
+            page.locator('[name="contenteditable-secret"]').click()
+            pump()
+            pump()
+            page.locator('[name="contenteditable-secret"]').evaluate(
+                "element => element.remove()"
+            )
+
+        contenteditable_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-contenteditable-secret",
+            secret_fields=("contenteditable-secret",),
+            cdp_endpoint=endpoint,
+            script=type_and_click_secret_contenteditable,
+        )
+        for artifact in contenteditable_recording.rglob("*"):
+            if artifact.is_file():
+                assert contenteditable_secret.encode() not in artifact.read_bytes()
+        contenteditable_events = [
+            json.loads(line)
+            for line in (contenteditable_recording / "events.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert any(event.get("secret") is True for event in contenteditable_events)
+        click_event = next(
+            event for event in contenteditable_events if event.get("kind") == "click"
+        )
+        assert contenteditable_secret not in json.dumps(click_event)
+
+        reflected_secret = "URL TITLE SECRET LITERAL NEVER PERSIST"
+
+        def reflect_secret_into_url_title_and_target(page, pump):
+            page.evaluate(
+                """secret => {
+                  const field = document.createElement('input');
+                  field.name = 'reflected-secret';
+                  document.body.appendChild(field);
+                  field.addEventListener('input', () => {
+                    history.replaceState({}, '', '/?token=' + encodeURIComponent(secret));
+                    document.title = 'Result ' + secret;
+                    document.querySelector('#save').setAttribute(
+                      'aria-label', 'Save ' + secret
+                    );
+                  });
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {
+                    bubbles: true, composed: true,
+                  }));
+                }""",
+                reflected_secret,
+            )
+            pump()
+            pump()
+            page.click("#save")
+            pump()
+            pump()
+            page.evaluate(
+                """() => {
+                  history.replaceState({}, '', '/');
+                  document.title = 'Attach recorder';
+                  document.querySelector('#save').removeAttribute('aria-label');
+                  document.querySelector('[name="reflected-secret"]').remove();
+                }"""
+            )
+
+        reflected_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-reflected-secret",
+            secret_fields=("reflected-secret",),
+            cdp_endpoint=endpoint,
+            script=reflect_secret_into_url_title_and_target,
+        )
+        encoded_reflected_secret = reflected_secret.replace(" ", "%20")
+        for artifact in reflected_recording.rglob("*"):
+            if artifact.is_file():
+                payload = artifact.read_bytes()
+                assert reflected_secret.encode() not in payload
+                assert encoded_reflected_secret.encode() not in payload
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as setup_playwright:
+            setup_browser = setup_playwright.chromium.connect_over_cdp(endpoint)
+            setup_page = select_attached_page(setup_browser, app_url=attach_app_url)
+            setup_page.evaluate(
+                """() => {
+                  const host = document.createElement('x-existing-closed-secret');
+                  host.id = 'existing-closed-secret';
+                  host.style.cssText = 'display:block;width:240px;height:50px';
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'closed'});
+                  const field = document.createElement('input');
+                  field.name = 'existing-closed-secret';
+                  field.style.cssText = 'width:220px;height:40px;border:0';
+                  root.appendChild(field);
+                  host.writeSecret = (secret) => {
+                    field.value = secret;
+                    field.dispatchEvent(new Event('input', {
+                      bubbles: true, composed: true,
+                    }));
+                  };
+                }"""
+            )
+
+        existing_closed_secret = "EXISTING-CLOSED-SECRET-LITERAL-NEVER-PERSIST"
+
+        def type_existing_closed_shadow_secret(page, pump):
+            page.evaluate(
+                """secret => document.querySelector(
+                  '#existing-closed-secret'
+                ).writeSecret(secret)""",
+                existing_closed_secret,
+            )
+            pump()
+            pump()
+
+        existing_closed_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-existing-closed-secret",
+            secret_fields=("existing-closed-secret",),
+            cdp_endpoint=endpoint,
+            script=type_existing_closed_shadow_secret,
+        )
+        for artifact in existing_closed_recording.rglob("*"):
+            if artifact.is_file():
+                assert existing_closed_secret.encode() not in artifact.read_bytes()
+
+        with sync_playwright() as refusal_playwright:
+            refusal_browser = refusal_playwright.chromium.connect_over_cdp(endpoint)
+            refusal_page = select_attached_page(refusal_browser, app_url=attach_app_url)
+            refusal_page.evaluate(
+                """() => {
+                  document.querySelector('#existing-closed-secret').remove();
+                  const host = document.createElement('x-undeclared-closed-secret');
+                  host.id = 'different-closed-host';
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'closed'});
+                  const field = document.createElement('input');
+                  field.name = 'undeclared-closed-secret';
+                  root.appendChild(field);
+                }"""
+            )
+
+        refused_closed_output = tmp_path / "recording-refused-existing-closed-secret"
+        with pytest.raises(BrowserAttachError, match="pre-existing closed shadow"):
+            record_interactive(
+                attach_app_url,
+                refused_closed_output,
+                secret_fields=("undeclared-closed-secret",),
+                cdp_endpoint=endpoint,
+                script=lambda _page, _pump: None,
+            )
+        assert not refused_closed_output.exists()
+        with sync_playwright() as refusal_cleanup_playwright:
+            refusal_cleanup_browser = (
+                refusal_cleanup_playwright.chromium.connect_over_cdp(endpoint)
+            )
+            refusal_cleanup_page = select_attached_page(
+                refusal_cleanup_browser,
+                app_url=attach_app_url,
+            )
+            refusal_cleanup_page.evaluate(
+                """() => document.querySelector(
+                  '#different-closed-host'
+                ).remove()"""
+            )
         assert process.poll() is None
 
         moved_secret = "MOVED-FINAL-SECRET-NEVER-PERSIST"

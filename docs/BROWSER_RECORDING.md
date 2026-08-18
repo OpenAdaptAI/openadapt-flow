@@ -91,8 +91,10 @@ Diagnostic messages omit URL query and fragment values. The exact selector is
 used only to bind the requested tab and is not stored as separate attachment
 metadata. The CDP endpoint is not stored. The normal recording evidence does
 retain the declared app URL and each observed page URL before and after an
-action. Those URLs can contain query or fragment values. Treat them as
-sensitive recording data.
+action. Those URLs can contain query or fragment values. After a declared
+secret input, the page closure removes that exact literal and its common
+URL-encoded forms before it emits later URL or title evidence from the same
+document. Treat all other URL data as sensitive recording data.
 
 ## Safety and privacy contract
 
@@ -138,17 +140,32 @@ sensitive recording data.
   In that case, no exact pre-action frame exists in the new coordinate space,
   so the recording stops without complete metadata. Stop interacting for a
   moment after a resize. Recording then continues automatically.
-- `input[type=password]` and fields declared with `--secret FIELD` never send
-  their values to Python. Flow binds a private input-session identity and a
-  temporary screenshot-mask marker when the field appears in the document. The
+- `input[type=password]` and fields declared with `--secret FIELD` keep their
+  literal values inside the page closure. Flow binds a private input-session
+  identity and a temporary screenshot-mask marker when the field appears in the
+  document. The
   identity remains secret if application code removes the field name or ID
   before focus, changes either attribute during input, or replaces the active
   input element during the same input session. The listener consumes queued DOM
-  changes before each focus or input event, including a field that appears and
-  changes inside one JavaScript task. Flow removes the marker when it detaches,
-  including from a page-owned element that is no longer in the DOM.
-  Other typed values and visible page content are recording evidence and can
-  contain sensitive data. Keep raw recordings inside the approved local
+  changes before each focus or input event, including a field that appears,
+  changes, or receives a replacement inside one JavaScript task. The closure
+  removes the exact literal and its common URL-encoded forms from later URL,
+  title, label, and structural text in the same document before any event
+  crosses into Python. Flow removes its marker when it detaches, including from
+  a page-owned element that is no longer in the DOM.
+- Flow traverses and observes open shadow roots at every event boundary. If a
+  shadow field can lose its name, ID, or password type before the first event,
+  give the shadow host the same `--secret FIELD` name or ID. Flow then masks the
+  complete host. For a pre-existing closed shadow root, Chromium CDP searches
+  only for the declared selector and runs the boundary check inside the page;
+  no node content crosses into Python. Flow refuses before the first frame when
+  the closed field exists but its host does not bind that declaration. It also
+  refuses a later unbound shadow input before it accepts a value.
+- Source-time field handling does not track an application-defined transform of
+  a secret, a copy into an unrelated visible element, or a reflection that first
+  appears after a document navigation. Those pixels, new-document metadata, all
+  other typed values, and other visible page content are recording evidence and
+  can contain sensitive data. Keep raw recordings inside the approved local
   boundary.
 - Secret masks cover every frame in the selected page. Before each masked
   screenshot, Flow snapshots the frame inventory and its lifecycle generation.

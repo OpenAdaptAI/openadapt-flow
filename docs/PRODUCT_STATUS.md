@@ -73,7 +73,7 @@ and its generated view is [`VERIFICATION.md`](VERIFICATION.md).
 - Benchmarks describe their task, environment, run count, success oracle,
   latency, model calls, cost assumptions, and caveats. They are bounded evidence,
   not general market proof.
-- The nightly
+- The weekly
   [`quickstart-lifecycle.yml`](../.github/workflows/quickstart-lifecycle.yml)
   installs the built wheel in a clean environment on Linux, macOS, and Windows;
   records, compiles, lints, certifies, replays, induces drift, inspects repair

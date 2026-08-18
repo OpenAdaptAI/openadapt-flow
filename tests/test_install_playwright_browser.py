@@ -15,6 +15,48 @@ import pytest
 from scripts import install_playwright_browser
 
 
+def test_default_install_handles_a_cache_miss_without_system_package_refresh() -> None:
+    command = install_playwright_browser.playwright_install_command(
+        with_system_deps=False
+    )
+
+    assert command == ("playwright", "install", "chromium")
+    assert "--with-deps" not in command
+
+
+def test_system_dependencies_require_an_explicit_qualification_flag() -> None:
+    command = install_playwright_browser.playwright_install_command(
+        with_system_deps=True
+    )
+
+    assert command == ("playwright", "install", "--with-deps", "chromium")
+
+
+def test_missing_browser_library_fails_the_launch_probe(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def missing_library() -> None:
+        raise OSError("libfixture.so: cannot open shared object file")
+
+    result = install_playwright_browser.verify_chromium_launch(missing_library)
+
+    assert result == install_playwright_browser.BROWSER_LAUNCH_EXIT_CODE
+    output = capsys.readouterr().out
+    assert "Chromium was installed but could not launch" in output
+    assert "libfixture.so" in output
+
+
+def test_browser_launch_probe_succeeds() -> None:
+    launches = 0
+
+    def launch() -> None:
+        nonlocal launches
+        launches += 1
+
+    assert install_playwright_browser.verify_chromium_launch(launch) == 0
+    assert launches == 1
+
+
 def test_external_install_retries_once_then_succeeds() -> None:
     calls: list[tuple[tuple[str, ...], int]] = []
     outcomes = iter((124, 0))

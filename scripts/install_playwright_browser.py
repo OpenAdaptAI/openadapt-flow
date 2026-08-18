@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Install the Playwright Chromium runtime with a bounded external retry.
+"""Install Playwright Chromium with a bounded external retry.
 
-The browser and OS-package download is an external dependency. A stalled
-download must not hold a hosted runner for GitHub's six-hour default job
-timeout. This helper bounds each attempt, terminates its complete process
-group, and retries once. It does not retry tests or any product operation.
+The browser download is an external dependency. A stalled download must not
+hold a hosted runner for GitHub's six-hour default job timeout. This helper
+bounds each attempt, terminates its complete process group, and retries once.
+Standard CI does not refresh operating-system packages. Clean-machine and
+release qualification can request that separate dependency boundary with
+``--with-system-deps``. The helper does not retry tests or product operations.
 """
 
 from __future__ import annotations
@@ -20,12 +22,19 @@ from collections.abc import Callable, Sequence
 from ctypes import wintypes
 from typing import Any, Protocol
 
-PLAYWRIGHT_INSTALL = ("playwright", "install", "--with-deps", "chromium")
+PLAYWRIGHT_INSTALL = ("playwright", "install", "chromium")
+PLAYWRIGHT_INSTALL_WITH_SYSTEM_DEPS = (
+    "playwright",
+    "install",
+    "--with-deps",
+    "chromium",
+)
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 PROCESS_EXIT_TIMEOUT_SECONDS = 5
 PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 SUDO_SIGNAL_TIMEOUT_SECONDS = 5
 FATAL_CLEANUP_EXIT_CODE = 125
+BROWSER_LAUNCH_EXIT_CODE = 126
 WINDOWS_JOB_WRAPPER_FLAG = "--windows-job-wrapper"
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
@@ -394,6 +403,7 @@ def install_with_retry(
     attempts: int,
     timeout_seconds: int,
     retry_delay_seconds: int,
+    command: Sequence[str] = PLAYWRIGHT_INSTALL,
     runner: Callable[[Sequence[str], int], int] = run_attempt,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
@@ -404,7 +414,7 @@ def install_with_retry(
             f"(timeout={timeout_seconds}s)",
             flush=True,
         )
-        return_code = runner(PLAYWRIGHT_INSTALL, timeout_seconds)
+        return_code = runner(command, timeout_seconds)
         if return_code == FATAL_CLEANUP_EXIT_CODE:
             print(
                 "::error::Playwright install cleanup failed; "
@@ -430,6 +440,41 @@ def install_with_retry(
     raise AssertionError("attempt loop did not return")
 
 
+def playwright_install_command(*, with_system_deps: bool) -> tuple[str, ...]:
+    """Select whether this qualification owns the host package boundary."""
+    if with_system_deps:
+        return PLAYWRIGHT_INSTALL_WITH_SYSTEM_DEPS
+    return PLAYWRIGHT_INSTALL
+
+
+def _launch_chromium_headless() -> None:
+    """Launch and close Chromium so a missing host library fails immediately."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        browser.close()
+
+
+def verify_chromium_launch(
+    launcher: Callable[[], None] | None = None,
+) -> int:
+    """Verify the installed browser and its host libraries without a retry."""
+    if launcher is None:
+        launcher = _launch_chromium_headless
+    try:
+        launcher()
+    except Exception as error:
+        print(
+            "::error::Chromium was installed but could not launch. "
+            "The runner can be missing a required system library: "
+            f"{error}",
+            flush=True,
+        )
+        return BROWSER_LAUNCH_EXIT_CODE
+    return 0
+
+
 def positive_int(value: str) -> int:
     """Parse a strictly positive command-line integer."""
     parsed = int(value)
@@ -453,12 +498,26 @@ def main() -> int:
         type=positive_int,
         default=5,
     )
+    parser.add_argument(
+        "--with-system-deps",
+        action="store_true",
+        help=(
+            "also install operating-system dependencies; use only when this "
+            "clean-machine or release qualification owns that package boundary"
+        ),
+    )
     args = parser.parse_args()
-    return install_with_retry(
+    result = install_with_retry(
         attempts=args.attempts,
         timeout_seconds=args.attempt_timeout_seconds,
         retry_delay_seconds=args.retry_delay_seconds,
+        command=playwright_install_command(
+            with_system_deps=args.with_system_deps,
+        ),
     )
+    if result != 0:
+        return result
+    return verify_chromium_launch()
 
 
 if __name__ == "__main__":

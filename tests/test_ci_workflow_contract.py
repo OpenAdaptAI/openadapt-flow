@@ -24,7 +24,7 @@ def test_playwright_version_probes_are_valid_python() -> None:
 
 
 def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
-    """A stalled external browser download cannot consume a runner for hours."""
+    """PR browser delivery avoids apt; release qualification owns OS deps."""
     workflow = CI.read_text(encoding="utf-8")
     test_start = workflow.index("\n  test:")
     e2e_start = workflow.index("\n  e2e-browser:")
@@ -35,29 +35,44 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     test_job = workflow[test_start:e2e_start]
     e2e_job = workflow[e2e_start:linux_start]
     matrix_job = workflow[matrix_start:windows_start]
-    invocation = (
+    standard_invocation = (
         "python scripts/install_playwright_browser.py\n"
-        "          --attempts 2 --attempt-timeout-seconds 600"
+        "          --attempts 2 --attempt-timeout-seconds 300"
+    )
+    qualification_invocation = (
+        "python scripts/install_playwright_browser.py\n"
+        "          --attempts 2 --attempt-timeout-seconds 600\n"
+        "          --with-system-deps"
     )
 
     for job, timeout in (
         (test_job, "timeout-minutes: 55"),
         (e2e_job, "timeout-minutes: 50"),
-        (matrix_job, "timeout-minutes: 75"),
     ):
         assert timeout in job
-        install_start = job.index("- name: Install Playwright browser")
+        install_start = job.index("- name: Install and launch Playwright browser")
         install_end = job.index("\n\n", install_start)
         install_step = job[install_start:install_end]
-        assert "timeout-minutes: 22" in install_step
-        assert invocation in install_step
+        assert "timeout-minutes: 12" in install_step
+        assert standard_invocation in install_step
+        assert "--with-system-deps" not in install_step
 
-    assert workflow.count(invocation) == 3
+    assert "timeout-minutes: 75" in matrix_job
+    matrix_install_start = matrix_job.index("- name: Install Playwright browser")
+    matrix_install_end = matrix_job.index("\n\n", matrix_install_start)
+    matrix_install_step = matrix_job[matrix_install_start:matrix_install_end]
+    assert "timeout-minutes: 22" in matrix_install_step
+    assert qualification_invocation in matrix_install_step
+
+    assert workflow.count(standard_invocation) == 2
+    assert workflow.count(qualification_invocation) == 1
     assert "run: playwright install --with-deps chromium" not in workflow
 
-    # The timeout wrapper changes only external installation. Keep the exact
-    # required test and coverage selections intact.
-    assert "pytest -q --ignore=tests/e2e --basetemp=runs/ci" in test_job
+    # The privileged cleanup proof runs before browser delivery and does not
+    # depend on an apt mirror. The full suite excludes only that duplicate.
+    assert "Linux retained installer process group (non-injecting)" in test_job
+    assert "pytest -q tests/test_install_playwright_browser.py" in test_job
+    assert "--ignore=tests/test_install_playwright_browser.py" in test_job
     assert "coverage report --fail-under=85" in test_job
     assert "pytest -q tests/e2e/test_free_path_e2e.py" in e2e_job
     assert "pytest -q tests/e2e \\" in e2e_job

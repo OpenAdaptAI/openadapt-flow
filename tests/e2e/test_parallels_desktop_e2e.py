@@ -416,7 +416,13 @@ def test_desktop_record_compile_replay_structural(tmp_path, trial: int) -> None:
         evidence_row["host_free_bytes_before"] = vm.require_host_free_space(
             storage_path=storage_path
         )
+        # Refuse before the first mutation when this dedicated VM is not already
+        # bound to the reviewed base. Reverting that same current id then proves
+        # the live working state starts from the exact preserved snapshot.
+        vm.require_current_snapshot(base_snapshot_id)
         vm_touched = True
+        vm.revert(base_snapshot_id)
+        vm.require_current_snapshot(base_snapshot_id)
         vm.ensure_running()
         # Snapshot before any guest deployment/recording. This id is retained
         # in memory and is the only snapshot the trial may later delete.

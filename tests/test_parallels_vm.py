@@ -17,6 +17,7 @@ from openadapt_flow.backends.parallels_vm import (
     ParallelsVM,
     SnapshotInfo,
 )
+from tests.e2e.test_citrix_pixel_e2e import _restore_pixel_vm
 
 UUID = "{d4f9c29a-52e1-4793-9334-7e971c3d0ab3}"
 
@@ -169,6 +170,116 @@ def test_restore_refusal_never_deletes_when_base_is_not_current(monkeypatch):
             owned_snapshot_id=owned,
         )
     assert deleted == []
+
+
+def test_require_current_snapshot_accepts_only_exact_current_base(monkeypatch):
+    vm = ParallelsVM(UUID)
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+    other = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+    monkeypatch.setattr(
+        vm,
+        "list_snapshots",
+        lambda: [SnapshotInfo(base, True), SnapshotInfo(other, False)],
+    )
+
+    vm.require_current_snapshot(base)
+
+    with pytest.raises(ParallelsError, match="not current"):
+        vm.require_current_snapshot(other)
+    with pytest.raises(ParallelsError, match="missing"):
+        vm.require_current_snapshot("{b8199a93-ef44-439f-a70b-eaf5bd1d771b}")
+    with pytest.raises(ValueError, match="exact braced UUID"):
+        vm.require_current_snapshot("base")
+
+
+class _PixelLifecycleVM:
+    def __init__(self, *, restore_error: Exception | None = None) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self.state = "running"
+        self.restore_error = restore_error
+
+    def restore_base_and_delete_owned_snapshot(
+        self, *, base_snapshot_id: str, owned_snapshot_id: str
+    ) -> None:
+        self.calls.append(("restore-delete", base_snapshot_id, owned_snapshot_id))
+        if self.restore_error is not None:
+            raise self.restore_error
+
+    def revert(self, snapshot_id: str) -> None:
+        self.calls.append(("revert", snapshot_id))
+
+    def status(self) -> str:
+        self.calls.append(("status", self.state))
+        return self.state
+
+    def suspend(self) -> None:
+        self.calls.append(("suspend",))
+        self.state = "suspended"
+
+    def require_current_snapshot(self, snapshot_id: str) -> None:
+        self.calls.append(("require-current", snapshot_id))
+
+
+def test_pixel_cleanup_restores_base_deletes_only_owned_and_verifies() -> None:
+    vm = _PixelLifecycleVM()
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+    owned = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+
+    _restore_pixel_vm(
+        vm,
+        base_snapshot_id=base,
+        owned_snapshot_id=owned,
+        vm_touched=True,
+    )
+
+    assert vm.calls == [
+        ("restore-delete", base, owned),
+        ("status", "running"),
+        ("suspend",),
+        ("status", "suspended"),
+        ("require-current", base),
+    ]
+
+
+def test_pixel_cleanup_failure_cannot_produce_a_passing_test() -> None:
+    vm = _PixelLifecycleVM(restore_error=ParallelsError("restore failed"))
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+    owned = "{516f223f-7e3a-48f4-90d0-f69f9aaa7644}"
+
+    with pytest.raises(RuntimeError, match="failed to restore its exact base"):
+        _restore_pixel_vm(
+            vm,
+            base_snapshot_id=base,
+            owned_snapshot_id=owned,
+            vm_touched=True,
+        )
+
+
+def test_pixel_cleanup_without_owned_snapshot_reverts_exact_base() -> None:
+    vm = _PixelLifecycleVM()
+    base = "{35dba943-a22d-473c-b1b0-44fa6326e626}"
+
+    _restore_pixel_vm(
+        vm,
+        base_snapshot_id=base,
+        owned_snapshot_id=None,
+        vm_touched=True,
+    )
+
+    assert ("revert", base) in vm.calls
+
+
+def test_pixel_cleanup_does_not_touch_vm_after_read_only_preflight_refusal() -> None:
+    vm = _PixelLifecycleVM()
+
+    _restore_pixel_vm(
+        vm,
+        base_snapshot_id="{35dba943-a22d-473c-b1b0-44fa6326e626}",
+        owned_snapshot_id=None,
+        vm_touched=False,
+    )
+
+    assert vm.calls == []
 
 
 def test_guest_ip_skips_apipa(monkeypatch):

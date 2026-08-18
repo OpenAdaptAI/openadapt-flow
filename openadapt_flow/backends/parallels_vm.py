@@ -278,6 +278,29 @@ class ParallelsVM:
                 out.append(SnapshotInfo(snapshot_id=sid, current=bool(star)))
         return out
 
+    def require_current_snapshot(self, snapshot_id: str) -> None:
+        """Prove one exact preserved snapshot exists and is current.
+
+        Qualification callers use this read-only check before they resume,
+        focus, snapshot, deploy, or actuate on a dedicated VM. It prevents a
+        run from preserving and later deleting an unrelated current state.
+        """
+
+        snapshot_pattern = (
+            r"\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+            r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}"
+        )
+        if re.fullmatch(snapshot_pattern, snapshot_id) is None:
+            raise ValueError("snapshot_id must be one exact braced UUID")
+        snapshots = self.list_snapshots()
+        match = next(
+            (item for item in snapshots if item.snapshot_id == snapshot_id), None
+        )
+        if match is None:
+            raise ParallelsError("preserved base snapshot is missing")
+        if not match.current:
+            raise ParallelsError("preserved base snapshot is not current")
+
     def revert(self, snapshot_id: str) -> None:
         """Revert to a snapshot (the per-run clean-state reset)."""
         self._run(["snapshot-switch", self.uuid, "-i", snapshot_id])

@@ -322,13 +322,20 @@ def test_validating_refresh_uses_exact_macos_parallels_substrate_and_scope() -> 
     start = claims.index("  refresh-validating-evidence:")
     refresh = claims[start:]
 
-    assert "runs-on: [self-hosted, macos, arm64]" in refresh
+    assert "cancel-in-progress: ${{ github.event_name == 'pull_request' }}" in claims
+    assert "runs-on: [self-hosted, macos, arm64, openadapt-parallels]" in refresh
     assert "OPENADAPT_PARALLELS_VALIDATION_ENABLED" in refresh
+    assert "group: openadapt-parallels-validation" in refresh
+    assert "cancel-in-progress: false" in refresh
     assert "runs-on: ubuntu-latest" not in refresh
     assert "oa-vm" not in refresh
     assert "command -v prlctl" in refresh
     assert "OAFLOW_PARALLELS_BASE_SNAPSHOT_ID" in refresh
+    assert "vm.require_current_snapshot" in refresh
     assert "--ci-job validating --junit runs/validating-junit.xml" in refresh
+    assert refresh.index("tests/e2e/test_citrix_pixel_e2e.py") < refresh.index(
+        "tests/e2e/test_parallels_desktop_e2e.py"
+    )
     for path in (
         "tests/e2e/test_parallels_desktop_e2e.py",
         "tests/e2e/test_citrix_pixel_e2e.py",

@@ -33,7 +33,9 @@ on:
 
 concurrency:
   group: validate-claims-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A pull-request structure check is safe to supersede. A physical Parallels
+  # run is not: cancellation could interrupt its exact-snapshot cleanup.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -90,7 +92,7 @@ jobs:
   # These selected tests require macOS, local Parallels, a running configured
   # Windows VM, and a known base snapshot. They cannot run on ubuntu-latest or
   # against an unrelated hosted VM endpoint. A repository owner enables the
-  # job only after a self-hosted runner has all three labels below and the two
+  # job only after a self-hosted runner has all four labels below and the two
   # required repository variables are configured.
   #
   # A skipped job means "not proven this run" and produces no report. A green
@@ -101,8 +103,11 @@ jobs:
     if: >-
       ${{ vars.OPENADAPT_PARALLELS_VALIDATION_ENABLED == 'true' &&
           (github.event_name == 'schedule' || inputs.run_infra == true) }}
-    runs-on: [self-hosted, macos, arm64]
+    runs-on: [self-hosted, macos, arm64, openadapt-parallels]
     timeout-minutes: 90
+    concurrency:
+      group: openadapt-parallels-validation
+      cancel-in-progress: false
     env:
       OAFLOW_PARALLELS_VM_UUID: ${{ vars.OAFLOW_PARALLELS_VM_UUID }}
       OAFLOW_PARALLELS_BASE_SNAPSHOT_ID: ${{ vars.OAFLOW_PARALLELS_BASE_SNAPSHOT_ID }}
@@ -135,6 +140,20 @@ jobs:
       - name: Install validation dependencies
         run: python -m pip install -e .[dev]
 
+      - name: Prove configured VM and base are current before mutation
+        run: |
+          python -c '
+          import os
+          from openadapt_flow.backends.parallels_vm import ParallelsVM
+          vm = ParallelsVM(os.environ["OAFLOW_PARALLELS_VM_UUID"])
+          vm.require_host_free_space(
+              storage_path=os.environ["OAFLOW_PARALLELS_STORAGE_PATH"]
+          )
+          vm.require_current_snapshot(
+              os.environ["OAFLOW_PARALLELS_BASE_SNAPSHOT_ID"]
+          )
+          '
+
       - name: Run scoped desktop and pixel evidence
         env:
           OAFLOW_PARALLELS_E2E: "1"
@@ -142,8 +161,8 @@ jobs:
         run: |
           mkdir -p runs
           python -m pytest -q \
-            tests/e2e/test_parallels_desktop_e2e.py \
             tests/e2e/test_citrix_pixel_e2e.py \
+            tests/e2e/test_parallels_desktop_e2e.py \
             --junitxml=runs/validating-junit.xml --basetemp=runs/ci
 
       - name: Require every selected evidence file to pass

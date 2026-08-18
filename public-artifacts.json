@@ -72,6 +72,10 @@
       "sha256": "bb032fd5942477be558870dbf2c6615d258b6600ac2b389c5c4bf7c55b856da6"
     },
     {
+      "path": ".github/actionlint.yaml",
+      "sha256": "f58f146d55a022c530f1dd35e5da6a2e9ea0cd5cbcac0e6b0e50995a8b45cf20"
+    },
+    {
       "path": ".github/dependabot.yml",
       "sha256": "40a11fc00e1010db80d8788ee8c6125b51b14d642be018cddb761ea209f66095"
     },
@@ -121,7 +125,7 @@
     },
     {
       "path": ".github/workflows/validate-claims.yml",
-      "sha256": "75265f62b9606ee7eca54a989f72d09dd7a0f16016e5883fd723a09d825d990b"
+      "sha256": "368accbf68954e8e481fc6d7d36229b9cb70c267ec302e01657aa6537900a9e6"
     },
     {
       "path": ".pre-commit-config.yaml",

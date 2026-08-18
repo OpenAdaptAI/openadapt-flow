@@ -389,3 +389,4 @@
 
 - The historical result uses OCR evidence from a visible saved message row. It does not use an out-of-band OpenEMR system-of-record read.
 - FIELD TEST, NOT CI-reproducible: the head-to-head ran against a SHARED public demo that other users mutate and that resets daily; the sample is small (10 agent runs). Only the verifier + task-prompt units run in CI. `reproducibility: field` forbids ever labeling this `supported`.
+

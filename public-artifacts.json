@@ -121,7 +121,7 @@
     },
     {
       "path": ".github/workflows/validate-claims.yml",
-      "sha256": "085faf897b2c9f31afe4b1297454606bec8af3ac0165616a6351f06e9ce1fe6a"
+      "sha256": "7030f250fe66f36e71f3b44d52713e7f550a10e04c10f37ebdc745fa9a97c69a"
     },
     {
       "path": ".pre-commit-config.yaml",
@@ -601,7 +601,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "bf33b2ef84654c8563937828e38e389e065efcea5ec2654d4888423c1ede0142"
+      "sha256": "5423f4f10ef289dc3e232630c8558f12a76b3f11ebbb497feb923a928dc230b7"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -1809,7 +1809,7 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "b27d6f6a848d1dd75149155bc5f33dc4b797634def65da5ffe4f62fe0053f44e"
+      "sha256": "c8275336c9581532a3841a57913228b7584ab1487cdcc9c7b7ab884326769842"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

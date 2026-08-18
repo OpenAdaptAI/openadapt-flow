@@ -2,13 +2,15 @@ name: Validate claims
 
 # Make every public maturity claim a FUNCTION of automated evidence.
 #
-#   - pull_request: run the fast claim->evidence GATE
-#     (scripts/validate_claims.py --check) on every PR. This is a
+#   - pull_request: run the fast claim->evidence STRUCTURE GATE
+#     (scripts/validate_claims.py --check --structure-only) on every PR. This is a
 #     required-check CANDIDATE: wire it into branch protection as the context
 #     "gate" (the actual CheckRun job name from the "Validate claims" workflow)
 #     to block a PR that overclaims (a `supported` claim whose only backing is
 #     an opt-in/infra-gated test, a `field` result labeled `supported`, or a
-#     missing evidence path). It NEVER touches infra.
+#     missing evidence path). The required CI `test` and `e2e-browser` jobs
+#     separately bind every supported test file to their real JUnit results.
+#     It NEVER touches infra.
 #   - schedule + workflow_dispatch: the infra-gated leg that provisions a real
 #     Windows VM (via oa-vm) and runs the OPT-IN desktop + Citrix e2e that back
 #     the `validating` tiers, then regenerates the evidence report. Where the
@@ -55,8 +57,8 @@ jobs:
       - name: Install PyYAML
         run: pip install "pyyaml>=6"
 
-      - name: Claim -> evidence gate
-        run: python scripts/validate_claims.py --check
+      - name: Claim -> evidence structure gate
+        run: python scripts/validate_claims.py --check --structure-only
 
       # Prove the doc is regenerable and in sync with the registry: regenerate
       # docs/VERIFICATION.md + docs/verification.json into a temp dir would be
@@ -154,7 +156,7 @@ jobs:
         if: steps.infra.outputs.available == 'true'
         run: |
           python scripts/validate_claims.py --report \
-            --junit runs/validating-junit.xml
+            --ci-job validating --junit runs/validating-junit.xml
 
       - name: Upload refreshed evidence
         if: steps.infra.outputs.available == 'true'

@@ -196,7 +196,7 @@ def test_unknown_tier_fails() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# green-check via a junit artifact (optional path)
+# required-job proof via a JUnit artifact
 # --------------------------------------------------------------------------- #
 def test_junit_green_check_flags_red_supported_test(tmp_path: Path) -> None:
     junit = tmp_path / "junit.xml"
@@ -210,10 +210,71 @@ def test_junit_green_check_flags_red_supported_test(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     parsed = vc.parse_junit(junit)
-    assert parsed.get("test_replayer.py") == "failed"
-    result = vc.validate_claim(_claim(), junit=parsed)
+    assert parsed.get("tests/test_replayer.py") == "failed"
+    result = vc.validate_claim(_claim(), junit=parsed, ci_job="test")
     assert not result.ok
-    assert any("RED in junit" in e for e in result.errors)
+    assert any("RED in test JUnit" in e for e in result.errors)
+
+
+def test_pytest_xunit2_classname_is_mapped_without_file_attribute(
+    tmp_path: Path,
+) -> None:
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        """<?xml version="1.0"?>
+        <testsuites><testsuite>
+          <testcase classname="tests.test_replayer" name="test_happy_path_click_then_param_type" />
+        </testsuite></testsuites>""",
+        encoding="utf-8",
+    )
+
+    assert vc.parse_junit(junit) == {"tests/test_replayer.py": "passed"}
+
+
+def test_supported_evidence_must_be_present_and_not_all_skipped() -> None:
+    missing = vc.validate_claim(_claim(), junit={}, ci_job="test")
+    skipped = vc.validate_claim(_claim(), junit={CI_TEST: "skipped"}, ci_job="test")
+    passed = vc.validate_claim(_claim(), junit={CI_TEST: "passed"}, ci_job="test")
+
+    assert any("ABSENT" in error for error in missing.errors)
+    assert any("SKIPPED" in error for error in skipped.errors)
+    assert passed.ok, passed.errors
+
+
+def test_junit_file_is_passed_when_one_case_passes_and_an_optional_case_skips(
+    tmp_path: Path,
+) -> None:
+    junit = tmp_path / "junit.xml"
+    junit.write_text(
+        """<?xml version="1.0"?>
+        <testsuite>
+          <testcase classname="tests.test_replayer" name="optional"><skipped /></testcase>
+          <testcase classname="tests.test_replayer" name="required" />
+        </testsuite>""",
+        encoding="utf-8",
+    )
+
+    assert vc.parse_junit(junit)[CI_TEST] == "passed"
+
+
+def test_missing_or_empty_junit_fails_closed(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.xml"
+    empty = tmp_path / "empty.xml"
+    empty.write_text("<testsuite />", encoding="utf-8")
+
+    for path in (missing, empty):
+        try:
+            vc.parse_junit(path)
+        except vc.JunitEvidenceError:
+            pass
+        else:
+            raise AssertionError(f"{path} did not fail closed")
+
+
+def test_cli_requires_junit_for_non_structural_supported_check() -> None:
+    assert vc.main(["--check"]) == 1
+    assert vc.main(["--check", "--structure-only"]) == 0
+    assert vc.main(["--check", "--junit", "missing.xml"]) == 1
 
 
 def test_report_renders_without_crashing() -> None:
@@ -221,6 +282,13 @@ def test_report_renders_without_crashing() -> None:
     md = vc.render_markdown(results, now="2026-07-14T00:00:00Z", junit_used=False)
     assert "VERIFICATION" in md
     assert "web-supported" in md
+    assert md.endswith("\n") and not md.endswith("\n\n")
     blob = vc.render_json(results, now="2026-07-14T00:00:00Z", junit_used=False)
     assert blob["ok"] is True
+    assert blob["green_check_job"] is None
+    assert all(
+        "ci_job" in evidence
+        for claim in blob["claims"]
+        for evidence in claim["evidence"]
+    )
     assert {c["id"] for c in blob["claims"]}  # non-empty

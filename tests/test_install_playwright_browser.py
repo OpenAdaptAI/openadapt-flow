@@ -57,6 +57,52 @@ def test_browser_launch_probe_succeeds() -> None:
     assert launches == 1
 
 
+def test_browser_launch_uses_the_bounded_timeout() -> None:
+    launch_kwargs: dict[str, Any] = {}
+    closes = 0
+
+    class FakeBrowser:
+        def close(self) -> None:
+            nonlocal closes
+            closes += 1
+
+    class FakeBrowserType:
+        def launch(self, **kwargs: Any) -> FakeBrowser:
+            launch_kwargs.update(kwargs)
+            return FakeBrowser()
+
+    install_playwright_browser._launch_and_close(FakeBrowserType())
+
+    assert launch_kwargs == {
+        "headless": True,
+        "timeout": install_playwright_browser.BROWSER_LAUNCH_TIMEOUT_MILLISECONDS,
+    }
+    assert install_playwright_browser.BROWSER_LAUNCH_TIMEOUT_MILLISECONDS == 30_000
+    assert closes == 1
+
+
+def test_browser_launch_probe_runs_in_a_bounded_process_tree() -> None:
+    calls: list[tuple[tuple[str, ...], int]] = []
+
+    def runner(command: Sequence[str], timeout_seconds: int) -> int:
+        calls.append((tuple(command), timeout_seconds))
+        return 0
+
+    result = install_playwright_browser.run_browser_launch_probe(runner)
+
+    assert result == 0
+    assert calls == [
+        (
+            (
+                sys.executable,
+                os.path.abspath(install_playwright_browser.__file__),
+                install_playwright_browser.BROWSER_LAUNCH_PROBE_FLAG,
+            ),
+            install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS,
+        )
+    ]
+
+
 def test_external_install_retries_once_then_succeeds() -> None:
     calls: list[tuple[tuple[str, ...], int]] = []
     outcomes = iter((124, 0))

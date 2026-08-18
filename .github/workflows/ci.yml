@@ -357,7 +357,7 @@ jobs:
         timeout-minutes: 12
         run: >-
           python scripts/install_playwright_browser.py
-          --attempts 2 --attempt-timeout-seconds 300
+          --attempts 2 --attempt-timeout-seconds 270
 
       # --basetemp pins pytest's tmp_path factory inside the workspace so
       # run dirs (REPORT.md + step/heal PNGs) survive for artifact upload;
@@ -446,7 +446,7 @@ jobs:
         timeout-minutes: 12
         run: >-
           python scripts/install_playwright_browser.py
-          --attempts 2 --attempt-timeout-seconds 300
+          --attempts 2 --attempt-timeout-seconds 270
 
       # The GOLDEN TASK, first and on its own. It is the core loop end to end
       # -- record, compile, certify, run under the Standard profile against an
@@ -489,13 +489,17 @@ jobs:
   # on a developer workstation. The fixed qualification matrix runs exactly
   # three clean trials with an independent exact-file oracle, three ambiguous
   # locator refusals, and three stale-handle refusals. This is scoped evidence
-  # for the in-tree GTK fixture, not a claim about arbitrary Linux apps.
+  # for the in-tree GTK fixture, not a claim about arbitrary Linux apps. The
+  # job must install real Linux accessibility packages, so both that external
+  # apt boundary and the enclosing qualification have explicit limits.
   linux-atspi-x11:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install isolated X11, D-Bus, GTK3, and AT-SPI
+        timeout-minutes: 15
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -515,6 +519,7 @@ jobs:
             "import gi; gi.require_version('Atspi', '2.0'); gi.require_version('Gtk', '3.0'); from gi.repository import Atspi, Gtk; print(Atspi, Gtk)"
 
       - name: Qualify GTK workflow on real AT-SPI
+        timeout-minutes: 10
         run: |
           mkdir -p runs/linux-atspi
           dbus-run-session -- \
@@ -526,6 +531,7 @@ jobs:
 
       - name: Upload Linux AT-SPI qualification evidence
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: linux-atspi-qualification

@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from scripts import install_playwright_browser
+
 ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github/workflows/ci.yml"
 QUICKSTART = ROOT / ".github/workflows/quickstart-lifecycle.yml"
@@ -37,7 +39,7 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     matrix_job = workflow[matrix_start:windows_start]
     standard_invocation = (
         "python scripts/install_playwright_browser.py\n"
-        "          --attempts 2 --attempt-timeout-seconds 300"
+        "          --attempts 2 --attempt-timeout-seconds 270"
     )
     qualification_invocation = (
         "python scripts/install_playwright_browser.py\n"
@@ -80,6 +82,51 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     assert "pytest -q --basetemp=runs/ci" in matrix_job
 
 
+def test_standard_browser_step_covers_cleanup_and_launch_worst_cases() -> None:
+    attempts = 2
+    attempt_timeout_seconds = 270
+    retry_delay_seconds = 5
+    step_timeout_seconds = 12 * 60
+    launch_timeout_seconds = (
+        install_playwright_browser.BROWSER_LAUNCH_TIMEOUT_MILLISECONDS / 1000
+    )
+
+    # POSIX can spend one bounded sudo call and one bounded group-exit wait at
+    # each of TERM, KILL, and the final exact-PGID privileged KILL fallback.
+    posix_cleanup_per_attempt = 3 * (
+        install_playwright_browser.SUDO_SIGNAL_TIMEOUT_SECONDS
+        + install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS
+    )
+    # Windows can wait for job accounting to reach zero and then reap the
+    # gated wrapper before it closes the retained Job Object handle.
+    windows_cleanup_per_attempt = 2 * (
+        install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS
+    )
+
+    posix_worst_case = (
+        attempts * (attempt_timeout_seconds + posix_cleanup_per_attempt)
+        + retry_delay_seconds
+        + install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS
+        + posix_cleanup_per_attempt
+    )
+    windows_worst_case = (
+        attempts * (attempt_timeout_seconds + windows_cleanup_per_attempt)
+        + retry_delay_seconds
+        + install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS
+        + windows_cleanup_per_attempt
+    )
+
+    assert launch_timeout_seconds == 30
+    assert install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS == 35
+    assert (
+        launch_timeout_seconds
+        < install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS
+    )
+    assert posix_worst_case == 670
+    assert windows_worst_case == 610
+    assert max(posix_worst_case, windows_worst_case) < step_timeout_seconds
+
+
 def test_windows_required_job_proves_retained_installer_job_object() -> None:
     workflow = CI.read_text(encoding="utf-8")
     windows_start = workflow.index("\n  windows-mock:")
@@ -88,6 +135,32 @@ def test_windows_required_job_proves_retained_installer_job_object() -> None:
 
     assert "Windows retained installer Job Object (non-injecting)" in windows_job
     assert "pytest -q tests/test_install_playwright_browser.py" in windows_job
+
+
+def test_required_linux_atspi_qualification_is_bounded() -> None:
+    workflow = CI.read_text(encoding="utf-8")
+    linux_start = workflow.index("\n  linux-atspi-x11:")
+    matrix_start = workflow.index("\n  test-matrix:")
+    linux_job = workflow[linux_start:matrix_start]
+
+    assert "runs-on: ubuntu-24.04\n    timeout-minutes: 30" in linux_job
+    step_limits = (
+        ("Install isolated X11, D-Bus, GTK3, and AT-SPI", 15),
+        ("Qualify GTK workflow on real AT-SPI", 10),
+        ("Upload Linux AT-SPI qualification evidence", 2),
+    )
+    for step_name, timeout_minutes in step_limits:
+        step_start = linux_job.index(f"- name: {step_name}")
+        step_end = linux_job.index("\n\n", step_start)
+        step = linux_job[step_start:step_end]
+        assert f"timeout-minutes: {timeout_minutes}" in step
+
+    assert sum(timeout for _name, timeout in step_limits) <= 30
+    assert linux_job.index("sudo apt-get update") < linux_job.index(
+        "scripts/qualify_linux_atspi.py"
+    )
+    assert "--output runs/linux-atspi/results.json" in linux_job
+    assert "if-no-files-found: error" in linux_job
 
 
 def test_full_matrix_can_be_dispatched_on_an_exact_branch() -> None:

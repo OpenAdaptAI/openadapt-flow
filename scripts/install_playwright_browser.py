@@ -35,7 +35,10 @@ PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 SUDO_SIGNAL_TIMEOUT_SECONDS = 5
 FATAL_CLEANUP_EXIT_CODE = 125
 BROWSER_LAUNCH_EXIT_CODE = 126
+BROWSER_LAUNCH_TIMEOUT_MILLISECONDS = 30_000
+BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS = 35
 WINDOWS_JOB_WRAPPER_FLAG = "--windows-job-wrapper"
+BROWSER_LAUNCH_PROBE_FLAG = "--browser-launch-probe"
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
@@ -447,13 +450,21 @@ def playwright_install_command(*, with_system_deps: bool) -> tuple[str, ...]:
     return PLAYWRIGHT_INSTALL
 
 
+def _launch_and_close(browser_type: Any) -> None:
+    """Launch one headless browser within the enclosing installer budget."""
+    browser = browser_type.launch(
+        headless=True,
+        timeout=BROWSER_LAUNCH_TIMEOUT_MILLISECONDS,
+    )
+    browser.close()
+
+
 def _launch_chromium_headless() -> None:
     """Launch and close Chromium so a missing host library fails immediately."""
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(headless=True)
-        browser.close()
+        _launch_and_close(playwright.chromium)
 
 
 def verify_chromium_launch(
@@ -475,6 +486,20 @@ def verify_chromium_launch(
     return 0
 
 
+def run_browser_launch_probe(
+    runner: Callable[[Sequence[str], int], int] = run_attempt,
+) -> int:
+    """Run the launch probe in a bounded process tree and return its result."""
+    return runner(
+        [
+            sys.executable,
+            os.path.abspath(__file__),
+            BROWSER_LAUNCH_PROBE_FLAG,
+        ],
+        BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS,
+    )
+
+
 def positive_int(value: str) -> int:
     """Parse a strictly positive command-line integer."""
     parsed = int(value)
@@ -486,6 +511,8 @@ def positive_int(value: str) -> int:
 def main() -> int:
     if len(sys.argv) >= 3 and sys.argv[1] == WINDOWS_JOB_WRAPPER_FLAG:
         return _windows_job_wrapper(sys.argv[2:])
+    if len(sys.argv) == 2 and sys.argv[1] == BROWSER_LAUNCH_PROBE_FLAG:
+        return verify_chromium_launch()
     parser = argparse.ArgumentParser()
     parser.add_argument("--attempts", type=positive_int, default=2)
     parser.add_argument(
@@ -517,7 +544,7 @@ def main() -> int:
     )
     if result != 0:
         return result
-    return verify_chromium_launch()
+    return run_browser_launch_probe()
 
 
 if __name__ == "__main__":

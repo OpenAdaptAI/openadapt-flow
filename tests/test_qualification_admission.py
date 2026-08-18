@@ -350,6 +350,9 @@ def test_unknown_fields_and_noncanonical_signature_refuse() -> None:
 
 
 def test_validity_and_signer_identity_are_bounded() -> None:
+    with pytest.raises(ValueError, match="independent from runtime validation"):
+        _payload(admission_id=UUIDS["runtime_validation_id"])
+
     raw = _payload().model_dump(mode="json")
     raw["expires_at"] = _utc(NOW + timedelta(days=31))
     with pytest.raises(ValueError, match="30 days"):

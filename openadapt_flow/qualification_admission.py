@@ -201,6 +201,11 @@ class QualificationAdmissionPayload(BaseModel):
 
     @model_validator(mode="after")
     def _validity_interval(self) -> "QualificationAdmissionPayload":
+        if self.admission_id == self.runtime_validation_id:
+            raise ValueError(
+                "qualification admission identity must be independent from "
+                "runtime validation identity"
+            )
         issued = _parse_utc(self.issued_at, field="issued_at")
         not_before = _parse_utc(self.not_before, field="not_before")
         expires = _parse_utc(self.expires_at, field="expires_at")

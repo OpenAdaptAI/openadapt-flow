@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -59,6 +60,28 @@ def test_external_install_returns_the_final_failure() -> None:
     assert attempts == 2
 
 
+def test_cleanup_failure_is_fatal_and_is_not_retried() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def runner(_command: Sequence[str], _timeout_seconds: int) -> int:
+        nonlocal attempts
+        attempts += 1
+        return install_playwright_browser.FATAL_CLEANUP_EXIT_CODE
+
+    result = install_playwright_browser.install_with_retry(
+        attempts=2,
+        timeout_seconds=600,
+        retry_delay_seconds=1,
+        runner=runner,
+        sleeper=sleeps.append,
+    )
+
+    assert result == install_playwright_browser.FATAL_CLEANUP_EXIT_CODE
+    assert attempts == 1
+    assert sleeps == []
+
+
 def test_attempt_timeout_terminates_the_process() -> None:
     result = install_playwright_browser.run_attempt(
         [sys.executable, "-c", "import time; time.sleep(30)"],
@@ -66,6 +89,76 @@ def test_attempt_timeout_terminates_the_process() -> None:
     )
 
     assert result == 124
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+@pytest.mark.parametrize("leader_return_code", [0, 7])
+def test_normal_leader_exit_cleans_surviving_child(
+    tmp_path: Path, leader_return_code: int
+) -> None:
+    lock_path = tmp_path / "normal-exit-child.lock"
+    pid_path = tmp_path / "normal-exit-child.pid"
+    child_program = """
+import fcntl
+import os
+from pathlib import Path
+import sys
+import time
+
+with Path(sys.argv[1]).open("w") as lock_file:
+    fcntl.flock(lock_file, fcntl.LOCK_EX)
+    Path(sys.argv[2]).write_text(str(os.getpid()), encoding="utf-8")
+    time.sleep(30)
+"""
+    parent_program = """
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+subprocess.Popen([sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]])
+deadline = time.monotonic() + 10
+while not Path(sys.argv[3]).exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("child did not acquire its lock")
+    time.sleep(0.01)
+raise SystemExit(int(sys.argv[4]))
+"""
+
+    result = install_playwright_browser.run_attempt(
+        [
+            sys.executable,
+            "-c",
+            parent_program,
+            child_program,
+            str(lock_path),
+            str(pid_path),
+            str(leader_return_code),
+        ],
+        timeout_seconds=10,
+    )
+
+    child_pid = int(pid_path.read_text(encoding="utf-8"))
+    lock_released = False
+    try:
+        import fcntl
+
+        with lock_path.open("w") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                lock_released = True
+    finally:
+        if not lock_released:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    assert result == leader_return_code
+    assert lock_released, "child survived a successful installer leader exit"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
@@ -136,6 +229,117 @@ time.sleep(30)
     assert lock_released, "timed-out descendant still holds the installer lock"
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux" or os.environ.get("GITHUB_ACTIONS") != "true",
+    reason="required GitHub Linux privileged process-group proof",
+)
+def test_github_linux_cleans_root_owned_sigterm_ignoring_child(
+    tmp_path: Path,
+) -> None:
+    probe = subprocess.run(
+        ["sudo", "-n", "/usr/bin/id", "-u"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=install_playwright_browser.SUDO_SIGNAL_TIMEOUT_SECONDS,
+    )
+    assert probe.returncode == 0 and probe.stdout.strip() == "0", (
+        "required GitHub Linux root cleanup proof needs passwordless sudo"
+    )
+
+    lock_path = tmp_path / "root-child.lock"
+    metadata_path = tmp_path / "root-child.meta"
+    leader_path = tmp_path / "root-child.leader"
+    child_program = """
+import fcntl
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+lock_path = Path(sys.argv[1])
+with lock_path.open("w") as lock_file:
+    os.chmod(lock_path, 0o666)
+    fcntl.flock(lock_file, fcntl.LOCK_EX)
+    Path(sys.argv[2]).write_text(
+        f"{os.getuid()} {os.getpid()} {os.getpgrp()}", encoding="utf-8"
+    )
+    time.sleep(30)
+"""
+    parent_program = """
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+Path(sys.argv[4]).write_text(str(os.getpid()), encoding="utf-8")
+subprocess.Popen(
+    ["sudo", "-n", sys.executable, "-c", sys.argv[1], sys.argv[2], sys.argv[3]]
+)
+deadline = time.monotonic() + 10
+while not Path(sys.argv[3]).exists():
+    if time.monotonic() >= deadline:
+        raise RuntimeError("root child did not acquire its lock")
+    time.sleep(0.01)
+"""
+
+    child_process_group: int | None = None
+    try:
+        result = install_playwright_browser.run_attempt(
+            [
+                sys.executable,
+                "-c",
+                parent_program,
+                child_program,
+                str(lock_path),
+                str(metadata_path),
+                str(leader_path),
+            ],
+            timeout_seconds=10,
+        )
+
+        child_uid, _child_pid, child_process_group = map(
+            int, metadata_path.read_text(encoding="utf-8").split()
+        )
+        leader_pid = int(leader_path.read_text(encoding="utf-8"))
+        assert child_uid == 0
+        assert child_process_group == leader_pid
+
+        import fcntl
+
+        with lock_path.open("a+") as lock_file:
+            try:
+                fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                lock_released = False
+            else:
+                lock_released = True
+
+        assert result == 0
+        assert lock_released, "root-owned descendant retained its installer lock"
+        assert not install_playwright_browser._process_group_exists(leader_pid)
+    finally:
+        if child_process_group is not None:
+            subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "/bin/kill",
+                    "-SIGKILL",
+                    "--",
+                    f"-{child_process_group}",
+                ],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=install_playwright_browser.SUDO_SIGNAL_TIMEOUT_SECONDS,
+            )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
 def test_posix_partial_group_kill_uses_exact_privileged_fallback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,13 +370,72 @@ def test_posix_partial_group_kill_uses_exact_privileged_fallback(
     )
     process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
 
-    install_playwright_browser._terminate_process_group(process, platform="posix")
+    cleanup_succeeded = install_playwright_browser._terminate_process_group(
+        process, platform="posix"
+    )
 
+    assert cleanup_succeeded is True
     assert normal_signals == [
         (2267, signal.SIGTERM),
         (2267, signal.SIGKILL),
     ]
     assert privileged_signals == [(2267, signal.SIGKILL)]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+def test_posix_final_cleanup_verification_is_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 2267
+
+    monkeypatch.setattr(install_playwright_browser.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(
+        install_playwright_browser,
+        "_wait_for_process_group_exit",
+        lambda _process: False,
+    )
+    monkeypatch.setattr(
+        install_playwright_browser,
+        "_sudo_signal_process_group",
+        lambda *_args: False,
+    )
+    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+
+    assert (
+        install_playwright_browser._terminate_process_group(process, platform="posix")
+        is False
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
+def test_run_attempt_returns_fatal_when_group_cannot_be_proven_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeProcess:
+        pid = 2267
+
+        def wait(self, timeout: int) -> int:
+            assert timeout == 600
+            return 0
+
+    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+    monkeypatch.setattr(
+        install_playwright_browser.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(
+        install_playwright_browser, "_process_group_exists", lambda _pgid: True
+    )
+    monkeypatch.setattr(
+        install_playwright_browser, "_terminate_process_group", lambda _process: False
+    )
+
+    assert (
+        install_playwright_browser.run_attempt(["installer"], timeout_seconds=600)
+        == install_playwright_browser.FATAL_CLEANUP_EXIT_CODE
+    )
 
 
 def test_privileged_fallback_is_bounded_and_targets_only_the_exact_group(

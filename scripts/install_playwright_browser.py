@@ -21,6 +21,7 @@ WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 PROCESS_EXIT_TIMEOUT_SECONDS = 5
 PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 SUDO_SIGNAL_TIMEOUT_SECONDS = 5
+FATAL_CLEANUP_EXIT_CODE = 125
 
 
 def _wait_for_exit(process: subprocess.Popen[bytes]) -> bool:
@@ -89,11 +90,11 @@ def _terminate_process_group(
     process: subprocess.Popen[bytes],
     *,
     platform: str = os.name,
-) -> None:
-    """Terminate the timed-out installer and all of its child processes."""
+) -> bool:
+    """Terminate one installer group and prove whether it became empty."""
     if platform == "nt":
         if process.poll() is not None:
-            return
+            return True
         taskkill_succeeded = False
         try:
             result = subprocess.run(
@@ -108,19 +109,20 @@ def _terminate_process_group(
             pass
         if not taskkill_succeeded and process.poll() is None:
             process.kill()
-        if not _wait_for_exit(process) and process.poll() is None:
+        exited = _wait_for_exit(process)
+        if not exited and process.poll() is None:
             process.kill()
-            _wait_for_exit(process)
-        return
+            exited = _wait_for_exit(process)
+        return exited or process.poll() is not None
 
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return not _process_group_exists(process.pid)
     except PermissionError:
         _sudo_signal_process_group(process.pid, signal.SIGTERM)
     if _wait_for_process_group_exit(process):
-        return
+        return True
 
     # The group leader can exit after SIGTERM while an unprivileged child
     # ignores it or a privileged apt descendant survives it. Signal the exact
@@ -128,21 +130,21 @@ def _terminate_process_group(
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return
+        return not _process_group_exists(process.pid)
     except PermissionError:
         _sudo_signal_process_group(process.pid, signal.SIGKILL)
     if _wait_for_process_group_exit(process):
-        return
+        return True
 
     # killpg can report success after signaling only the same-UID members of a
     # mixed-ownership group. A final bounded, non-interactive exact-PGID signal
     # handles the root-owned apt process that Playwright starts on Linux CI.
     _sudo_signal_process_group(process.pid, signal.SIGKILL)
-    _wait_for_process_group_exit(process)
+    return _wait_for_process_group_exit(process)
 
 
 def run_attempt(command: Sequence[str], timeout_seconds: int) -> int:
-    """Run one installer attempt and return 124 when its time bound expires."""
+    """Run one installer attempt and return only after bounded group cleanup."""
     try:
         if os.name == "nt":
             process = subprocess.Popen(
@@ -154,10 +156,27 @@ def run_attempt(command: Sequence[str], timeout_seconds: int) -> int:
     except FileNotFoundError:
         return 127
     try:
-        return process.wait(timeout=timeout_seconds)
+        return_code = process.wait(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
-        _terminate_process_group(process)
-        return 124
+        return_code = 124
+
+    if os.name == "nt":
+        cleanup_succeeded = return_code != 124 or _terminate_process_group(process)
+    else:
+        # A CLI leader can return success or failure while a downloader or
+        # privileged apt process remains in its exact process group. Inspect
+        # the PGID after every exit, not only after a timeout.
+        cleanup_succeeded = not _process_group_exists(process.pid)
+        if not cleanup_succeeded:
+            cleanup_succeeded = _terminate_process_group(process)
+    if not cleanup_succeeded:
+        print(
+            f"::error::Installer cleanup could not prove process group "
+            f"{process.pid} empty; refusing retry",
+            flush=True,
+        )
+        return FATAL_CLEANUP_EXIT_CODE
+    return return_code
 
 
 def install_with_retry(
@@ -176,6 +195,13 @@ def install_with_retry(
             flush=True,
         )
         return_code = runner(PLAYWRIGHT_INSTALL, timeout_seconds)
+        if return_code == FATAL_CLEANUP_EXIT_CODE:
+            print(
+                "::error::Playwright install cleanup failed; "
+                "a retry could overlap a surviving process",
+                flush=True,
+            )
+            return return_code
         if return_code == 0:
             return 0
         if attempt == attempts:

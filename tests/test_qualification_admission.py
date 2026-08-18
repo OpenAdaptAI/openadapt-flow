@@ -57,9 +57,13 @@ def _private_key() -> Ed25519PrivateKey:
 
 
 def _key_id(key: Ed25519PrivateKey | None = None) -> str:
-    public = (key or _private_key()).public_key().public_bytes(
-        serialization.Encoding.Raw,
-        serialization.PublicFormat.Raw,
+    public = (
+        (key or _private_key())
+        .public_key()
+        .public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
     )
     return qualification_signer_key_id(public)
 

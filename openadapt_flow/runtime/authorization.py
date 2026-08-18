@@ -527,12 +527,10 @@ class GovernedRunAuthorization(BaseModel):
                 != template.template_sha256
                 or payload.environment_contract_sha256
                 != template.qualification_environment_contract_sha256
-                or payload.input_policy_sha256
-                != template.parameter_contract_sha256
+                or payload.input_policy_sha256 != template.parameter_contract_sha256
                 or payload.action_policy_sha256
                 != template.qualification_project_contract_sha256
-                or payload.identity_contract_sha256
-                != template.identity_contract_sha256
+                or payload.identity_contract_sha256 != template.identity_contract_sha256
                 or payload.effect_contract_sha256 != effect_contract_digest
             ):
                 return (

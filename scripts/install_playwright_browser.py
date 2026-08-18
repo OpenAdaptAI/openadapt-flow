@@ -19,6 +19,8 @@ from collections.abc import Callable, Sequence
 PLAYWRIGHT_INSTALL = ("playwright", "install", "--with-deps", "chromium")
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 PROCESS_EXIT_TIMEOUT_SECONDS = 5
+PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
+SUDO_SIGNAL_TIMEOUT_SECONDS = 5
 
 
 def _wait_for_exit(process: subprocess.Popen[bytes]) -> bool:
@@ -30,15 +32,68 @@ def _wait_for_exit(process: subprocess.Popen[bytes]) -> bool:
     return True
 
 
+def _process_group_exists(process_group_id: int) -> bool:
+    """Report whether a POSIX process group still has any members."""
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A privileged descendant can remain after its unprivileged group
+        # leader exits. The group exists even though this user cannot signal it.
+        return True
+    return True
+
+
+def _wait_for_process_group_exit(
+    process: subprocess.Popen[bytes],
+) -> bool:
+    """Wait a bounded interval for every member of a POSIX group to exit."""
+    deadline = time.monotonic() + PROCESS_EXIT_TIMEOUT_SECONDS
+    while True:
+        process.poll()  # Reap the group leader so its zombie does not retain the PGID.
+        if not _process_group_exists(process.pid):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(PROCESS_GROUP_POLL_INTERVAL_SECONDS, remaining))
+
+
+def _sudo_signal_process_group(
+    process_group_id: int,
+    process_signal: signal.Signals,
+) -> bool:
+    """Signal one exact privileged POSIX process group without prompting."""
+    try:
+        result = subprocess.run(
+            [
+                "sudo",
+                "-n",
+                "/bin/kill",
+                f"-{process_signal.name}",
+                "--",
+                f"-{process_group_id}",
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=SUDO_SIGNAL_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def _terminate_process_group(
     process: subprocess.Popen[bytes],
     *,
     platform: str = os.name,
 ) -> None:
     """Terminate the timed-out installer and all of its child processes."""
-    if process.poll() is not None:
-        return
     if platform == "nt":
+        if process.poll() is not None:
+            return
         taskkill_succeeded = False
         try:
             result = subprocess.run(
@@ -62,12 +117,28 @@ def _terminate_process_group(
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    if not _wait_for_exit(process):
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        _wait_for_exit(process)
+    except PermissionError:
+        _sudo_signal_process_group(process.pid, signal.SIGTERM)
+    if _wait_for_process_group_exit(process):
+        return
+
+    # The group leader can exit after SIGTERM while an unprivileged child
+    # ignores it or a privileged apt descendant survives it. Signal the exact
+    # group again rather than trusting only the leader's exit state.
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        _sudo_signal_process_group(process.pid, signal.SIGKILL)
+    if _wait_for_process_group_exit(process):
+        return
+
+    # killpg can report success after signaling only the same-UID members of a
+    # mixed-ownership group. A final bounded, non-interactive exact-PGID signal
+    # handles the root-owned apt process that Playwright starts on Linux CI.
+    _sudo_signal_process_group(process.pid, signal.SIGKILL)
+    _wait_for_process_group_exit(process)
 
 
 def run_attempt(command: Sequence[str], timeout_seconds: int) -> int:

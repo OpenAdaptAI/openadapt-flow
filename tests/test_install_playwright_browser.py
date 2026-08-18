@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Sequence
+from typing import Any, cast
+
+import pytest
 
 from scripts import install_playwright_browser
 
@@ -60,3 +63,34 @@ def test_attempt_timeout_terminates_the_process() -> None:
     )
 
     assert result == 124
+
+
+def test_windows_timeout_terminates_the_complete_child_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taskkill_calls: list[tuple[list[str], dict[str, Any]]] = []
+
+    class FakeProcess:
+        pid = 4815
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            raise AssertionError("taskkill must terminate the Windows tree")
+
+        def wait(self) -> int:
+            return 1
+
+    def fake_run(command: list[str], **kwargs: Any) -> None:
+        taskkill_calls.append((command, kwargs))
+
+    monkeypatch.setattr(install_playwright_browser.subprocess, "run", fake_run)
+    process = cast("install_playwright_browser.subprocess.Popen[bytes]", FakeProcess())
+
+    install_playwright_browser._terminate_process_group(process, platform="nt")
+
+    assert len(taskkill_calls) == 1
+    command, kwargs = taskkill_calls[0]
+    assert command == ["taskkill", "/PID", "4815", "/T", "/F"]
+    assert kwargs["timeout"] == 15

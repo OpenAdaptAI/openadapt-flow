@@ -17,14 +17,28 @@ import time
 from collections.abc import Callable, Sequence
 
 PLAYWRIGHT_INSTALL = ("playwright", "install", "--with-deps", "chromium")
+WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
+def _terminate_process_group(
+    process: subprocess.Popen[bytes],
+    *,
+    platform: str = os.name,
+) -> None:
     """Terminate the timed-out installer and all of its child processes."""
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        process.kill()
+    if platform == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            process.kill()
         process.wait()
         return
 
@@ -45,10 +59,13 @@ def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
 def run_attempt(command: Sequence[str], timeout_seconds: int) -> int:
     """Run one installer attempt and return 124 when its time bound expires."""
     try:
-        process = subprocess.Popen(
-            command,
-            start_new_session=os.name != "nt",
-        )
+        if os.name == "nt":
+            process = subprocess.Popen(
+                command,
+                creationflags=WINDOWS_CREATE_NEW_PROCESS_GROUP,
+            )
+        else:
+            process = subprocess.Popen(command, start_new_session=True)
     except FileNotFoundError:
         return 127
     try:

@@ -37,6 +37,7 @@ dependency is introduced.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -59,6 +60,7 @@ import idna
 __all__ = [
     "DEFAULT_HOST",
     "HostedError",
+    "HostedDeliveryUncertain",
     "config_path",
     "resolve_host",
     "resolve_token",
@@ -112,6 +114,14 @@ _API_TIMEOUT = 15.0
 
 class HostedError(RuntimeError):
     """A hosted-connectivity failure (auth, network, or a non-2xx response)."""
+
+
+class HostedDeliveryUncertain(HostedError):
+    """The upload request failed without a trustworthy delivery result."""
+
+    def __init__(self, message: str, *, context: Optional[dict[str, Any]] = None):
+        super().__init__(message)
+        self.context = context or {}
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1108,17 @@ def login(
 # ---------------------------------------------------------------------------
 
 
+def _local_review_id(manifest: dict[str, Any]) -> str:
+    """Return a local, non-authoritative id bound to one review manifest."""
+    payload = json.dumps(
+        manifest,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(b"openadapt.sanitized-review/v1\0" + payload).hexdigest()
+
+
 def push(
     path: Optional[Any] = None,
     *,
@@ -1221,6 +1242,7 @@ def push(
                     automatic=True,
                 )
             else:
+                review_manifest = load_and_verify_derivative(derivative)
                 return {
                     "uploaded": False,
                     "pending_review": True,
@@ -1229,8 +1251,19 @@ def push(
                         f"openadapt-flow review-sanitized {derivative} --original {src}"
                     ),
                     "destination_kind": destination.kind,
+                    "destination_host": resolved_host,
                     "deployment_kind": lane,
                     "phi_mode": _phi_mode(phi_mode),
+                    "kind": actual_kind,
+                    "review_id": _local_review_id(review_manifest),
+                    "local_binding": {
+                        "source_tree_sha256": review_manifest["source_tree_sha256"],
+                        "derivative_tree_sha256": review_manifest[
+                            "derivative_tree_sha256"
+                        ],
+                        "approved_archive_sha256": None,
+                        "sanitization_policy": review_manifest["policy_version"],
+                    },
                 }
         except SanitizationError as exc:
             raise HostedError(f"Artifact sanitization failed: {exc}") from exc
@@ -1257,6 +1290,7 @@ def push(
         data["workflow_id"] = normalized_workflow_id
     if normalized_resolves_run_id is not None:
         data["resolves_run_id"] = normalized_resolves_run_id
+    attestation: Optional[dict[str, Any]] = None
     if kind == "bundle":
         if validation_attestation is None:
             raise HostedError(
@@ -1326,6 +1360,36 @@ def push(
     data["sanitization_manifest"] = json.dumps(
         ingest_manifest, sort_keys=True, separators=(",", ":")
     )
+    local_result: dict[str, Any] = {
+        "sanitization": ingest_manifest,
+        "approval": approval,
+        "destination_kind": destination.kind,
+        "destination_host": resolved_host,
+        "review_id": _local_review_id(local_manifest),
+        "local_binding": {
+            "source_tree_sha256": local_manifest["source_tree_sha256"],
+            "derivative_tree_sha256": local_manifest["derivative_tree_sha256"],
+            "approved_archive_sha256": approval["approved_derivative_sha256"],
+            "sanitization_policy": local_manifest["policy_version"],
+        },
+        "resolves_run_id": normalized_resolves_run_id,
+    }
+    if attestation is not None:
+        certification = attestation.get("certification") or {}
+        replay = attestation.get("replay") or {}
+        local_result["attestation_binding"] = {
+            "schema": attestation.get("schema"),
+            "challenge_id": attestation.get("challenge_id"),
+            "source_recording_sha256": attestation.get("source_recording_sha256"),
+            "bundle_sha256": attestation.get("bundle_sha256"),
+            "parameter_schema_sha256": attestation.get("parameter_schema_sha256"),
+            "policy": certification.get("policy"),
+            "policy_evidence_sha256": certification.get("evidence_sha256"),
+            "run_report_sha256": replay.get("report_sha256"),
+            "governed_authorization_template_sha256": attestation.get(
+                "governed_authorization_template_sha256"
+            ),
+        }
     try:
         with archive_path.open("rb") as fh:
             resp = httpx.post(
@@ -1343,8 +1407,9 @@ def push(
                 follow_redirects=False,
             )
     except httpx.HTTPError as exc:
-        raise HostedError(
-            f"Upload to {resolved_host}/api/ingest failed: {exc}"
+        raise HostedDeliveryUncertain(
+            f"Upload to {resolved_host}/api/ingest failed: {exc}",
+            context=local_result,
         ) from exc
     if resp.status_code == 401:
         raise HostedError("Ingest token was rejected (401).")
@@ -1352,14 +1417,26 @@ def push(
         raise HostedError(
             f"Ingest returned {resp.status_code} (expected 201): {_body_snippet(resp)}"
         )
-    payload = resp.json()
-    ingest = payload.get("ingest", payload) if isinstance(payload, dict) else {}
+    try:
+        payload = resp.json()
+    except ValueError as exc:
+        raise HostedDeliveryUncertain(
+            "Ingest returned 201 without a valid JSON acknowledgment",
+            context=local_result,
+        ) from exc
+    ingest = payload.get("ingest", payload) if isinstance(payload, dict) else None
+    if not isinstance(ingest, dict):
+        raise HostedDeliveryUncertain(
+            "Ingest returned 201 without a valid result object",
+            context=local_result,
+        )
     workflow_id = ingest.get("workflow_id")
     result = dict(ingest)
+    # Never trust a dashboard URL supplied by the remote response. Construct it
+    # only from the already validated destination origin.
+    result.pop("dashboard_url", None)
     result["uploaded"] = True
-    result["sanitization"] = ingest_manifest
-    result["approval"] = approval
-    result["destination_kind"] = destination.kind
+    result.update(local_result)
     if workflow_id:
         result["dashboard_url"] = f"{resolved_host}/dashboard/workflows/{workflow_id}"
     return result

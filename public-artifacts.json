@@ -5728,6 +5728,10 @@
       "sha256": "fc7bca6e1ea0cfc9c70c11368d7b59d542f75f98f2dbaf4d869247225e53c1fd"
     },
     {
+      "path": "schemas/push-result-v1.json",
+      "sha256": "67e198e2bb6c7a503b60d75bc2adf862c771e650719872d6472b70be9a07693c"
+    },
+    {
       "path": "schemas/runtime-validation-attestation-v1.json",
       "sha256": "5168eb014c8559d5e722fdd3af4fc2cf394d0c1ae065e1176075c029881cce7c"
     },

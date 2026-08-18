@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openadapt.ai/schemas/push-result-v1.json",
+  "title": "OpenAdapt push result V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "status",
+    "workflow_id",
+    "artifact_ingest_id",
+    "review",
+    "attestation",
+    "binding",
+    "next_action",
+    "dashboard_url",
+    "delivery",
+    "error"
+  ],
+  "properties": {
+    "schema": { "const": "openadapt.push-result/v1" },
+    "status": {
+      "enum": [
+        "paused_for_review",
+        "accepted_for_ingest",
+        "failed",
+        "delivery_uncertain"
+      ]
+    },
+    "workflow_id": { "$ref": "#/$defs/nullableUuid" },
+    "artifact_ingest_id": { "$ref": "#/$defs/nullableUuid" },
+    "review": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "scope", "sanitized_path", "command"],
+          "properties": {
+            "id": { "$ref": "#/$defs/sha256" },
+            "scope": { "const": "local_non_authoritative" },
+            "sanitized_path": { "type": ["string", "null"], "minLength": 1 },
+            "command": { "type": ["string", "null"], "minLength": 1 }
+          }
+        }
+      ]
+    },
+    "attestation": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "schema"],
+          "properties": {
+            "id": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "schema": {
+              "type": "string",
+              "pattern": "^openadapt\\.runtime-validation/v[0-9]+$"
+            }
+          }
+        }
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "source_tree_sha256",
+        "derivative_tree_sha256",
+        "approved_archive_sha256",
+        "artifact_sha256",
+        "bundle_sha256",
+        "source_recording_sha256",
+        "sanitization_policy",
+        "certification_policy",
+        "certification_evidence_sha256",
+        "governed_authorization_template_sha256",
+        "parameter_schema_sha256",
+        "attested_run_report_sha256",
+        "resolves_run_id"
+      ],
+      "properties": {
+        "kind": { "enum": ["recording", "bundle", null] },
+        "source_tree_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "derivative_tree_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "approved_archive_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "artifact_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "bundle_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "source_recording_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "sanitization_policy": { "type": ["string", "null"], "minLength": 1 },
+        "certification_policy": { "type": ["string", "null"], "minLength": 1 },
+        "certification_evidence_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "governed_authorization_template_sha256": {
+          "$ref": "#/$defs/nullableSha256"
+        },
+        "parameter_schema_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "attested_run_report_sha256": { "$ref": "#/$defs/nullableSha256" },
+        "resolves_run_id": { "$ref": "#/$defs/nullableUuid" }
+      }
+    },
+    "next_action": {
+      "enum": [
+        "review_local",
+        "parameterize",
+        "validate_runtime",
+        "open_dashboard",
+        "reconcile",
+        null
+      ]
+    },
+    "dashboard_url": {
+      "oneOf": [{ "type": "null" }, { "type": "string", "format": "uri" }]
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempted", "certainty"],
+      "properties": {
+        "attempted": { "type": ["boolean", "null"] },
+        "certainty": {
+          "enum": ["not_attempted", "not_accepted", "accepted", "unknown"]
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {
+              "enum": [
+                "push_failed",
+                "delivery_uncertain",
+                "invalid_ingest_response"
+              ]
+            },
+            "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "nullableSha256": {
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/sha256" }]
+    },
+    "nullableUuid": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/uuid" }
+      ]
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "paused_for_review" } } },
+      "then": {
+        "properties": {
+          "workflow_id": { "type": "null" },
+          "artifact_ingest_id": { "type": "null" },
+          "review": { "type": "object" },
+          "attestation": { "type": "null" },
+          "next_action": { "const": "review_local" },
+          "error": { "type": "null" },
+          "delivery": {
+            "properties": {
+              "attempted": { "const": false },
+              "certainty": { "const": "not_attempted" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "accepted_for_ingest" } } },
+      "then": {
+        "properties": {
+          "artifact_ingest_id": { "$ref": "#/$defs/uuid" },
+          "review": { "type": "object" },
+          "error": { "type": "null" },
+          "delivery": {
+            "properties": {
+              "attempted": { "const": true },
+              "certainty": { "const": "accepted" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "accepted_for_ingest" },
+          "binding": { "properties": { "kind": { "const": "recording" } } }
+        }
+      },
+      "then": {
+        "properties": {
+          "workflow_id": { "type": "null" },
+          "attestation": { "type": "null" },
+          "next_action": { "enum": ["parameterize", "validate_runtime"] },
+          "dashboard_url": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "accepted_for_ingest" },
+          "binding": { "properties": { "kind": { "const": "bundle" } } }
+        }
+      },
+      "then": {
+        "properties": {
+          "workflow_id": { "$ref": "#/$defs/uuid" },
+          "attestation": { "type": "object" },
+          "next_action": { "const": "open_dashboard" },
+          "dashboard_url": { "type": "string", "format": "uri" },
+          "binding": {
+            "properties": {
+              "bundle_sha256": { "$ref": "#/$defs/sha256" },
+              "source_recording_sha256": { "$ref": "#/$defs/sha256" },
+              "certification_policy": { "type": "string", "minLength": 1 },
+              "certification_evidence_sha256": { "$ref": "#/$defs/sha256" },
+              "parameter_schema_sha256": { "$ref": "#/$defs/sha256" },
+              "attested_run_report_sha256": { "$ref": "#/$defs/sha256" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "delivery_uncertain" } } },
+      "then": {
+        "properties": {
+          "next_action": { "const": "reconcile" },
+          "delivery": {
+            "properties": {
+              "attempted": { "const": true },
+              "certainty": { "const": "unknown" }
+            }
+          },
+          "error": {
+            "properties": { "code": { "const": "delivery_uncertain" } }
+          }
+        }
+      }
+    }
+  ]
+}

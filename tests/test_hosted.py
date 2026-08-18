@@ -18,6 +18,7 @@ from pathlib import Path
 from uuid import UUID
 
 import httpx
+import jsonschema
 import pytest
 
 from openadapt_flow import hosted, privacy
@@ -942,6 +943,38 @@ def test_push_401(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "post", lambda url, **kw: httpx.Response(401))
     with pytest.raises(hosted.HostedError, match="401"):
         hosted.push(rec, token="tok", host="https://h.test")
+
+
+def test_push_transport_error_has_uncertain_delivery_type(tmp_path, monkeypatch):
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
+
+    def fail(*args, **kwargs):
+        raise httpx.ReadTimeout("response timed out")
+
+    monkeypatch.setattr(httpx, "post", fail)
+    with pytest.raises(hosted.HostedDeliveryUncertain) as raised:
+        hosted.push(rec, token="tok", host="https://h.test")
+    assert (
+        raised.value.context["sanitization"]["artifact"]["sha256"]
+        == (raised.value.context["local_binding"]["approved_archive_sha256"])
+    )
+
+
+def test_push_201_without_json_acknowledgment_is_delivery_uncertain(
+    tmp_path, monkeypatch
+):
+    rec = _make_recording(tmp_path, "rec")
+    privacy.set_text_scrubber(_FakeScrubber())
+    monkeypatch.setattr(
+        httpx,
+        "post",
+        lambda *args, **kwargs: httpx.Response(201, text="not-json"),
+    )
+
+    with pytest.raises(hosted.HostedDeliveryUncertain) as raised:
+        hosted.push(rec, token="tok", host="https://h.test")
+    assert raised.value.context["local_binding"]["approved_archive_sha256"]
 
 
 def test_push_bundle_requires_verified_sanitization_not_attestation(
@@ -2831,6 +2864,232 @@ def test_cli_push_dispatch(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "wf_7" in out
     assert "Dashboard" in out
+
+
+_PUSH_ARTIFACT_SHA = "a" * 64
+_PUSH_SOURCE_SHA = "b" * 64
+_PUSH_DERIVATIVE_SHA = "c" * 64
+_PUSH_REVIEW_ID = "d" * 64
+_PUSH_POLICY_SHA = "e" * 64
+_PUSH_PARAMETER_SHA = "f" * 64
+_PUSH_REPORT_SHA = "1" * 64
+_PUSH_RECORDING_SHA = "2" * 64
+_PUSH_TEMPLATE_SHA = "3" * 64
+_PUSH_INGEST_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+_PUSH_WORKFLOW_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+
+def _assert_push_json_schema(value):
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[1] / "schemas" / "push-result-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    jsonschema.Draft202012Validator(schema).validate(value)
+
+
+def _json_push_base(*, kind="recording"):
+    return {
+        "uploaded": True,
+        "kind": kind,
+        "workflow_id": None,
+        "artifact_ingest_id": _PUSH_INGEST_ID,
+        "artifact_sha256": _PUSH_ARTIFACT_SHA,
+        "sanitization": {"artifact": {"kind": kind, "sha256": _PUSH_ARTIFACT_SHA}},
+        "local_binding": {
+            "source_tree_sha256": _PUSH_SOURCE_SHA,
+            "derivative_tree_sha256": _PUSH_DERIVATIVE_SHA,
+            "approved_archive_sha256": _PUSH_ARTIFACT_SHA,
+            "sanitization_policy": "outbound-phi-v1",
+        },
+        "review_id": _PUSH_REVIEW_ID,
+        "destination_host": "https://h.test",
+    }
+
+
+def test_push_parser_accepts_json_without_changing_other_arguments():
+    args = build_parser().parse_args(["push", "approved", "--kind", "bundle", "--json"])
+    assert args.path == "approved"
+    assert args.kind == "bundle"
+    assert args.json is True
+    assert args.func.__name__ == "_cmd_push"
+
+
+def test_cli_push_json_paused_for_review(monkeypatch, capsys):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: {
+            "uploaded": False,
+            "pending_review": True,
+            "kind": "recording",
+            "sanitized_path": "/safe/derivative",
+            "review_command": "openadapt-flow review-sanitized /safe/derivative",
+            "review_id": _PUSH_REVIEW_ID,
+            "local_binding": {
+                "source_tree_sha256": _PUSH_SOURCE_SHA,
+                "derivative_tree_sha256": _PUSH_DERIVATIVE_SHA,
+                "approved_archive_sha256": None,
+                "sanitization_policy": "outbound-phi-v1",
+            },
+        },
+    )
+
+    assert main(["push", "raw", "--json"]) == 0
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["schema"] == "openadapt.push-result/v1"
+    assert value["status"] == "paused_for_review"
+    assert value["workflow_id"] is None
+    assert value["artifact_ingest_id"] is None
+    assert value["review"] == {
+        "id": _PUSH_REVIEW_ID,
+        "scope": "local_non_authoritative",
+        "sanitized_path": "/safe/derivative",
+        "command": "openadapt-flow review-sanitized /safe/derivative",
+    }
+    assert value["binding"]["source_tree_sha256"] == _PUSH_SOURCE_SHA
+    assert value["binding"]["approved_archive_sha256"] is None
+    assert value["next_action"] == "review_local"
+    assert value["delivery"] == {
+        "attempted": False,
+        "certainty": "not_attempted",
+    }
+    assert value["error"] is None
+
+
+@pytest.mark.parametrize(
+    ("server_status", "next_action"),
+    [
+        ("needs_parameterization", "parameterize"),
+        ("needs_runtime_validation", "validate_runtime"),
+    ],
+)
+def test_cli_push_json_recording_accepted(
+    monkeypatch, capsys, server_status, next_action
+):
+    result = _json_push_base()
+    result["status"] = server_status
+    monkeypatch.setattr(hosted, "push", lambda *args, **kwargs: result)
+
+    assert main(["push", "approved", "--json"]) == 0
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["status"] == "accepted_for_ingest"
+    assert value["workflow_id"] is None
+    assert value["artifact_ingest_id"] == _PUSH_INGEST_ID
+    assert value["next_action"] == next_action
+    assert value["binding"]["artifact_sha256"] == _PUSH_ARTIFACT_SHA
+    assert value["delivery"] == {"attempted": True, "certainty": "accepted"}
+
+
+def test_cli_push_json_bundle_accepted_with_exact_attestation_binding(
+    monkeypatch, capsys
+):
+    result = _json_push_base(kind="bundle")
+    result.update(
+        {
+            "workflow_id": _PUSH_WORKFLOW_ID,
+            "dashboard_url": (
+                f"https://h.test/dashboard/workflows/{_PUSH_WORKFLOW_ID}"
+            ),
+            "resolves_run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            "attestation_binding": {
+                "schema": "openadapt.runtime-validation/v3",
+                "challenge_id": "challenge-7",
+                "source_recording_sha256": _PUSH_RECORDING_SHA,
+                "bundle_sha256": _PUSH_ARTIFACT_SHA,
+                "parameter_schema_sha256": _PUSH_PARAMETER_SHA,
+                "policy": "clinical-write",
+                "policy_evidence_sha256": _PUSH_POLICY_SHA,
+                "run_report_sha256": _PUSH_REPORT_SHA,
+                "governed_authorization_template_sha256": _PUSH_TEMPLATE_SHA,
+            },
+        }
+    )
+    monkeypatch.setattr(hosted, "push", lambda *args, **kwargs: result)
+
+    assert main(["push", "approved", "--kind", "bundle", "--json"]) == 0
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["status"] == "accepted_for_ingest"
+    assert value["workflow_id"] == _PUSH_WORKFLOW_ID
+    assert value["artifact_ingest_id"] == _PUSH_INGEST_ID
+    assert value["attestation"] == {
+        "id": "challenge-7",
+        "schema": "openadapt.runtime-validation/v3",
+    }
+    assert value["binding"] == {
+        "kind": "bundle",
+        "source_tree_sha256": _PUSH_SOURCE_SHA,
+        "derivative_tree_sha256": _PUSH_DERIVATIVE_SHA,
+        "approved_archive_sha256": _PUSH_ARTIFACT_SHA,
+        "artifact_sha256": _PUSH_ARTIFACT_SHA,
+        "bundle_sha256": _PUSH_ARTIFACT_SHA,
+        "source_recording_sha256": _PUSH_RECORDING_SHA,
+        "sanitization_policy": "outbound-phi-v1",
+        "certification_policy": "clinical-write",
+        "certification_evidence_sha256": _PUSH_POLICY_SHA,
+        "governed_authorization_template_sha256": _PUSH_TEMPLATE_SHA,
+        "parameter_schema_sha256": _PUSH_PARAMETER_SHA,
+        "attested_run_report_sha256": _PUSH_REPORT_SHA,
+        "resolves_run_id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+    }
+    assert value["next_action"] == "open_dashboard"
+
+
+def test_cli_push_json_refuses_false_success_without_server_ingest_id(
+    monkeypatch, capsys
+):
+    result = _json_push_base()
+    result["status"] = "needs_parameterization"
+    result["artifact_ingest_id"] = None
+    monkeypatch.setattr(hosted, "push", lambda *args, **kwargs: result)
+
+    assert main(["push", "approved", "--json"]) == 1
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["status"] == "failed"
+    assert value["error"]["code"] == "invalid_ingest_response"
+    assert value["delivery"] == {"attempted": True, "certainty": "unknown"}
+    assert value["next_action"] == "reconcile"
+
+
+def test_cli_push_json_transport_error_is_delivery_uncertain(monkeypatch, capsys):
+    def fail(*args, **kwargs):
+        raise hosted.HostedDeliveryUncertain(
+            "secret token and /private/source must not reach JSON",
+            context=_json_push_base(),
+        )
+
+    monkeypatch.setattr(hosted, "push", fail)
+    assert main(["push", "raw", "--json"]) == 1
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["status"] == "delivery_uncertain"
+    assert value["next_action"] == "reconcile"
+    assert value["delivery"] == {"attempted": True, "certainty": "unknown"}
+    assert value["artifact_ingest_id"] is None
+    assert value["binding"]["artifact_sha256"] == _PUSH_ARTIFACT_SHA
+    assert "secret" not in value["error"]["message"]
+    assert "/private/source" not in value["error"]["message"]
+    assert len(value["error"]["message"]) <= 500
+
+
+def test_cli_push_json_preflight_error_is_bounded_and_nonzero(monkeypatch, capsys):
+    def fail(*args, **kwargs):
+        raise hosted.HostedError("/private/source " + "x" * 1000)
+
+    monkeypatch.setattr(hosted, "push", fail)
+    assert main(["push", "raw", "--json"]) == 1
+    value = json.loads(capsys.readouterr().out)
+    _assert_push_json_schema(value)
+    assert value["status"] == "failed"
+    assert value["error"] == {
+        "code": "push_failed",
+        "message": "The artifact was not accepted for ingest.",
+    }
+    assert value["delivery"] == {"attempted": None, "certainty": "not_accepted"}
 
 
 def test_cli_report_break_dispatch(monkeypatch, capsys):

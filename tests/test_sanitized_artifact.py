@@ -822,6 +822,14 @@ def test_raw_push_creates_derivative_and_pauses_for_review(tmp_path, monkeypatch
     )
 
     assert result["pending_review"] is True
+    assert re.fullmatch(r"[a-f0-9]{64}", result["review_id"])
+    assert result["review_id"] != result["local_binding"]["derivative_tree_sha256"]
+    assert result["local_binding"] == {
+        "source_tree_sha256": result["local_binding"]["source_tree_sha256"],
+        "derivative_tree_sha256": result["local_binding"]["derivative_tree_sha256"],
+        "approved_archive_sha256": None,
+        "sanitization_policy": "outbound-phi-v1",
+    }
     assert Path(result["sanitized_path"], MANIFEST_NAME).is_file()
     assert source.name not in Path(result["sanitized_path"]).name
     again = hosted.push(
@@ -834,6 +842,7 @@ def test_raw_push_creates_derivative_and_pauses_for_review(tmp_path, monkeypatch
         token="token",
     )
     assert again["sanitized_path"] == result["sanitized_path"]
+    assert again["review_id"] == result["review_id"]
 
 
 def test_changed_bundle_is_not_uploaded_as_executable(tmp_path, monkeypatch):

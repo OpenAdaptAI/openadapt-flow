@@ -105,13 +105,14 @@ sensitive recording data.
   cross-origin navigation stops the recording and does not produce complete
   metadata.
 - Do not open a popup or a new tab in the selected tab's browser context while
-  recording. Flow currently binds one page. It snapshots the existing tabs and
-  installs a new-page latch on every candidate context before it selects the
-  recording tab. The selected-context latch records every later new-page signal,
-  including a tab that acts and closes between recorder polls. Flow keeps this
-  refusal active through the final Playwright detach so a late tab cannot
-  produce complete metadata. A refusal leaves the external browser and its tabs
-  open.
+  recording. Flow currently binds one page. It installs a new-page latch on
+  every candidate context before it reads the accepted page baseline or selects
+  the recording tab. Listener registration does not replay pre-existing tabs,
+  so those tabs remain allowed. The selected-context latch records every later
+  new-page signal, including a tab that acts and closes between recorder polls.
+  Flow keeps this refusal active through the final Playwright detach so a late
+  tab cannot produce complete metadata. A refusal leaves the external browser
+  and its tabs open.
 - Attach mode does not combine with `--headless`. The external browser owns
   its display mode.
 - The `--out` path must not exist. Flow writes to a new temporary sibling and

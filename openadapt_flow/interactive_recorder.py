@@ -371,6 +371,8 @@ _INIT_JS = r"""
   let activeSecretState = null;
   let resizeTimer = null;
   let secretObserver = null;
+  let eventsStopped = false;
+  let cleaned = false;
 
   function listenOn(target, type, handler) {
     target.addEventListener(type, handler, true);
@@ -381,12 +383,20 @@ _INIT_JS = r"""
     listenOn(document, type, handler);
   }
 
-  function cleanup() {
+  function stopEvents() {
+    if (eventsStopped) return;
+    eventsStopped = true;
     if (resizeTimer !== null) clearTimeout(resizeTimer);
-    if (secretObserver !== null) secretObserver.disconnect();
     for (const [target, type, handler] of listeners) {
       try { target.removeEventListener(type, handler, true); } catch (e) {}
     }
+  }
+
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
+    stopEvents();
+    if (secretObserver !== null) secretObserver.disconnect();
     // The Set retains disconnected elements for this exact cleanup. Remove
     // the temporary marker before releasing those references so reinserting a
     // page-owned node after Flow detaches cannot expose recorder metadata.
@@ -401,7 +411,7 @@ _INIT_JS = r"""
       try { delete window[GLOBAL_KEY]; } catch (e) { window[GLOBAL_KEY] = null; }
     }
   }
-  window[GLOBAL_KEY] = {sessionId: SESSION_ID, cleanup};
+  window[GLOBAL_KEY] = {sessionId: SESSION_ID, stopEvents, cleanup};
 
   function identifierRect() {
     // Bounding rect of the operator-marked record-identifying field
@@ -1323,6 +1333,15 @@ class InteractiveRecorder:
             raise BrowserAttachError(
                 "the attached browser context inventory could not be read"
             ) from exc
+        for context in contexts:
+            try:
+                context.on("page", self._context_page_listener)
+            except Exception as exc:
+                raise BrowserAttachError(
+                    "the attached browser page baseline could not be guarded"
+                ) from exc
+            self._context_page_latches.append((context, self._context_page_listener))
+        self._context_page_listener_installed = bool(self._context_page_latches)
         baselines: list[tuple[Any, tuple[Any, ...]]] = []
         for context in contexts:
             try:
@@ -1333,21 +1352,6 @@ class InteractiveRecorder:
                 ) from exc
             baselines.append((context, baseline))
         self._context_page_baselines = baselines
-        for context, baseline in baselines:
-            try:
-                context.on("page", self._context_page_listener)
-                self._context_page_latches.append(
-                    (context, self._context_page_listener)
-                )
-                current = tuple(context.pages)
-            except Exception as exc:
-                raise BrowserAttachError(
-                    "the attached browser page baseline could not be guarded"
-                ) from exc
-            for candidate in current:
-                if not any(candidate is existing for existing in baseline):
-                    self._handle_context_page(candidate)
-        self._context_page_listener_installed = bool(self._context_page_latches)
         if self._listener_error is not None:
             raise self._listener_error
 
@@ -1545,8 +1549,8 @@ class InteractiveRecorder:
                     """sessionId => {
                       const current = window.__oaflowRecorder;
                       if (current && current.sessionId === sessionId
-                          && typeof current.cleanup === 'function') {
-                        current.cleanup();
+                          && typeof current.stopEvents === 'function') {
+                        current.stopEvents();
                       }
                     }""",
                     self._session_id,
@@ -1566,14 +1570,19 @@ class InteractiveRecorder:
         for frame in frames:
             try:
                 frame.evaluate(
-                    """marker => {
+                    """([sessionId, marker]) => {
+                      const current = window.__oaflowRecorder;
+                      if (current && current.sessionId === sessionId
+                          && typeof current.cleanup === 'function') {
+                        current.cleanup();
+                      }
                       for (const element of document.querySelectorAll('*')) {
                         if (element.hasAttribute(marker)) {
                           element.removeAttribute(marker);
                         }
                       }
                     }""",
-                    self._secret_marker_attribute,
+                    [self._session_id, self._secret_marker_attribute],
                 )
             except Exception:
                 continue

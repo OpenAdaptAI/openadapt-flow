@@ -1130,6 +1130,80 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert all(extrema == (0, 0) for extrema in dynamic_crop.getextrema())
         assert process.poll() is None
 
+        moved_secret = "MOVED-FINAL-SECRET-NEVER-PERSIST"
+        moved_secret_rect: dict[str, int] = {}
+
+        def move_secret_and_finish_without_pump(page, _pump):
+            rect = page.evaluate(
+                """secret => {
+                  const field = document.createElement('input');
+                  field.id = 'moved-final-secret';
+                  field.name = 'moved-final-secret';
+                  field.dataset.oaMovedFinalSecret = 'yes';
+                  field.style.cssText = [
+                    'position:fixed', 'left:20px', 'top:180px',
+                    'width:220px', 'height:40px', 'border:0', 'z-index:1000',
+                  ].join(';');
+                  document.body.appendChild(field);
+                  field.removeAttribute('name');
+                  field.removeAttribute('id');
+                  field.value = secret;
+                  field.dispatchEvent(new Event('input', {bubbles: true}));
+                  field.style.left = '700px';
+                  field.style.top = '300px';
+                  const box = field.getBoundingClientRect();
+                  return {
+                    x: Math.round(box.left), y: Math.round(box.top),
+                    width: Math.round(box.width), height: Math.round(box.height),
+                  };
+                }""",
+                moved_secret,
+            )
+            moved_secret_rect.update(rect)
+
+        moved_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-moved-final-secret",
+            secret_fields=("moved-final-secret",),
+            cdp_endpoint=endpoint,
+            script=move_secret_and_finish_without_pump,
+        )
+        for artifact in moved_recording.rglob("*"):
+            if artifact.is_file():
+                assert moved_secret.encode() not in artifact.read_bytes()
+        moved_events = [
+            json.loads(line)
+            for line in (moved_recording / "events.jsonl").read_text().splitlines()
+        ]
+        assert len(moved_events) == 1
+        assert moved_events[0].get("secret") is True
+        moved_after = Image.open(moved_recording / "frames" / "0000_after.png").convert(
+            "RGB"
+        )
+        moved_crop = moved_after.crop(
+            (
+                moved_secret_rect["x"],
+                moved_secret_rect["y"],
+                moved_secret_rect["x"] + moved_secret_rect["width"],
+                moved_secret_rect["y"] + moved_secret_rect["height"],
+            )
+        )
+        assert all(extrema == (0, 0) for extrema in moved_crop.getextrema())
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as cleanup_playwright:
+            cleanup_browser = cleanup_playwright.chromium.connect_over_cdp(endpoint)
+            cleanup_page = select_attached_page(
+                cleanup_browser,
+                app_url=attach_app_url,
+            )
+            cleanup_page.evaluate(
+                """() => document.querySelector(
+                  '[data-oa-moved-final-secret="yes"]'
+                ).remove()"""
+            )
+        assert process.poll() is None
+
         detached_marker_session = InteractiveRecorder(
             attach_app_url,
             tmp_path / "recording-detached-secret-marker",
@@ -1520,6 +1594,44 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 )
         assert prebaseline_page_acted
         assert not (prebaseline_recording / "meta.json").exists()
+        assert process.poll() is None
+
+        baseline_getter_recording = tmp_path / "recording-baseline-getter-refusal"
+        from playwright.sync_api import BrowserContext
+
+        original_pages_getter = BrowserContext.pages.fget
+        assert original_pages_getter is not None
+        baseline_getter_page_acted = False
+
+        def pages_with_short_lived_action(context):
+            nonlocal baseline_getter_page_acted
+            existing = original_pages_getter(context)
+            if not baseline_getter_page_acted:
+                baseline_getter_page_acted = True
+                temporary = context.new_page()
+                temporary.set_content(
+                    "<input id='gap-note'><button id='gap-save'>Save</button>"
+                )
+                temporary.fill("#gap-note", "baseline-gap-action-must-not-disappear")
+                temporary.click("#gap-save")
+                temporary.close()
+            return existing
+
+        with monkeypatch.context() as patch_context:
+            patch_context.setattr(
+                BrowserContext,
+                "pages",
+                property(pages_with_short_lived_action),
+            )
+            with pytest.raises(BrowserAttachError, match="popup or new tab"):
+                record_interactive(
+                    attach_app_url,
+                    baseline_getter_recording,
+                    cdp_endpoint=endpoint,
+                    script=lambda _page, _pump: None,
+                )
+        assert baseline_getter_page_acted
+        assert not (baseline_getter_recording / "meta.json").exists()
         assert process.poll() is None
 
         late_page_recording = tmp_path / "recording-late-page-refusal"

@@ -35,12 +35,24 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["id", "scope", "sanitized_path", "command"],
+          "required": [
+            "id",
+            "scope",
+            "sanitized_path",
+            "action",
+            "original_path"
+          ],
           "properties": {
             "id": { "$ref": "#/$defs/sha256" },
             "scope": { "const": "local_non_authoritative" },
             "sanitized_path": { "type": ["string", "null"], "minLength": 1 },
-            "command": { "type": ["string", "null"], "minLength": 1 }
+            "action": {
+              "oneOf": [
+                { "type": "null" },
+                { "const": "review_sanitized" }
+              ]
+            },
+            "original_path": { "type": ["string", "null"], "minLength": 1 }
           }
         }
       ]
@@ -55,8 +67,11 @@
           "properties": {
             "id": { "type": "string", "minLength": 1, "maxLength": 200 },
             "schema": {
-              "type": "string",
-              "pattern": "^openadapt\\.runtime-validation/v[0-9]+$"
+              "enum": [
+                "openadapt.runtime-validation/v1",
+                "openadapt.runtime-validation/v2",
+                "openadapt.runtime-validation/v3"
+              ]
             }
           }
         }
@@ -146,11 +161,7 @@
           "required": ["code", "message"],
           "properties": {
             "code": {
-              "enum": [
-                "push_failed",
-                "delivery_uncertain",
-                "invalid_ingest_response"
-              ]
+              "enum": ["push_failed", "delivery_uncertain"]
             },
             "message": { "type": "string", "minLength": 1, "maxLength": 500 }
           }
@@ -171,7 +182,7 @@
     },
     "uuid": {
       "type": "string",
-      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
+      "pattern": "^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$"
     }
   },
   "allOf": [
@@ -185,7 +196,8 @@
             "type": "object",
             "properties": {
               "sanitized_path": { "type": "string", "minLength": 1 },
-              "command": { "type": "string", "minLength": 1 }
+              "action": { "const": "review_sanitized" },
+              "original_path": { "type": "string", "minLength": 1 }
             }
           },
           "attestation": { "type": "null" },
@@ -197,8 +209,17 @@
               "kind": { "enum": ["recording", "bundle"] },
               "source_tree_sha256": { "$ref": "#/$defs/sha256" },
               "derivative_tree_sha256": { "$ref": "#/$defs/sha256" },
+              "sanitization_policy": { "type": "string", "minLength": 1 },
               "approved_archive_sha256": { "type": "null" },
               "artifact_sha256": { "type": "null" },
+              "bundle_sha256": { "type": "null" },
+              "source_recording_sha256": { "type": "null" },
+              "certification_policy": { "type": "null" },
+              "certification_evidence_sha256": { "type": "null" },
+              "governed_authorization_template_sha256": { "type": "null" },
+              "parameter_schema_sha256": { "type": "null" },
+              "attested_run_report_sha256": { "type": "null" },
+              "resolves_run_id": { "type": "null" },
               "organization_id": { "type": "null" },
               "bundle_version_id": { "type": "null" },
               "bundle_version": { "type": "null" },
@@ -223,7 +244,8 @@
             "type": "object",
             "properties": {
               "sanitized_path": { "type": "null" },
-              "command": { "type": "null" }
+              "action": { "type": "null" },
+              "original_path": { "type": "null" }
             }
           },
           "error": { "type": "null" },
@@ -309,6 +331,71 @@
       }
     },
     {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["accepted_for_ingest", "delivery_uncertain"]
+          },
+          "attestation": {
+            "type": "object",
+            "properties": {
+              "schema": { "const": "openadapt.runtime-validation/v3" }
+            },
+            "required": ["schema"]
+          },
+          "binding": {
+            "properties": { "kind": { "const": "bundle" } },
+            "required": ["kind"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "binding": {
+            "properties": {
+              "governed_authorization_template_sha256": {
+                "$ref": "#/$defs/sha256"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": ["accepted_for_ingest", "delivery_uncertain"]
+          },
+          "attestation": {
+            "type": "object",
+            "properties": {
+              "schema": {
+                "enum": [
+                  "openadapt.runtime-validation/v1",
+                  "openadapt.runtime-validation/v2"
+                ]
+              }
+            },
+            "required": ["schema"]
+          },
+          "binding": {
+            "properties": { "kind": { "const": "bundle" } },
+            "required": ["kind"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "binding": {
+            "properties": {
+              "governed_authorization_template_sha256": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
       "if": { "properties": { "status": { "const": "failed" } } },
       "then": {
         "properties": {
@@ -316,10 +403,24 @@
           "artifact_ingest_id": { "type": "null" },
           "review": { "type": "null" },
           "attestation": { "type": "null" },
-          "next_action": { "enum": ["reconcile", null] },
+          "next_action": { "type": "null" },
           "dashboard_url": { "type": "null" },
           "binding": {
             "properties": {
+              "kind": { "type": "null" },
+              "source_tree_sha256": { "type": "null" },
+              "derivative_tree_sha256": { "type": "null" },
+              "approved_archive_sha256": { "type": "null" },
+              "artifact_sha256": { "type": "null" },
+              "bundle_sha256": { "type": "null" },
+              "source_recording_sha256": { "type": "null" },
+              "sanitization_policy": { "type": "null" },
+              "certification_policy": { "type": "null" },
+              "certification_evidence_sha256": { "type": "null" },
+              "governed_authorization_template_sha256": { "type": "null" },
+              "parameter_schema_sha256": { "type": "null" },
+              "attested_run_report_sha256": { "type": "null" },
+              "resolves_run_id": { "type": "null" },
               "organization_id": { "type": "null" },
               "bundle_version_id": { "type": "null" },
               "bundle_version": { "type": "null" },
@@ -328,60 +429,14 @@
           },
           "delivery": {
             "properties": {
-              "attempted": { "enum": [true, null] },
-              "certainty": { "enum": ["not_accepted", "unknown"] }
+              "attempted": { "type": "null" },
+              "certainty": { "const": "not_accepted" }
             }
           },
           "error": {
             "type": "object",
             "properties": {
-              "code": { "enum": ["push_failed", "invalid_ingest_response"] }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "status": { "const": "failed" },
-          "error": {
-            "type": "object",
-            "properties": { "code": { "const": "push_failed" } },
-            "required": ["code"]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "next_action": { "type": "null" },
-          "delivery": {
-            "properties": {
-              "attempted": { "type": "null" },
-              "certainty": { "const": "not_accepted" }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "status": { "const": "failed" },
-          "error": {
-            "type": "object",
-            "properties": { "code": { "const": "invalid_ingest_response" } },
-            "required": ["code"]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "next_action": { "const": "reconcile" },
-          "delivery": {
-            "properties": {
-              "attempted": { "const": true },
-              "certainty": { "const": "unknown" }
+              "code": { "const": "push_failed" }
             }
           }
         }
@@ -393,10 +448,24 @@
         "properties": {
           "workflow_id": { "type": "null" },
           "artifact_ingest_id": { "type": "null" },
+          "review": {
+            "type": "object",
+            "properties": {
+              "sanitized_path": { "type": "null" },
+              "action": { "type": "null" },
+              "original_path": { "type": "null" }
+            }
+          },
           "next_action": { "const": "reconcile" },
           "dashboard_url": { "type": "null" },
           "binding": {
             "properties": {
+              "kind": { "enum": ["recording", "bundle"] },
+              "source_tree_sha256": { "$ref": "#/$defs/sha256" },
+              "derivative_tree_sha256": { "$ref": "#/$defs/sha256" },
+              "approved_archive_sha256": { "$ref": "#/$defs/sha256" },
+              "artifact_sha256": { "$ref": "#/$defs/sha256" },
+              "sanitization_policy": { "type": "string", "minLength": 1 },
               "organization_id": { "type": "null" },
               "bundle_version_id": { "type": "null" },
               "bundle_version": { "type": "null" },
@@ -414,6 +483,87 @@
             "properties": { "code": { "const": "delivery_uncertain" } }
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "delivery_uncertain" },
+          "binding": {
+            "properties": { "kind": { "const": "recording" } },
+            "required": ["kind"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "attestation": { "type": "null" },
+          "binding": {
+            "properties": {
+              "bundle_sha256": { "type": "null" },
+              "source_recording_sha256": { "type": "null" },
+              "certification_policy": { "type": "null" },
+              "certification_evidence_sha256": { "type": "null" },
+              "governed_authorization_template_sha256": { "type": "null" },
+              "parameter_schema_sha256": { "type": "null" },
+              "attested_run_report_sha256": { "type": "null" },
+              "resolves_run_id": { "type": "null" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "delivery_uncertain" },
+          "binding": {
+            "properties": { "kind": { "const": "bundle" } },
+            "required": ["kind"]
+          }
+        }
+      },
+      "then": {
+        "oneOf": [
+          {
+            "properties": {
+              "attestation": { "type": "object" },
+              "binding": {
+                "properties": {
+                  "bundle_sha256": { "$ref": "#/$defs/sha256" },
+                  "source_recording_sha256": { "$ref": "#/$defs/sha256" },
+                  "certification_policy": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "certification_evidence_sha256": {
+                    "$ref": "#/$defs/sha256"
+                  },
+                  "parameter_schema_sha256": { "$ref": "#/$defs/sha256" },
+                  "attested_run_report_sha256": {
+                    "$ref": "#/$defs/sha256"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "attestation": { "type": "null" },
+              "binding": {
+                "properties": {
+                  "bundle_sha256": { "type": "null" },
+                  "source_recording_sha256": { "type": "null" },
+                  "certification_policy": { "type": "null" },
+                  "certification_evidence_sha256": { "type": "null" },
+                  "governed_authorization_template_sha256": { "type": "null" },
+                  "parameter_schema_sha256": { "type": "null" },
+                  "attested_run_report_sha256": { "type": "null" }
+                }
+              }
+            }
+          }
+        ]
       }
     }
   ]

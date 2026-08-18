@@ -104,6 +104,10 @@ sensitive recording data.
 - The selected tab must stay on that origin for the full recording. A
   cross-origin navigation stops the recording and does not produce complete
   metadata.
+- Do not open a popup or a new tab in the selected tab's browser context while
+  recording. Flow currently binds one page. It refuses a new page instead of
+  omitting actions performed there. A refusal leaves the external browser and
+  its tabs open.
 - Attach mode does not combine with `--headless`. The external browser owns
   its display mode.
 - The `--out` path must not exist. Flow writes to a new temporary sibling and
@@ -167,4 +171,4 @@ endpoint. It requires a browser process started with remote debugging and a
 separate user-data directory. It does not claim Firefox, WebKit, arbitrary
 Chrome extensions, an ordinary browser process that was not started for local
 debugging, cross-origin tab selection, separately qualified cross-frame/iframe
-recording, or direct extension replay.
+recording, multi-page/popup recording, or direct extension replay.

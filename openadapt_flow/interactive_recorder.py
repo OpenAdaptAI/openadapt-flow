@@ -156,9 +156,42 @@ def _secret_screenshot_selectors(secret_fields: set[str]) -> tuple[str, ...]:
 
     selectors = ["input[type='password']"]
     for field in sorted(secret_fields):
-        encoded = json.dumps(field)
+        encoded = _css_string_literal(field)
         selectors.append(f"[name={encoded}], [id={encoded}]")
     return tuple(selectors)
+
+
+def _css_string_literal(value: str) -> str:
+    """Serialize an exact value as a valid double-quoted CSS string.
+
+    JSON ``\\u`` escapes are not CSS Unicode escapes. Using ``json.dumps``
+    therefore made a declared field such as ``päss`` select a different name
+    and left its later frames unmasked. CSS strings accept Unicode directly;
+    quotes, backslashes, and control characters need CSS-specific escapes.
+    """
+
+    escaped: list[str] = ['"']
+    for character in value:
+        codepoint = ord(character)
+        if character in {'"', "\\"}:
+            escaped.append("\\" + character)
+        elif codepoint == 0:
+            raise BrowserAttachError(
+                "a declared secret field name contains a null character and "
+                "cannot be bound to a safe browser mask"
+            )
+        elif 0xD800 <= codepoint <= 0xDFFF:
+            raise BrowserAttachError(
+                "a declared secret field name contains an invalid Unicode "
+                "surrogate and cannot be bound to a safe browser mask"
+            )
+        elif codepoint < 0x20 or codepoint == 0x7F:
+            # The trailing space terminates the variable-width CSS hex escape.
+            escaped.append(f"\\{codepoint:x} ")
+        else:
+            escaped.append(character)
+    escaped.append('"')
+    return "".join(escaped)
 
 
 def _http_origin(url: str, *, label: str) -> tuple[str, str, int]:
@@ -726,7 +759,9 @@ class InteractiveRecorder:
         self.page = None
         self._page_close_listener = self._handle_page_close
         self._frame_navigation_listener = self._handle_frame_navigation
+        self._popup_listener = self._handle_popup
         self._page_lifecycle_listeners_installed = False
+        self._context_pages_at_start: tuple[Any, ...] = ()
         self.backend: Optional[PlaywrightBackend] = None
         self.recorder: Optional[Recorder] = None
         self._last_frame: bytes = b""
@@ -776,8 +811,10 @@ class InteractiveRecorder:
                     page_url=self._browser_page_url,
                 )
 
+            self._context_pages_at_start = tuple(self.page.context.pages)
             self.page.on("close", self._page_close_listener)
             self.page.on("framenavigated", self._frame_navigation_listener)
+            self.page.on("popup", self._popup_listener)
             self._page_lifecycle_listeners_installed = True
             self.page.expose_binding(
                 self._binding_name,
@@ -919,6 +956,7 @@ class InteractiveRecorder:
             meta_path.write_text(json.dumps(meta, indent=2))
             if self._listener_error is not None:
                 raise self._listener_error
+            self._assert_no_new_pages()
             self._stop_browser_connection()
             if self._listener_error is not None:
                 raise self._listener_error
@@ -1017,6 +1055,38 @@ class InteractiveRecorder:
                 "recording was refused"
             )
             self.done = True
+
+    def _handle_popup(self, _popup: Any = None) -> None:
+        """Refuse a second page that the selected recording tab opens."""
+
+        self.done = True
+        if self._listener_error is None:
+            self._listener_error = BrowserAttachError(
+                "the selected browser tab opened a popup or new tab; this "
+                "recording is bound to one tab, so Flow stopped before "
+                "publishing incomplete metadata"
+            )
+
+    def _assert_no_new_pages(self) -> None:
+        """Retain a refusal if this recording context gained another page."""
+
+        if self.page is None or not self._context_pages_at_start:
+            return
+        try:
+            current_pages = tuple(self.page.context.pages)
+        except Exception as exc:
+            raise BrowserAttachError(
+                "the selected browser tab page inventory could not be read; "
+                "recording was refused"
+            ) from exc
+        for candidate in current_pages:
+            if not any(
+                candidate is existing for existing in self._context_pages_at_start
+            ):
+                self._handle_popup(candidate)
+                break
+        if self._listener_error is not None:
+            raise self._listener_error
 
     def _enqueue_browser_event(
         self,
@@ -1150,6 +1220,7 @@ class InteractiveRecorder:
             for event, listener in (
                 ("close", self._page_close_listener),
                 ("framenavigated", self._frame_navigation_listener),
+                ("popup", self._popup_listener),
             ):
                 try:
                     self.page.remove_listener(event, listener)
@@ -1170,6 +1241,7 @@ class InteractiveRecorder:
 
         if self._listener_error is not None:
             raise self._listener_error
+        self._assert_no_new_pages()
         batch = self._pyq[:]
         del self._pyq[:]
         rebased = False
@@ -1203,6 +1275,7 @@ class InteractiveRecorder:
                     "action was being retained; recording stopped without "
                     "complete metadata"
                 )
+            self._assert_no_new_pages()
         if self._listener_error is not None:
             raise self._listener_error
         return bool(batch) or rebased

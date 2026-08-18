@@ -722,13 +722,14 @@ class PlaywrightBackend:
             screenshot_mask_selectors: CSS selectors whose matching elements
                 are blacked out by Chromium before screenshot bytes reach
                 Python. The interactive recorder uses this for password and
-                declared-secret fields on every retained frame.
+                declared-secret fields on every retained frame. Locators are
+                rebuilt from every current document frame for each screenshot
+                so a child-frame field or a frame added after startup cannot
+                bypass the mask.
         """
         self.page = page
         self._screenshot_scale = screenshot_scale
-        self._screenshot_masks = [
-            page.locator(selector) for selector in screenshot_mask_selectors
-        ]
+        self._screenshot_mask_selectors = screenshot_mask_selectors
         # Opaque per-backend key keeps the WeakMap private from ordinary page
         # code. Python retains only token material keyed by the public
         # SHA-256 fingerprint; target/row text stays page-local and ephemeral.
@@ -2237,8 +2238,17 @@ class PlaywrightBackend:
         options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
             options["scale"] = "css"
-        if self._screenshot_masks:
-            options["mask"] = self._screenshot_masks
+        if self._screenshot_mask_selectors:
+            # A Page locator does not cross an iframe boundary. Rebuild the
+            # masks from the live frame inventory for every capture so both
+            # existing and newly attached frames use the same secret contract.
+            # If a frame detaches while Playwright resolves these locators, the
+            # screenshot fails closed instead of retaining an unmasked frame.
+            options["mask"] = [
+                frame.locator(selector)
+                for frame in list(self.page.frames)
+                for selector in self._screenshot_mask_selectors
+            ]
             options["mask_color"] = "#000000"
         return self.page.screenshot(type="png", full_page=False, **options)
 

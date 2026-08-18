@@ -22,6 +22,7 @@ from openadapt_flow.compiler import compile_recording
 from openadapt_flow.interactive_recorder import (
     BrowserAttachError,
     InteractiveRecorder,
+    _secret_screenshot_selectors,
     record_interactive,
     select_attached_page,
     validate_browser_cdp_endpoint,
@@ -142,14 +143,19 @@ def test_attached_backend_uses_live_css_viewport_and_css_screenshot() -> None:
 
 
 def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> None:
+    class Frame:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def locator(self, selector):
+            return f"locator:{self.name}:{selector}"
+
     class Page:
         viewport_size = {"width": 1280, "height": 800}
 
         def __init__(self) -> None:
             self.screenshot_options: list[dict] = []
-
-        def locator(self, selector):
-            return f"locator:{selector}"
+            self.frames = [Frame("main"), Frame("child")]
 
         def screenshot(self, **kwargs):
             self.screenshot_options.append(kwargs)
@@ -166,11 +172,34 @@ def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> N
     )
 
     assert backend.screenshot() == b"png"
+    page.frames.append(Frame("late-child"))
     assert backend.screenshot() == b"png"
     assert len(page.screenshot_options) == 2
+    assert page.screenshot_options[0]["mask"] == [
+        f"locator:{frame}:{selector}"
+        for frame in ("main", "child")
+        for selector in selectors
+    ]
+    assert page.screenshot_options[1]["mask"] == [
+        f"locator:{frame}:{selector}"
+        for frame in ("main", "child", "late-child")
+        for selector in selectors
+    ]
     for options in page.screenshot_options:
-        assert options["mask"] == [f"locator:{selector}" for selector in selectors]
         assert options["mask_color"] == "#000000"
+
+
+def test_declared_secret_selectors_use_css_string_escaping() -> None:
+    selectors = _secret_screenshot_selectors({"päss", 'quote"\\line\nend'})
+
+    assert '[name="päss"], [id="päss"]' in selectors
+    assert (
+        '[name="quote\\"\\\\line\\a end"], [id="quote\\"\\\\line\\a end"]' in selectors
+    )
+    with pytest.raises(BrowserAttachError, match="null character"):
+        _secret_screenshot_selectors({"unsafe\x00field"})
+    with pytest.raises(BrowserAttachError, match="Unicode surrogate"):
+        _secret_screenshot_selectors({"unsafe\ud800field"})
 
 
 def test_attached_recorder_api_refuses_incompatible_options(tmp_path: Path) -> None:
@@ -362,6 +391,71 @@ def test_attached_tab_close_during_finalization_discards_metadata(
     assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
 
 
+def test_attached_popup_during_finalization_discards_metadata(
+    tmp_path: Path,
+) -> None:
+    out = tmp_path / "recording"
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        out,
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._prepare_recording_dir()
+
+    class PopupPage:
+        url = "https://app.example.test/"
+        frames: list = []
+
+        def __init__(self) -> None:
+            self.main_frame = SimpleNamespace(url=self.url)
+
+        def evaluate(self, _script):
+            return {"width": 1280, "height": 800, "dpr": 1}
+
+        def remove_listener(self, event, listener):
+            if event == "popup":
+                listener(SimpleNamespace(url="about:blank"))
+
+    session.page = PopupPage()
+    session._page_lifecycle_listeners_installed = True
+    session._attached_geometry = (1280, 800, 1.0)
+    session._initial_attached_viewport = (1280, 800)
+
+    class FinalizingRecorder:
+        def finish(self):
+            assert session._recording_dir is not None
+            (session._recording_dir / "meta.json").write_text(
+                json.dumps({"viewport": [1280, 800]})
+            )
+            return session._recording_dir
+
+    session.recorder = FinalizingRecorder()  # type: ignore[assignment]
+
+    with pytest.raises(BrowserAttachError, match="popup or new tab"):
+        session.finish()
+    assert not out.exists()
+    assert not list(tmp_path.glob(".openadapt-recording-partial-*"))
+
+
+def test_attached_recorder_refuses_a_new_context_page(tmp_path: Path) -> None:
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    selected = SimpleNamespace()
+    context = SimpleNamespace(pages=[selected])
+    selected.context = context
+    session.page = selected
+    session._context_pages_at_start = (selected,)
+
+    context.pages.append(SimpleNamespace(context=context))
+
+    with pytest.raises(BrowserAttachError, match="popup or new tab"):
+        session._assert_no_new_pages()
+    assert session.done is True
+
+
 def test_attached_recorder_refuses_iframe_events(tmp_path: Path) -> None:
     session = InteractiveRecorder(
         "https://app.example.test/",
@@ -521,8 +615,17 @@ _ATTACH_HTML = b"""<!doctype html>
   <label for="note">Note</label><input id="note" name="note">
   <label for="password">Password</label>
   <input id="password" name="password" type="text">
+  <label for="p&#228;ss">International secret</label>
+  <input id="p&#228;ss" name="p&#228;ss" type="text">
   <button id="save" onclick="document.body.dataset.saved='yes'">Save</button>
-  <iframe id="child" srcdoc="<button id='inside'>Inside frame</button>"></iframe>
+  <button id="open-popup" onclick="window.open('about:blank', '_blank')">
+    Open popup
+  </button>
+  <iframe id="child" srcdoc="
+    <input id='frame-password' type='password' value='FRAME-SECRET-NEVER-PERSIST'
+           style='width:160px;height:30px;border:0'>
+    <button id='inside'>Inside frame</button>
+  "></iframe>
 </body></html>"""
 
 
@@ -687,6 +790,139 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
             assert process.poll() is None
             with urlopen(f"{endpoint}/json/version", timeout=2) as response:
                 assert response.status == 200
+
+        unicode_secret = "INTERNATIONAL-SECRET-NEVER-PERSIST"
+        unicode_secret_rect: dict[str, int] = {}
+
+        def record_unicode_secret(page, pump):
+            field = page.locator('[name="päss"]')
+            field.fill("")
+            box = field.bounding_box()
+            assert box is not None
+            unicode_secret_rect.update(
+                x=round(box["x"]),
+                y=round(box["y"]),
+                width=round(box["width"]),
+                height=round(box["height"]),
+            )
+            field.click()
+            page.keyboard.type(unicode_secret)
+            pump()
+            pump()
+            page.click("#save")
+            pump()
+            pump()
+
+        unicode_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-unicode-secret",
+            secret_fields=("päss",),
+            cdp_endpoint=endpoint,
+            script=record_unicode_secret,
+        )
+        unicode_events_text = (unicode_recording / "events.jsonl").read_text()
+        unicode_meta_text = (unicode_recording / "meta.json").read_text()
+        assert unicode_secret not in unicode_events_text
+        assert unicode_secret not in unicode_meta_text
+        unicode_events = [json.loads(line) for line in unicode_events_text.splitlines()]
+        unicode_event = next(event for event in unicode_events if event.get("secret"))
+        unicode_next_before = Image.open(
+            unicode_recording
+            / "frames"
+            / f"{int(unicode_event['i']) + 1:04d}_before.png"
+        ).convert("RGB")
+        unicode_crop = unicode_next_before.crop(
+            (
+                unicode_secret_rect["x"],
+                unicode_secret_rect["y"],
+                unicode_secret_rect["x"] + unicode_secret_rect["width"],
+                unicode_secret_rect["y"] + unicode_secret_rect["height"],
+            )
+        )
+        assert all(extrema == (0, 0) for extrema in unicode_crop.getextrema())
+        assert process.poll() is None
+
+        child_secret_rect: dict[str, int] = {}
+
+        def retain_top_level_action_with_child_secret(page, pump):
+            child_secret = page.frame_locator("#child").locator("#frame-password")
+            box = child_secret.bounding_box()
+            assert box is not None
+            child_secret_rect.update(
+                x=round(box["x"]),
+                y=round(box["y"]),
+                width=round(box["width"]),
+                height=round(box["height"]),
+            )
+            page.click("#note")
+            pump()
+            pump()
+
+        child_secret_recording = record_interactive(
+            attach_app_url,
+            tmp_path / "recording-child-frame-secret",
+            cdp_endpoint=endpoint,
+            script=retain_top_level_action_with_child_secret,
+        )
+        child_before = Image.open(
+            child_secret_recording / "frames" / "0000_before.png"
+        ).convert("RGB")
+        child_crop = child_before.crop(
+            (
+                child_secret_rect["x"],
+                child_secret_rect["y"],
+                child_secret_rect["x"] + child_secret_rect["width"],
+                child_secret_rect["y"] + child_secret_rect["height"],
+            )
+        )
+        assert all(extrema == (0, 0) for extrema in child_crop.getextrema())
+        assert process.poll() is None
+
+        popup_recording = tmp_path / "recording-popup-refusal"
+
+        def open_popup(page, pump):
+            with page.expect_popup() as popup_info:
+                page.click("#open-popup")
+            popup_info.value.wait_for_load_state()
+            pump()
+
+        with pytest.raises(BrowserAttachError, match="popup or new tab"):
+            record_interactive(
+                attach_app_url,
+                popup_recording,
+                cdp_endpoint=endpoint,
+                script=open_popup,
+            )
+        assert not (popup_recording / "meta.json").exists()
+        assert process.poll() is None
+        with urlopen(f"{endpoint}/json/list", timeout=2) as response:
+            popup_targets = json.load(response)
+        assert any(target.get("url") == "about:blank" for target in popup_targets)
+
+        popup_activity_recording = tmp_path / "recording-popup-activity-refusal"
+
+        def act_inside_popup(page, pump):
+            with page.expect_popup() as popup_info:
+                page.click("#open-popup")
+            popup = popup_info.value
+            popup.set_content(
+                "<input id='popup-note'><button id='popup-save'>Save</button>"
+            )
+            popup.fill("#popup-note", "activity-that-must-not-disappear")
+            popup.click("#popup-save")
+            pump()
+
+        with pytest.raises(BrowserAttachError, match="popup or new tab"):
+            record_interactive(
+                attach_app_url,
+                popup_activity_recording,
+                cdp_endpoint=endpoint,
+                script=act_inside_popup,
+            )
+        assert not (popup_activity_recording / "meta.json").exists()
+        assert process.poll() is None
+        with urlopen(f"{endpoint}/json/version", timeout=2) as response:
+            assert response.status == 200
 
         iframe_recording = tmp_path / "recording-iframe-refusal"
 

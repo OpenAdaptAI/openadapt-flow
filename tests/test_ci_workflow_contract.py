@@ -63,7 +63,7 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     matrix_install_start = matrix_job.index("- name: Install Playwright browser")
     matrix_install_end = matrix_job.index("\n\n", matrix_install_start)
     matrix_install_step = matrix_job[matrix_install_start:matrix_install_end]
-    assert "timeout-minutes: 22" in matrix_install_step
+    assert "timeout-minutes: 24" in matrix_install_step
     assert qualification_invocation in matrix_install_step
 
     assert workflow.count(standard_invocation) == 2
@@ -124,6 +124,37 @@ def test_standard_browser_step_covers_cleanup_and_launch_worst_cases() -> None:
     )
     assert posix_worst_case == 670
     assert windows_worst_case == 610
+    assert max(posix_worst_case, windows_worst_case) < step_timeout_seconds
+
+
+def test_release_browser_step_covers_system_dependency_cleanup() -> None:
+    attempts = 2
+    attempt_timeout_seconds = 600
+    retry_delay_seconds = 5
+    step_timeout_seconds = 24 * 60
+    posix_cleanup_per_attempt = 3 * (
+        install_playwright_browser.SUDO_SIGNAL_TIMEOUT_SECONDS
+        + install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS
+    )
+    windows_cleanup_per_attempt = 2 * (
+        install_playwright_browser.PROCESS_EXIT_TIMEOUT_SECONDS
+    )
+
+    posix_worst_case = (
+        attempts * (attempt_timeout_seconds + posix_cleanup_per_attempt)
+        + retry_delay_seconds
+        + install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS
+        + posix_cleanup_per_attempt
+    )
+    windows_worst_case = (
+        attempts * (attempt_timeout_seconds + windows_cleanup_per_attempt)
+        + retry_delay_seconds
+        + install_playwright_browser.BROWSER_LAUNCH_PROBE_TIMEOUT_SECONDS
+        + windows_cleanup_per_attempt
+    )
+
+    assert posix_worst_case == 1330
+    assert windows_worst_case == 1270
     assert max(posix_worst_case, windows_worst_case) < step_timeout_seconds
 
 

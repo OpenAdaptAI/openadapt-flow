@@ -589,7 +589,7 @@ jobs:
           key: ${{ runner.os }}-playwright-${{ steps.pw.outputs.version }}
 
       - name: Install Playwright browser
-        timeout-minutes: 22
+        timeout-minutes: 24
         run: >-
           python scripts/install_playwright_browser.py
           --attempts 2 --attempt-timeout-seconds 600

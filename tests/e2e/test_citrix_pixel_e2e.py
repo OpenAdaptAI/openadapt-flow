@@ -35,13 +35,15 @@ Safety / isolation (the user's VM is sacred):
       driving app; SKIPS (never fails, never fabricates) when input cannot be
       delivered — a dropped synthetic click must never look like success.
     * Requires one exact preserved base snapshot to be current before mutation.
-    * Creates one exact owned snapshot, restores the base, verifies it, and
-      deletes only that owned snapshot. A cleanup failure fails the proof.
+    * Writes a durable recovery journal before mutation, restores the exact
+      base, and verifies the final suspended state. A cleanup failure fails the
+      proof and leaves the journal for a reserved cleanup step or the next run.
     * Requires the Parallels VM window to be open + resumable.
 
 Env overrides: ``OAFLOW_PARALLELS_VM_UUID``,
 ``OAFLOW_PARALLELS_BASE_SNAPSHOT_ID``, ``OAFLOW_PARALLELS_STORAGE_PATH``, and
-``OAFLOW_CITRIX_WINDOW_TITLE`` (default "Windows 11").
+``OAFLOW_PARALLELS_RECOVERY_JOURNAL``, and ``OAFLOW_CITRIX_WINDOW_TITLE``
+(default "Windows 11").
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parents[2] / "scripts" / "desktop"
 WINDOW_TITLE = os.environ.get("OAFLOW_CITRIX_WINDOW_TITLE", "Windows 11")
 BASE_SNAPSHOT_ENV = "OAFLOW_PARALLELS_BASE_SNAPSHOT_ID"
 HOST_STORAGE_PATH_ENV = "OAFLOW_PARALLELS_STORAGE_PATH"
+RECOVERY_JOURNAL_ENV = "OAFLOW_PARALLELS_RECOVERY_JOURNAL"
 
 
 # -- environment guards (skip cleanly, never fail spuriously) ----------------
@@ -147,64 +150,32 @@ def _db_get(vm, pid: int) -> dict:
 
 
 def _restore_pixel_vm(
-    vm,
+    journal_path: str,
     *,
-    base_snapshot_id: str,
-    owned_snapshot_id: str | None,
-    vm_touched: bool,
+    journal_started: bool,
 ) -> None:
-    """Restore the exact base, delete only the owned snapshot, and suspend."""
+    """Run the same durable recovery used by workflow and next-run cleanup."""
 
-    from openadapt_flow.backends.parallels_vm import ParallelsError
+    from openadapt_flow.backends.parallels_vm import recover_parallels_vm
 
-    if owned_snapshot_id is None and not vm_touched:
-        return
-    cleanup_errors: list[Exception] = []
-    if owned_snapshot_id is not None:
-        try:
-            vm.restore_base_and_delete_owned_snapshot(
-                base_snapshot_id=base_snapshot_id,
-                owned_snapshot_id=owned_snapshot_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            cleanup_errors.append(exc)
-    elif vm_touched:
-        try:
-            vm.revert(base_snapshot_id)
-        except Exception as exc:  # noqa: BLE001
-            cleanup_errors.append(exc)
-    try:
-        state = vm.status()
-        if state in {"running", "paused"}:
-            vm.suspend()
-            state = vm.status()
-        if state != "suspended":
-            raise ParallelsError(
-                f"preserved base did not finish suspended (state={state!r})"
-            )
-        vm.require_current_snapshot(base_snapshot_id)
-    except Exception as exc:  # noqa: BLE001
-        cleanup_errors.append(exc)
-    if cleanup_errors:
-        details = "; ".join(repr(error) for error in cleanup_errors)
-        raise RuntimeError(
-            f"pixel proof failed to restore its exact base: {details}"
-        ) from cleanup_errors[0]
+    recovered = recover_parallels_vm(journal_path)
+    if journal_started and not recovered:
+        raise RuntimeError("durable Parallels recovery record disappeared")
 
 
 # -- the proof ---------------------------------------------------------------
 
 
 def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
-    _require_macos_input()
-
     from openadapt_flow.adapters.desktop_recorder import (
         record_desktop_demo,
         structural_armed_coverage,
     )
     from openadapt_flow.backends.parallels_vm import (
         DEFAULT_VM_UUID,
+        ParallelsRecoveryJournal,
         ParallelsVM,
+        recover_parallels_vm,
     )
     from openadapt_flow.backends.remote_display import (
         RemoteDisplayBackend,
@@ -217,13 +188,23 @@ def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
 
     uuid = os.environ.get("OAFLOW_PARALLELS_VM_UUID", DEFAULT_VM_UUID)
     base_snapshot_id = os.environ.get(BASE_SNAPSHOT_ENV)
+    journal_path = os.environ.get(RECOVERY_JOURNAL_ENV)
+    if not journal_path:
+        raise RuntimeError(
+            f"{RECOVERY_JOURNAL_ENV} is required for crash-safe qualification"
+        )
+    # A prior timeout, cancellation, or runner restart leaves this record. The
+    # next run must reconcile it before it makes a new mutation.
+    recover_parallels_vm(journal_path)
+    # Resolve stale recovery before this environment guard can skip the test.
+    _require_macos_input()
     if not base_snapshot_id:
         raise RuntimeError(
             f"{BASE_SNAPSHOT_ENV} is required for snapshot-safe qualification"
         )
     vm = ParallelsVM(uuid)
-    snap_id: str | None = None
-    vm_touched = False
+    journal = ParallelsRecoveryJournal(journal_path)
+    journal_started = False
     active_error: BaseException | None = None
     try:
         storage_path = os.environ.get(HOST_STORAGE_PATH_ENV, os.getcwd())
@@ -232,7 +213,8 @@ def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
         # the same current id then binds the live working state to that exact
         # base before resume, focus, snapshot, deployment, or actuation.
         vm.require_current_snapshot(base_snapshot_id)
-        vm_touched = True
+        journal.begin(vm_uuid=uuid, base_snapshot_id=base_snapshot_id)
+        journal_started = True
         vm.revert(base_snapshot_id)
         vm.require_current_snapshot(base_snapshot_id)
         vm.ensure_running()
@@ -248,13 +230,6 @@ def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
             raise RuntimeError(
                 "remote-display client window is not foregroundable"
             ) from exc
-
-        snap_id = vm.snapshot(
-            f"oaflow-citrix-{int(time.time())}", description="citrix pixel e2e"
-        )
-        # A snapshot on a running VM briefly disturbs guest tools.
-        if not _guest_ready(vm):
-            raise RuntimeError("guest tools did not recover after pixel snapshot")
 
         # ---- deploy + launch the stand-in clinical app (pixel target) ------
         _deploy_and_launch(vm, drift="none")
@@ -400,10 +375,8 @@ def test_citrix_pixel_only_record_replay_identity_verify_halt(tmp_path) -> None:
     finally:
         try:
             _restore_pixel_vm(
-                vm,
-                base_snapshot_id=base_snapshot_id,
-                owned_snapshot_id=snap_id,
-                vm_touched=vm_touched,
+                journal_path,
+                journal_started=journal_started,
             )
         except Exception as cleanup_error:
             if active_error is None:

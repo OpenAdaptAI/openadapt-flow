@@ -130,12 +130,12 @@ fire.
 
 The opt-in e2e (`tests/e2e/test_parallels_desktop_e2e.py`) does the whole loop
 against the deterministic Patient Notes fixture: prove one exact configured
-base snapshot is current → revert to that base → ensure the VM is running →
-create one exact trial snapshot → launch the typed agent in session 1 →
-record→compile→replay via `WindowsBackend` → assert the UIA structural rung and
-independent database oracle → restore and verify the configured base → delete
-only the exact trial snapshot → suspend and verify the VM. It repeats this
-contract three times.
+base snapshot is current → persist one private exact-base recovery journal →
+revert to that base → ensure the VM is running → launch the typed agent in
+session 1 → record→compile→replay via `WindowsBackend` → assert the UIA
+structural rung and independent database oracle → restore and verify the
+configured base → suspend and verify the VM. It repeats this contract three
+times. It creates no ephemeral trial snapshot.
 
 ```bash
 # On the Mac with the Parallels VM:
@@ -144,16 +144,19 @@ export OAFLOW_PARALLELS_VM_UUID='{exact-vm-uuid}'
 export OAFLOW_PARALLELS_BASE_SNAPSHOT_ID='{exact-base-snapshot-uuid}'
 export OAFLOW_WINDOWS_UIA_CANDIDATE_COMMIT='40-character-git-commit'
 export OAFLOW_PARALLELS_STORAGE_PATH="$PWD"
+export OAFLOW_PARALLELS_RECOVERY_JOURNAL='/absolute/private/path/parallels-recovery.json'
 pytest -q tests/e2e/test_parallels_desktop_e2e.py
 ```
 
 **Snapshot safety contract:** the test refuses before mutation unless the exact
-configured base exists and is current. It retains each created trial snapshot
-ID in memory. Cleanup restores and verifies the base before it deletes only
-that exact ID. A restore, verification, deletion, evidence-write, or final
-suspend failure rejects the trial. The harness never uses a snapshot name,
-wildcard, child-recursive delete, or VM delete operation. It is skipped entirely
-unless `OAFLOW_PARALLELS_E2E=1`.
+configured base exists and is current. It writes the recovery journal before
+the first VM mutation. Normal cleanup, the workflow's unconditional cleanup
+step, and the next run all use that record to revert the exact VM to the exact
+base and verify its suspended state. The record remains after a failed recovery
+and disappears only after all checks pass. A restore, verification,
+evidence-write, or final suspend failure rejects the trial. The harness never
+uses a snapshot name, wildcard, snapshot delete, child-recursive delete, or VM
+delete operation. It is skipped entirely unless `OAFLOW_PARALLELS_E2E=1`.
 
 ---
 

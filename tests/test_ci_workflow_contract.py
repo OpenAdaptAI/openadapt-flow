@@ -11,6 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 CI = ROOT / ".github/workflows/ci.yml"
 QUICKSTART = ROOT / ".github/workflows/quickstart-lifecycle.yml"
 VALIDATE_CLAIMS = ROOT / ".github/workflows/validate-claims.yml"
+PIXEL_E2E = ROOT / "tests/e2e/test_citrix_pixel_e2e.py"
+DESKTOP_E2E = ROOT / "tests/e2e/test_parallels_desktop_e2e.py"
 
 
 def test_playwright_version_probes_are_valid_python() -> None:
@@ -331,7 +333,13 @@ def test_validating_refresh_uses_exact_macos_parallels_substrate_and_scope() -> 
     assert "oa-vm" not in refresh
     assert "command -v prlctl" in refresh
     assert "OAFLOW_PARALLELS_BASE_SNAPSHOT_ID" in refresh
+    assert "OAFLOW_PARALLELS_RECOVERY_JOURNAL" in refresh
+    assert "${{ github.workspace }}/../.openadapt-flow/" in refresh
     assert "vm.require_current_snapshot" in refresh
+    assert refresh.count("scripts/reconcile_parallels_recovery.py") == 2
+    assert "if: ${{ always() }}" in refresh
+    assert "timeout-minutes: 110" in refresh
+    assert "timeout-minutes: 90" in refresh
     assert "--ci-job validating --junit runs/validating-junit.xml" in refresh
     assert refresh.index("tests/e2e/test_citrix_pixel_e2e.py") < refresh.index(
         "tests/e2e/test_parallels_desktop_e2e.py"
@@ -341,6 +349,12 @@ def test_validating_refresh_uses_exact_macos_parallels_substrate_and_scope() -> 
         "tests/e2e/test_citrix_pixel_e2e.py",
     ):
         assert f"--evidence-path {path}" in refresh
+
+    for test_path in (PIXEL_E2E, DESKTOP_E2E):
+        source = test_path.read_text(encoding="utf-8")
+        assert "journal.begin(" in source
+        assert source.index("journal.begin(") < source.index("vm.revert(")
+        assert "vm.snapshot(" not in source
 
 
 def test_clean_machine_lifecycle_declares_utf8_on_every_os() -> None:

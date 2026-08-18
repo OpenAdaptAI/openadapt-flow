@@ -104,7 +104,9 @@ jobs:
       ${{ vars.OPENADAPT_PARALLELS_VALIDATION_ENABLED == 'true' &&
           (github.event_name == 'schedule' || inputs.run_infra == true) }}
     runs-on: [self-hosted, macos, arm64, openadapt-parallels]
-    timeout-minutes: 90
+    # The live-test step has a shorter timeout. This job reserve leaves time for
+    # its unconditional recovery step after a test timeout.
+    timeout-minutes: 110
     concurrency:
       group: openadapt-parallels-validation
       cancel-in-progress: false
@@ -112,6 +114,9 @@ jobs:
       OAFLOW_PARALLELS_VM_UUID: ${{ vars.OAFLOW_PARALLELS_VM_UUID }}
       OAFLOW_PARALLELS_BASE_SNAPSHOT_ID: ${{ vars.OAFLOW_PARALLELS_BASE_SNAPSHOT_ID }}
       OAFLOW_PARALLELS_STORAGE_PATH: ${{ github.workspace }}
+      # This path is outside the checkout, so checkout cleaning and a runner
+      # restart cannot erase an unresolved exact-base recovery record.
+      OAFLOW_PARALLELS_RECOVERY_JOURNAL: ${{ github.workspace }}/../.openadapt-flow/parallels-recovery.json
       OAFLOW_WINDOWS_UIA_CANDIDATE_COMMIT: ${{ github.sha }}
       OAFLOW_WINDOWS_UIA_MATRIX_ID: claims-${{ github.run_id }}-${{ github.run_attempt }}
       OAFLOW_WINDOWS_UIA_EVIDENCE: ${{ github.workspace }}/runs/windows-uia-evidence.jsonl
@@ -140,6 +145,11 @@ jobs:
       - name: Install validation dependencies
         run: python -m pip install -e .[dev]
 
+      - name: Reconcile a prior interrupted run before new mutation
+        run: >-
+          python scripts/reconcile_parallels_recovery.py
+          --journal "$OAFLOW_PARALLELS_RECOVERY_JOURNAL"
+
       - name: Prove configured VM and base are current before mutation
         run: |
           python -c '
@@ -155,6 +165,7 @@ jobs:
           '
 
       - name: Run scoped desktop and pixel evidence
+        timeout-minutes: 90
         env:
           OAFLOW_PARALLELS_E2E: "1"
           OAFLOW_CITRIX_PIXEL_E2E: "1"
@@ -164,6 +175,13 @@ jobs:
             tests/e2e/test_citrix_pixel_e2e.py \
             tests/e2e/test_parallels_desktop_e2e.py \
             --junitxml=runs/validating-junit.xml --basetemp=runs/ci
+
+      - name: Restore exact base after success, failure, or test timeout
+        if: ${{ always() }}
+        timeout-minutes: 15
+        run: >-
+          python scripts/reconcile_parallels_recovery.py
+          --journal "$OAFLOW_PARALLELS_RECOVERY_JOURNAL"
 
       - name: Require every selected evidence file to pass
         run: |

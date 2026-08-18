@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from base64 import b64encode
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -16,8 +17,10 @@ from openadapt_flow.qualification_admission import (
     QualificationCondition,
     QualificationIssuer,
     QualificationSignerTrust,
+    contract_sha256,
     qualification_signer_key_id,
     sign_qualification_admission,
+    verify_admission_for_actuation,
     verify_qualification_admission,
 )
 
@@ -368,3 +371,278 @@ def test_validity_and_signer_identity_are_bounded() -> None:
         QualificationAdmissionPayload.model_validate(raw)
 
     assert _key_id() == "qa-ed25519-65b60673d6ed884b"
+
+
+# ---------------------------------------------------------------------------
+# The actuation gate: every real Standard or Regulated action, managed OR local
+# ---------------------------------------------------------------------------
+
+
+def _governed_template(payload: QualificationAdmissionPayload):
+    """A template stub carrying exactly the digests Flow recomputes locally."""
+
+    return SimpleNamespace(
+        template_sha256=payload.governed_authorization_template_sha256,
+        qualification_environment_contract_sha256=payload.environment_contract_sha256,
+        parameter_contract_sha256=payload.input_policy_sha256,
+        qualification_project_contract_sha256=payload.action_policy_sha256,
+        identity_contract_sha256=payload.identity_contract_sha256,
+        qualified_effect_requirements=(),
+    )
+
+
+def _workflow_for(payload: QualificationAdmissionPayload, **overrides):
+    template = _governed_template(payload)
+    for name, value in overrides.items():
+        setattr(template, name, value)
+    return SimpleNamespace(
+        manifest=SimpleNamespace(
+            content_digest=payload.bundle_content_digest,
+            provenance=SimpleNamespace(governed_authorization_template=template),
+        )
+    )
+
+
+def _admission_bound_to_workflow():
+    """A signed admission whose effect contract matches an empty requirement set."""
+
+    payload = _payload(effect_contract_sha256=contract_sha256([]))
+    return sign_qualification_admission(payload, _private_key()), payload
+
+
+def test_actuation_accepts_an_admission_bound_to_this_exact_workflow() -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    digest = verify_admission_for_actuation(
+        envelope,
+        _workflow_for(payload),
+        trusted_signers=_trust(),
+        now=NOW,
+    )
+    assert digest == envelope.artifact_sha256()
+
+
+def test_actuation_refuses_an_admission_for_another_bundle_version() -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    workflow = _workflow_for(payload)
+    workflow.manifest.content_digest = "9" * 64
+    with pytest.raises(QualificationAdmissionError, match="another bundle version"):
+        verify_admission_for_actuation(
+            envelope, workflow, trusted_signers=_trust(), now=NOW
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "template_sha256",
+        "qualification_environment_contract_sha256",
+        "parameter_contract_sha256",
+        "qualification_project_contract_sha256",
+        "identity_contract_sha256",
+    ],
+)
+def test_actuation_refuses_a_changed_governed_contract(field: str) -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    # "f" * 64 is outside the fixture's digest range, so every parametrized
+    # field really changes value.
+    workflow = _workflow_for(payload, **{field: "f" * 64})
+    with pytest.raises(
+        QualificationAdmissionError, match="does not bind the current governed"
+    ):
+        verify_admission_for_actuation(
+            envelope, workflow, trusted_signers=_trust(), now=NOW
+        )
+
+
+def test_actuation_refuses_a_changed_effect_contract() -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    requirement = SimpleNamespace(model_dump=lambda mode="json": {"step_id": "s0"})
+    workflow = _workflow_for(payload, qualified_effect_requirements=(requirement,))
+    with pytest.raises(
+        QualificationAdmissionError, match="does not bind the current governed"
+    ):
+        verify_admission_for_actuation(
+            envelope, workflow, trusted_signers=_trust(), now=NOW
+        )
+
+
+def test_actuation_refuses_an_unsealed_bundle_or_ungoverned_template() -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    unsealed = SimpleNamespace(manifest=None)
+    with pytest.raises(QualificationAdmissionError, match="sealed manifest"):
+        verify_admission_for_actuation(
+            envelope, unsealed, trusted_signers=_trust(), now=NOW
+        )
+    ungoverned = _workflow_for(payload)
+    ungoverned.manifest.provenance.governed_authorization_template = None
+    with pytest.raises(QualificationAdmissionError, match="governed template"):
+        verify_admission_for_actuation(
+            envelope, ungoverned, trusted_signers=_trust(), now=NOW
+        )
+
+
+def test_actuation_refuses_an_expired_or_untrusted_admission() -> None:
+    envelope, payload = _admission_bound_to_workflow()
+    workflow = _workflow_for(payload)
+    with pytest.raises(QualificationAdmissionError, match="has expired"):
+        verify_admission_for_actuation(
+            envelope,
+            workflow,
+            trusted_signers=_trust(),
+            now=NOW + timedelta(days=30),
+        )
+    other_key = Ed25519PrivateKey.from_private_bytes(bytes(range(2, 34)))
+    with pytest.raises(QualificationAdmissionError, match="signer is not trusted"):
+        verify_admission_for_actuation(
+            envelope,
+            workflow,
+            trusted_signers=_trust(other_key),
+            now=NOW,
+        )
+    with pytest.raises(QualificationAdmissionError, match="is revoked"):
+        verify_admission_for_actuation(
+            envelope,
+            workflow,
+            trusted_signers=_trust(),
+            revoked_admission_ids={payload.admission_id},
+            now=NOW,
+        )
+
+
+# ---------------------------------------------------------------------------
+# The CLI gate: a local Standard/Regulated run needs no control plane, but it
+# does need a signed admission. Demo is the only unsigned actuating profile.
+# ---------------------------------------------------------------------------
+
+
+def _write_private(path, text: str):
+    path.write_text(text, encoding="utf-8")
+    path.chmod(0o600)
+    return path
+
+
+def test_local_run_without_any_admission_is_refused(tmp_path, monkeypatch) -> None:
+    import openadapt_flow.__main__ as cli
+
+    monkeypatch.delenv(cli.QUALIFICATION_ADMISSION_ENV, raising=False)
+    monkeypatch.delenv(cli.QUALIFICATION_SIGNERS_ENV, raising=False)
+    monkeypatch.delenv(cli.QUALIFICATION_SIGNERS_JSON_ENV, raising=False)
+    _envelope, payload = _admission_bound_to_workflow()
+    refusal = cli._refuse_unqualified_actuation(_workflow_for(payload))
+    assert refusal is not None
+    assert "no signed qualification admission" in refusal
+    assert "Nothing was executed." in refusal
+
+
+def test_local_run_without_a_signer_registry_is_refused(tmp_path, monkeypatch) -> None:
+    import openadapt_flow.__main__ as cli
+
+    envelope, payload = _admission_bound_to_workflow()
+    admission_file = _write_private(
+        tmp_path / "admission.json", envelope.model_dump_json()
+    )
+    monkeypatch.setenv(cli.QUALIFICATION_ADMISSION_ENV, str(admission_file))
+    monkeypatch.delenv(cli.QUALIFICATION_SIGNERS_ENV, raising=False)
+    monkeypatch.delenv(cli.QUALIFICATION_SIGNERS_JSON_ENV, raising=False)
+    refusal = cli._refuse_unqualified_actuation(_workflow_for(payload))
+    assert refusal is not None
+    assert "signer registry" in refusal
+
+
+def test_local_run_with_an_offline_signer_registry_is_admitted(
+    tmp_path, monkeypatch
+) -> None:
+    """An offline customer verifies locally and needs no control plane."""
+
+    import json
+
+    import openadapt_flow.__main__ as cli
+
+    envelope, payload = _admission_bound_to_workflow()
+    admission_file = _write_private(
+        tmp_path / "admission.json", envelope.model_dump_json()
+    )
+    registry_file = _write_private(
+        tmp_path / "signers.json",
+        json.dumps(
+            {key: value.model_dump(mode="json") for key, value in _trust().items()}
+        ),
+    )
+    monkeypatch.setenv(cli.QUALIFICATION_ADMISSION_ENV, str(admission_file))
+    monkeypatch.setenv(cli.QUALIFICATION_SIGNERS_ENV, str(registry_file))
+    assert cli._refuse_unqualified_actuation(_workflow_for(payload)) is None
+
+
+def test_local_run_refuses_an_admission_for_another_workflow(
+    tmp_path, monkeypatch
+) -> None:
+    import json
+
+    import openadapt_flow.__main__ as cli
+
+    envelope, payload = _admission_bound_to_workflow()
+    admission_file = _write_private(
+        tmp_path / "admission.json", envelope.model_dump_json()
+    )
+    registry_file = _write_private(
+        tmp_path / "signers.json",
+        json.dumps(
+            {key: value.model_dump(mode="json") for key, value in _trust().items()}
+        ),
+    )
+    monkeypatch.setenv(cli.QUALIFICATION_ADMISSION_ENV, str(admission_file))
+    monkeypatch.setenv(cli.QUALIFICATION_SIGNERS_ENV, str(registry_file))
+    workflow = _workflow_for(payload)
+    workflow.manifest.content_digest = "9" * 64
+    refusal = cli._refuse_unqualified_actuation(workflow)
+    assert refusal is not None
+    assert "another bundle version" in refusal
+
+
+def test_unreadable_admission_never_becomes_a_simulated_success(
+    tmp_path, monkeypatch
+) -> None:
+    import openadapt_flow.__main__ as cli
+
+    _envelope, payload = _admission_bound_to_workflow()
+    broken = _write_private(tmp_path / "admission.json", "{not json")
+    monkeypatch.setenv(cli.QUALIFICATION_ADMISSION_ENV, str(broken))
+    monkeypatch.setenv(cli.QUALIFICATION_SIGNERS_JSON_ENV, "{}")
+    refusal = cli._refuse_unqualified_actuation(_workflow_for(payload))
+    assert refusal is not None
+    assert "could not be read safely" in refusal
+    # The refusal never echoes the rejected document.
+    assert "not json" not in refusal
+
+
+def test_missing_admission_file_is_refused(tmp_path, monkeypatch) -> None:
+    import openadapt_flow.__main__ as cli
+
+    _envelope, payload = _admission_bound_to_workflow()
+    monkeypatch.setenv(cli.QUALIFICATION_ADMISSION_ENV, str(tmp_path / "absent.json"))
+    monkeypatch.setenv(cli.QUALIFICATION_SIGNERS_JSON_ENV, "{}")
+    refusal = cli._refuse_unqualified_actuation(_workflow_for(payload))
+    assert refusal is not None
+    assert "could not be read safely" in refusal
+
+
+def test_only_a_production_profile_needs_the_admission() -> None:
+    """Demo actuates unsigned; the report-only verbs never reach the gate."""
+
+    from openadapt_flow.execution_profiles import (
+        ExecutionProfile,
+        requires_signed_qualification_admission,
+    )
+
+    assert requires_signed_qualification_admission(
+        ExecutionProfile.STANDARD, will_actuate=True
+    )
+    assert requires_signed_qualification_admission(
+        ExecutionProfile.REGULATED, will_actuate=True
+    )
+    assert not requires_signed_qualification_admission(
+        ExecutionProfile.DEMO, will_actuate=True
+    )
+    assert not requires_signed_qualification_admission(
+        ExecutionProfile.STANDARD, will_actuate=False
+    )

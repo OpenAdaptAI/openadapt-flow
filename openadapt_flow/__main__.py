@@ -1550,6 +1550,101 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     )
 
 
+#: Where a runtime reads its signed admission and its trusted signer registry.
+#: Both are runtime configuration, NOT managed-dispatch wire fields: the wire
+#: carries its six frozen keys only. An offline customer points these at local
+#: files and needs no control plane.
+QUALIFICATION_ADMISSION_ENV = "OPENADAPT_QUALIFICATION_ADMISSION_FILE"
+QUALIFICATION_SIGNERS_ENV = "OPENADAPT_QUALIFICATION_SIGNERS_FILE"
+QUALIFICATION_SIGNERS_JSON_ENV = "OPENADAPT_QUALIFICATION_SIGNERS_JSON"
+
+_QUALIFICATION_SETUP_GUIDANCE = (
+    "A real Standard or Regulated action requires a signed qualification "
+    f"admission. Set {QUALIFICATION_ADMISSION_ENV} to the signed admission "
+    f"for this exact workflow version and {QUALIFICATION_SIGNERS_ENV} to the "
+    "trusted signer registry. Use --profile demo to run unsigned; a Demo run "
+    "cannot report production success."
+)
+
+
+def _read_private_json(path: Path, *, label: str) -> str:
+    """Read a small private file without following a symlink."""
+
+    import stat as stat_module
+
+    from openadapt_flow.qualification_admission import QualificationAdmissionError
+
+    try:
+        status = path.lstat()
+    except OSError as exc:
+        raise QualificationAdmissionError(f"{label} is unavailable") from exc
+    if stat_module.S_ISLNK(status.st_mode) or not stat_module.S_ISREG(status.st_mode):
+        raise QualificationAdmissionError(f"{label} is not a regular file")
+    if status.st_size > 1_000_000:
+        raise QualificationAdmissionError(f"{label} is too large")
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise QualificationAdmissionError(f"{label} could not be read") from exc
+
+
+def _refuse_unqualified_actuation(workflow) -> str | None:
+    """Return a refusal message, or None when this run may actuate.
+
+    Fail closed: a missing file, an unreadable registry, an untrusted signer,
+    an expired or revoked record, or a record bound to another workflow version
+    all refuse the run. Missing configuration never becomes a simulated success.
+    """
+
+    from openadapt_flow.qualification_admission import (
+        QualificationAdmissionEnvelope,
+        QualificationAdmissionError,
+        load_qualification_signer_trust,
+        verify_admission_for_actuation,
+    )
+
+    admission_file = os.environ.get(QUALIFICATION_ADMISSION_ENV, "").strip()
+    if not admission_file:
+        return (
+            "run REFUSED: this run has no signed qualification admission. "
+            f"{_QUALIFICATION_SETUP_GUIDANCE} Nothing was executed."
+        )
+    registry_file = os.environ.get(QUALIFICATION_SIGNERS_ENV, "").strip()
+    registry_json = os.environ.get(QUALIFICATION_SIGNERS_JSON_ENV, "").strip()
+    if not registry_file and not registry_json:
+        return (
+            "run REFUSED: no trusted qualification signer registry is "
+            f"configured. {_QUALIFICATION_SETUP_GUIDANCE} Nothing was executed."
+        )
+    try:
+        admission = QualificationAdmissionEnvelope.model_validate_json(
+            _read_private_json(Path(admission_file), label="qualification admission")
+        )
+        trusted_signers = load_qualification_signer_trust(
+            _read_private_json(
+                Path(registry_file), label="qualification signer registry"
+            )
+            if registry_file
+            else registry_json
+        )
+    except (QualificationAdmissionError, ValueError):
+        # Never echo the rejected document: an admission or registry parse
+        # error can repeat attacker-controlled or customer-identifying input.
+        return (
+            "run REFUSED: the qualification admission or its signer registry "
+            "could not be read safely. Nothing was executed."
+        )
+    try:
+        verify_admission_for_actuation(
+            admission,
+            workflow,
+            trusted_signers=trusted_signers,
+        )
+    except QualificationAdmissionError as exc:
+        return f"run REFUSED: {exc}. Nothing was executed."
+    return None
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute a bundle under a named deployment profile -- FAIL-CLOSED.
 
@@ -1564,15 +1659,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     """
     from openadapt_flow.execution_profiles import (
         execution_profile_contract,
+        requires_signed_qualification_admission,
         resolve_execution_profile,
     )
     from openadapt_flow.ir import Workflow
-    from openadapt_flow.qualification_admission import (
-        QualificationAdmissionError,
-        expected_from_payload,
-        load_qualification_signer_trust,
-        verify_qualification_admission,
-    )
     from openadapt_flow.run_gate import (
         build_qualification_case_authorization,
         build_runtime_authorization,
@@ -1713,29 +1803,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "run REFUSED: managed dispatch binding is invalid. Nothing was executed."
             )
             return 2
-        if authorization.qualification_admission is None:
-            print(
-                "run REFUSED: managed production dispatch has no signed "
-                "qualification admission. Nothing was executed."
-            )
-            return 2
-        try:
-            signer_trust = load_qualification_signer_trust(
-                os.environ.get("OPENADAPT_QUALIFICATION_SIGNERS_JSON", "")
-            )
-            verify_qualification_admission(
-                authorization.qualification_admission,
-                trusted_signers=signer_trust,
-                expected=expected_from_payload(
-                    authorization.qualification_admission.payload
-                ),
-            )
-        except QualificationAdmissionError:
-            print(
-                "run REFUSED: qualification admission is not signed by an "
-                "active trusted authority. Nothing was executed."
-            )
-            return 2
         local_authorization = build_runtime_authorization(
             workflow,
             report,
@@ -1817,6 +1884,32 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
         args._delivery_authority_kind = "customer_local"
         args._remote_delivery_run_id = None
+
+    # THE ACTUATION GATE. Everything above this line is report-only: the admission
+    # gate, --dry-run, and --explain all return before it. Below it the shared
+    # executor performs real actions, so every real Standard or Regulated action
+    # -- managed OR fully local -- must carry a signed, unexpired, unrevoked
+    # qualification admission that binds this exact workflow version.
+    #
+    # Demo is the one named profile that actuates unsigned, and it cannot report
+    # production success. A counted qualification-evidence run also stays
+    # unsigned: it is how a workflow earns its admission, and it cannot claim
+    # production success either. Recording, compilation, inspection, lint, and
+    # simulation never reach this line.
+    #
+    # The admission does NOT travel on the managed dispatch wire, which carries
+    # its six frozen keys only. It arrives through the runtime's own protected
+    # configuration, so an offline customer verifies against a local signer
+    # registry with no control plane.
+    if (
+        qualification_case is None
+        and selected_profile is not None
+        and requires_signed_qualification_admission(selected_profile, will_actuate=True)
+    ):
+        refusal = _refuse_unqualified_actuation(workflow)
+        if refusal is not None:
+            print(refusal)
+            return 2
 
     if qualification_case is not None and not _claim_qualification_case_attempt(args):
         return 2

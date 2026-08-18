@@ -18,7 +18,7 @@ import json
 import re
 from base64 import b64decode, b64encode
 from datetime import datetime, timedelta, timezone
-from typing import Any, Final, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Final, Literal, Mapping
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -27,6 +27,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import cycle
+    from openadapt_flow.ir import Workflow
 
 SCHEMA: Final[Literal["openadapt.qualification-admission/v1"]] = (
     "openadapt.qualification-admission/v1"
@@ -442,3 +445,81 @@ def verify_qualification_admission(
                 f"qualification admission {field} does not match the live run"
             )
     return envelope.artifact_sha256()
+
+
+def admission_workflow_binding_error(
+    envelope: QualificationAdmissionEnvelope,
+    workflow: "Workflow",
+) -> str | None:
+    """Return why this admission does not bind this exact workflow, or None.
+
+    Flow recomputes each value from the sealed bundle it is about to execute.
+    It never reads the binding back out of the signed payload, so a record
+    signed for another workflow version, another governed template, or another
+    policy/identity/effect contract cannot admit this run.
+    """
+
+    payload = envelope.payload
+    if workflow.manifest is None:
+        return "qualification admission requires a sealed manifest"
+    if payload.bundle_content_digest != workflow.manifest.content_digest:
+        return "qualification admission is bound to another bundle version"
+    template = workflow.manifest.provenance.governed_authorization_template
+    if template is None:
+        return "qualification admission requires a governed template"
+    effect_contract_digest = contract_sha256(
+        [
+            item.model_dump(mode="json")
+            for item in template.qualified_effect_requirements
+        ]
+    )
+    if (
+        payload.governed_authorization_template_sha256 != template.template_sha256
+        or payload.environment_contract_sha256
+        != template.qualification_environment_contract_sha256
+        or payload.input_policy_sha256 != template.parameter_contract_sha256
+        or payload.action_policy_sha256
+        != template.qualification_project_contract_sha256
+        or payload.identity_contract_sha256 != template.identity_contract_sha256
+        or payload.effect_contract_sha256 != effect_contract_digest
+    ):
+        return "qualification admission does not bind the current governed contracts"
+    return None
+
+
+def verify_admission_for_actuation(
+    envelope: QualificationAdmissionEnvelope,
+    workflow: "Workflow",
+    *,
+    trusted_signers: Mapping[str, QualificationSignerTrust],
+    revoked_admission_ids: set[str] | frozenset[str] = frozenset(),
+    now: datetime | None = None,
+) -> str:
+    """Verify one admission immediately before a real governed action.
+
+    This is the gate that every real Standard or Regulated action passes,
+    whether Cloud dispatched the run or the customer started it locally.  It
+    is deliberately independent of the managed dispatch wire: the wire carries
+    the six frozen keys only, and the admission arrives through the runtime's
+    own protected configuration.  An offline customer therefore uses a local
+    signer registry and needs no control plane.
+
+    Flow checks the signer, the signature, the validity interval, the
+    revocation state, and the exact workflow binding it can recompute for
+    itself.  Cloud additionally checks the tenant, run, and runtime-validation
+    identities that only the control plane can observe.
+    """
+
+    payload = envelope.payload
+    expected = expected_from_payload(payload)
+    digest = verify_qualification_admission(
+        envelope,
+        trusted_signers=trusted_signers,
+        expected=expected,
+        revoked_admission_ids=revoked_admission_ids,
+        now=now,
+    )
+    binding_error = admission_workflow_binding_error(envelope, workflow)
+    if binding_error is not None:
+        raise QualificationAdmissionError(binding_error)
+    return digest

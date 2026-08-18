@@ -2908,13 +2908,16 @@ _PUSH_VERSION_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
 _PUSH_RUNTIME_VALIDATION_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff"
 
 
-def _assert_push_json_schema(value):
-    schema = json.loads(
+def _push_json_schema():
+    return json.loads(
         (
             Path(__file__).resolve().parents[1] / "schemas" / "push-result-v1.json"
         ).read_text(encoding="utf-8")
     )
-    jsonschema.Draft202012Validator(schema).validate(value)
+
+
+def _assert_push_json_schema(value):
+    jsonschema.Draft202012Validator(_push_json_schema()).validate(value)
 
 
 def _json_push_base(*, kind="recording"):
@@ -3183,6 +3186,68 @@ def test_cli_push_json_preflight_error_is_bounded_and_nonzero(monkeypatch, capsy
         "message": "The artifact was not accepted for ingest.",
     }
     assert value["delivery"] == {"attempted": None, "certainty": "not_accepted"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("error", None),
+        ("next_action", "open_dashboard"),
+    ],
+)
+def test_push_json_schema_rejects_conflicting_failed_state(
+    monkeypatch, capsys, field, value
+):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: (_ for _ in ()).throw(hosted.HostedError("private")),
+    )
+    assert main(["push", "raw", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    document[field] = value
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
+
+
+def test_push_json_schema_rejects_accepted_certainty_on_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: (_ for _ in ()).throw(hosted.HostedError("private")),
+    )
+    assert main(["push", "raw", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    document["delivery"] = {"attempted": True, "certainty": "accepted"}
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("error", None),
+        (
+            "error",
+            {"code": "push_failed", "message": "The upload is uncertain."},
+        ),
+    ],
+)
+def test_push_json_schema_rejects_conflicting_uncertain_state(
+    monkeypatch, capsys, field, value
+):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            hosted.HostedDeliveryUncertain("private")
+        ),
+    )
+    assert main(["push", "raw", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    document[field] = value
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
 
 
 def test_cli_report_break_dispatch(monkeypatch, capsys):

@@ -5729,7 +5729,7 @@
     },
     {
       "path": "schemas/push-result-v1.json",
-      "sha256": "e0e06bb922ecb9cbc53800bb376d69e040b82fcf4bfa00b899a285377e7efbd7"
+      "sha256": "5a989065581c6e5cc09ebe386c88e192450ff8d5f898ad46cbeeffcb0b21e29f"
     },
     {
       "path": "schemas/runtime-validation-attestation-v1.json",

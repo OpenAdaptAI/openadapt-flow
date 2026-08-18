@@ -308,7 +308,64 @@
       }
     },
     {
-      "if": { "properties": { "status": { "const": "delivery_uncertain" } } },
+      "if": { "properties": { "status": { "const": "failed" } } },
+      "then": {
+        "properties": {
+          "workflow_id": { "type": "null" },
+          "artifact_ingest_id": { "type": "null" },
+          "review": { "type": "null" },
+          "attestation": { "type": "null" },
+          "next_action": { "enum": ["reconcile", null] },
+          "dashboard_url": { "type": "null" },
+          "delivery": {
+            "properties": {
+              "attempted": { "enum": [true, null] },
+              "certainty": { "enum": ["not_accepted", "unknown"] }
+            }
+          },
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": { "enum": ["push_failed", "invalid_ingest_response"] }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "failed" },
+          "error": {
+            "type": "object",
+            "properties": { "code": { "const": "push_failed" } },
+            "required": ["code"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "next_action": { "type": "null" },
+          "delivery": {
+            "properties": {
+              "attempted": { "type": "null" },
+              "certainty": { "const": "not_accepted" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "failed" },
+          "error": {
+            "type": "object",
+            "properties": { "code": { "const": "invalid_ingest_response" } },
+            "required": ["code"]
+          }
+        }
+      },
       "then": {
         "properties": {
           "next_action": { "const": "reconcile" },
@@ -317,8 +374,26 @@
               "attempted": { "const": true },
               "certainty": { "const": "unknown" }
             }
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "status": { "const": "delivery_uncertain" } } },
+      "then": {
+        "properties": {
+          "workflow_id": { "type": "null" },
+          "artifact_ingest_id": { "type": "null" },
+          "next_action": { "const": "reconcile" },
+          "dashboard_url": { "type": "null" },
+          "delivery": {
+            "properties": {
+              "attempted": { "const": true },
+              "certainty": { "const": "unknown" }
+            }
           },
           "error": {
+            "type": "object",
             "properties": { "code": { "const": "delivery_uncertain" } }
           }
         }

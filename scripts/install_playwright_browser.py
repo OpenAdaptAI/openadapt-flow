@@ -18,6 +18,16 @@ from collections.abc import Callable, Sequence
 
 PLAYWRIGHT_INSTALL = ("playwright", "install", "--with-deps", "chromium")
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
+PROCESS_EXIT_TIMEOUT_SECONDS = 5
+
+
+def _wait_for_exit(process: subprocess.Popen[bytes]) -> bool:
+    """Wait briefly for a terminated process and report whether it exited."""
+    try:
+        process.wait(timeout=PROCESS_EXIT_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
 
 
 def _terminate_process_group(
@@ -29,31 +39,35 @@ def _terminate_process_group(
     if process.poll() is not None:
         return
     if platform == "nt":
+        taskkill_succeeded = False
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 timeout=15,
             )
+            taskkill_succeeded = result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        if not taskkill_succeeded and process.poll() is None:
             process.kill()
-        process.wait()
+        if not _wait_for_exit(process) and process.poll() is None:
+            process.kill()
+            _wait_for_exit(process)
         return
 
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
         return
-    try:
-        process.wait(timeout=5)
-    except subprocess.TimeoutExpired:
+    if not _wait_for_exit(process):
         try:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait()
+        _wait_for_exit(process)
 
 
 def run_attempt(command: Sequence[str], timeout_seconds: int) -> int:

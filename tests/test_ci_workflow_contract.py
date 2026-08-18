@@ -315,6 +315,27 @@ def test_supported_claims_consume_their_required_jobs_real_junit() -> None:
     assert "validate_claims.py --check --structure-only" in claims
 
 
+def test_validating_refresh_uses_exact_macos_parallels_substrate_and_scope() -> None:
+    """A green validating report cannot come from Ubuntu or skipped evidence."""
+
+    claims = VALIDATE_CLAIMS.read_text(encoding="utf-8")
+    start = claims.index("  refresh-validating-evidence:")
+    refresh = claims[start:]
+
+    assert "runs-on: [self-hosted, macos, arm64]" in refresh
+    assert "OPENADAPT_PARALLELS_VALIDATION_ENABLED" in refresh
+    assert "runs-on: ubuntu-latest" not in refresh
+    assert "oa-vm" not in refresh
+    assert "command -v prlctl" in refresh
+    assert "OAFLOW_PARALLELS_BASE_SNAPSHOT_ID" in refresh
+    assert "--ci-job validating --junit runs/validating-junit.xml" in refresh
+    for path in (
+        "tests/e2e/test_parallels_desktop_e2e.py",
+        "tests/e2e/test_citrix_pixel_e2e.py",
+    ):
+        assert f"--evidence-path {path}" in refresh
+
+
 def test_clean_machine_lifecycle_declares_utf8_on_every_os() -> None:
     workflow = QUICKSTART.read_text(encoding="utf-8")
     lifecycle_start = workflow.index("  lifecycle:")

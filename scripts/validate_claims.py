@@ -31,6 +31,9 @@ Usage::
     python scripts/validate_claims.py --check --structure-only
     python scripts/validate_claims.py --check --ci-job test \
         --junit runs/unit-claims-junit.xml
+    python scripts/validate_claims.py --report --ci-job validating \
+        --junit runs/validating-junit.xml \
+        --evidence-path tests/e2e/test_parallels_desktop_e2e.py
     python scripts/validate_claims.py --report      # (re)write docs/VERIFICATION.md + .json
 
 The public functions are importable so ``tests/test_validate_claims.py`` can
@@ -320,6 +323,7 @@ def validate_claim(
     repo_root: Path = REPO_ROOT,
     junit: Optional[dict[str, str]] = None,
     ci_job: Optional[str] = None,
+    evidence_scope: Optional[set[str]] = None,
 ) -> ClaimResult:
     """Validate a single registry entry, returning a ClaimResult with errors."""
     cid = str(raw.get("id", "<no-id>"))
@@ -368,25 +372,37 @@ def validate_claim(
         )
 
     # 4) Required-job proof. File existence makes a test eligible to back a
-    #    supported claim. It does not prove that the test ran. The job-scoped
-    #    JUnit result must contain a real passing case from every cited file.
-    if junit is not None and ci_job is not None and tier == "supported":
+    #    claim. It does not prove that the test ran. Required supported jobs
+    #    enforce every assigned file. A substrate-specific validating run
+    #    enforces every file in its explicit scope and makes no claim about the
+    #    other validating evidence.
+    if junit is not None and ci_job is not None:
         for e in result.evidence:
-            if e.strength != STRENGTH_CI or e.ci_job != ci_job:
+            if e.ci_job != ci_job or e.strength not in {
+                STRENGTH_CI,
+                STRENGTH_OPTIN,
+            }:
+                continue
+            required = (
+                e.path in evidence_scope
+                if evidence_scope is not None
+                else tier == "supported"
+            )
+            if not required:
                 continue
             if e.junit_status == "failed":
                 result.errors.append(
-                    f"[{cid}] supported claim's backing test is RED in "
+                    f"[{cid}] {tier} claim's backing test is RED in "
                     f"{ci_job} JUnit: {e.path}"
                 )
             elif e.junit_status == "skipped":
                 result.errors.append(
-                    f"[{cid}] supported claim's backing test was SKIPPED in "
+                    f"[{cid}] {tier} claim's backing test was SKIPPED in "
                     f"{ci_job} JUnit: {e.path}"
                 )
             elif e.junit_status != "passed":
                 result.errors.append(
-                    f"[{cid}] supported claim's backing test is ABSENT from "
+                    f"[{cid}] {tier} claim's backing test is ABSENT from "
                     f"{ci_job} JUnit: {e.path}"
                 )
 
@@ -414,10 +430,38 @@ def validate_all(
     repo_root: Path = REPO_ROOT,
     junit: Optional[dict[str, str]] = None,
     ci_job: Optional[str] = None,
+    evidence_scope: Optional[set[str]] = None,
 ) -> list[ClaimResult]:
     return [
-        validate_claim(raw, repo_root=repo_root, junit=junit, ci_job=ci_job)
+        validate_claim(
+            raw,
+            repo_root=repo_root,
+            junit=junit,
+            ci_job=ci_job,
+            evidence_scope=evidence_scope,
+        )
         for raw in registry.get("claims", [])
+    ]
+
+
+def validate_evidence_scope(
+    results: list[ClaimResult],
+    ci_job: Optional[str],
+    evidence_scope: Optional[set[str]],
+) -> list[str]:
+    """Reject a scoped live check that names evidence outside its exact job."""
+
+    if evidence_scope is None:
+        return []
+    eligible = {
+        evidence.path
+        for result in results
+        for evidence in result.evidence
+        if evidence.ci_job == ci_job
+    }
+    return [
+        f"[{ci_job}] scoped evidence is not registered for this job: {path}"
+        for path in sorted(evidence_scope - eligible)
     ]
 
 
@@ -448,9 +492,12 @@ def _junit_case_path(case: Any, repo_root: Path) -> Optional[str]:
     classname = str(case.get("classname") or "")
     parts = classname.split(".") if classname else []
     while len(parts) >= 2:
-        candidate = "/".join(parts) + ".py"
-        if candidate.startswith("tests/") and (repo_root / candidate).is_file():
-            return candidate
+        candidate_path = "/".join(parts) + ".py"
+        if (
+            candidate_path.startswith("tests/")
+            and (repo_root / candidate_path).is_file()
+        ):
+            return candidate_path
         parts.pop()
     return None
 
@@ -539,6 +586,8 @@ def render_markdown(
     now: str,
     junit_used: bool,
     junit_job: Optional[str] = None,
+    junit_scope: Optional[set[str]] = None,
+    validation_errors: Optional[list[str]] = None,
 ) -> str:
     lines: list[str] = []
     lines.append("# VERIFICATION — maturity claims backed by tests")
@@ -549,15 +598,19 @@ def render_markdown(
     )
     lines.append("")
     lines.append(f"- Generated at: **{now}**")
-    lines.append(
-        "- Green-check against a junit artifact: "
-        + (
-            f"**run for `{junit_job}`**"
-            if junit_used and junit_job
-            else "**not embedded in this generated registry view** "
+    if junit_used and junit_job:
+        scope_text = (
+            "; exact evidence scope: "
+            + ", ".join(f"`{path}`" for path in sorted(junit_scope))
+            if junit_scope
+            else "; all supported evidence assigned to this job"
+        )
+        lines.append(f"- JUnit pass check: **run for `{junit_job}`{scope_text}**")
+    else:
+        lines.append(
+            "- JUnit pass check: **not embedded in this generated registry view** "
             "(required CI jobs enforce pass evidence)"
         )
-    )
     lines.append(
         "- Structure gate: `python scripts/validate_claims.py --check "
         "--structure-only` (a claim whose tier outranks its strongest backing "
@@ -568,6 +621,17 @@ def render_markdown(
         "JUnit files; an absent, all-skipped, or failed supported evidence file "
         "fails that required job."
     )
+    lines.append(
+        "- Scoped validating refreshes name each selected evidence file; each "
+        "selected file must pass on its declared substrate. Unselected validating "
+        "evidence is not represented as checked."
+    )
+    if validation_errors:
+        lines.append("")
+        lines.append("## Validation errors")
+        lines.append("")
+        for error in validation_errors:
+            lines.append(f"- ❌ {error}")
     lines.append("")
     lines.append(
         "**What this harness does and does not do.** It makes each public "
@@ -649,12 +713,17 @@ def render_json(
     now: str,
     junit_used: bool,
     junit_job: Optional[str] = None,
+    junit_scope: Optional[set[str]] = None,
+    validation_errors: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    validation_errors = validation_errors or []
     return {
         "generated_at": now,
         "green_check_run": junit_used,
         "green_check_job": junit_job,
-        "ok": all(r.ok for r in results),
+        "green_check_scope": sorted(junit_scope or []),
+        "ok": all(r.ok for r in results) and not validation_errors,
+        "validation_errors": validation_errors,
         "claims": [
             {
                 "id": r.id,
@@ -716,6 +785,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="required CI job that produced --junit",
     )
     parser.add_argument(
+        "--evidence-path",
+        action="append",
+        default=[],
+        help=(
+            "exact validating evidence path selected by this substrate-specific "
+            "run; repeat for each selected file"
+        ),
+    )
+    parser.add_argument(
         "--structure-only",
         action="store_true",
         help="check registry structure without claiming that supported tests passed",
@@ -730,8 +808,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not (args.check or args.report):
         args.check = True  # default action is the gate
 
-    if args.structure_only and (args.junit or args.ci_job):
-        print("Claims gate FAILED: --structure-only cannot consume a JUnit result")
+    if args.structure_only and (args.junit or args.ci_job or args.evidence_path):
+        print(
+            "Claims gate FAILED: --structure-only cannot consume a JUnit result "
+            "or evidence scope"
+        )
         return 1
     if bool(args.junit) != bool(args.ci_job):
         print("Claims gate FAILED: --junit and --ci-job must be supplied together")
@@ -742,6 +823,19 @@ def main(argv: Optional[list[str]] = None) -> int:
             "--ci-job; use --structure-only only for the separate registry-shape gate"
         )
         return 1
+    evidence_scope = set(args.evidence_path) if args.evidence_path else None
+    if args.ci_job == "validating" and evidence_scope is None:
+        print(
+            "Claims gate FAILED: --ci-job validating requires one or more exact "
+            "--evidence-path values"
+        )
+        return 1
+    if args.ci_job in {"test", "e2e-browser"} and evidence_scope is not None:
+        print(
+            "Claims gate FAILED: required supported CI jobs derive their complete "
+            "evidence scope from claims.yaml"
+        )
+        return 1
 
     registry = load_registry(Path(args.registry))
     try:
@@ -749,18 +843,39 @@ def main(argv: Optional[list[str]] = None) -> int:
     except JunitEvidenceError as exc:
         print(f"Claims gate FAILED: {exc}")
         return 1
-    results = validate_all(registry, junit=junit, ci_job=args.ci_job)
+    results = validate_all(
+        registry,
+        junit=junit,
+        ci_job=args.ci_job,
+        evidence_scope=evidence_scope,
+    )
+    scope_errors = validate_evidence_scope(results, args.ci_job, evidence_scope)
     now = resolve_now(args.now)
 
     if args.report:
         DOC_OUT.parent.mkdir(parents=True, exist_ok=True)
         DOC_OUT.write_text(
-            render_markdown(results, now, junit is not None, args.ci_job),
+            render_markdown(
+                results,
+                now,
+                junit is not None,
+                args.ci_job,
+                evidence_scope,
+                scope_errors,
+            ),
             encoding="utf-8",
         )
         JSON_OUT.write_text(
             json.dumps(
-                render_json(results, now, junit is not None, args.ci_job), indent=2
+                render_json(
+                    results,
+                    now,
+                    junit is not None,
+                    args.ci_job,
+                    evidence_scope,
+                    scope_errors,
+                ),
+                indent=2,
             )
             + "\n",
             encoding="utf-8",
@@ -769,7 +884,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             f"wrote {DOC_OUT.relative_to(REPO_ROOT)} and {JSON_OUT.relative_to(REPO_ROOT)}"
         )
 
-    errors = [err for r in results for err in r.errors]
+    errors = [err for r in results for err in r.errors] + scope_errors
     if args.check:
         if errors:
             print(f"Claims gate FAILED ({len(errors)} violation(s)):")
@@ -781,7 +896,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(
             f"Claims gate passed: {n} claims, {proven} marked supported; "
             + (
-                f"all {args.ci_job} claim evidence passed."
+                (
+                    f"all scoped {args.ci_job} claim evidence passed."
+                    if evidence_scope is not None
+                    else f"all {args.ci_job} claim evidence passed."
+                )
                 if args.ci_job
                 else "registry structure is consistent; no live pass was claimed."
             )

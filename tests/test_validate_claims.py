@@ -33,6 +33,7 @@ _spec.loader.exec_module(vc)
 # they are ever moved this test fails loudly rather than testing a fiction.
 OPTIN_TEST = "tests/e2e/test_citrix_pixel_e2e.py"
 INLINE_OPTIN_TEST = "tests/e2e/test_citrix_workspace_standin_e2e.py"
+PARALLELS_TEST = "tests/e2e/test_parallels_desktop_e2e.py"
 CI_TEST = "tests/test_replayer.py"
 DOC_ARTIFACT = "docs/desktop/CITRIX_PIXEL.md"
 
@@ -78,9 +79,7 @@ def test_every_real_evidence_path_exists() -> None:
 def test_optin_detector_flags_the_real_optin_tests() -> None:
     citrix = (REPO_ROOT / OPTIN_TEST).read_text(encoding="utf-8")
     citrix_standin = (REPO_ROOT / INLINE_OPTIN_TEST).read_text(encoding="utf-8")
-    parallels = (REPO_ROOT / "tests/e2e/test_parallels_desktop_e2e.py").read_text(
-        encoding="utf-8"
-    )
+    parallels = (REPO_ROOT / PARALLELS_TEST).read_text(encoding="utf-8")
     assert vc.detect_optin_env(citrix) == "OAFLOW_CITRIX_PIXEL_E2E"
     assert vc.detect_optin_env(citrix_standin) == "OAFLOW_CITRIX_STANDIN_E2E"
     assert vc.detect_optin_env(parallels) == "OAFLOW_PARALLELS_E2E"
@@ -241,6 +240,107 @@ def test_supported_evidence_must_be_present_and_not_all_skipped() -> None:
     assert passed.ok, passed.errors
 
 
+def test_scoped_validating_evidence_must_pass_on_its_exact_substrate() -> None:
+    claim = _claim(
+        tier="validating",
+        evidence=[{"path": OPTIN_TEST, "proves": "x"}],
+    )
+    scope = {OPTIN_TEST}
+    absent = vc.validate_claim(
+        claim,
+        junit={},
+        ci_job="validating",
+        evidence_scope=scope,
+    )
+    skipped = vc.validate_claim(
+        claim,
+        junit={OPTIN_TEST: "skipped"},
+        ci_job="validating",
+        evidence_scope=scope,
+    )
+    failed = vc.validate_claim(
+        claim,
+        junit={OPTIN_TEST: "failed"},
+        ci_job="validating",
+        evidence_scope=scope,
+    )
+    passed = vc.validate_claim(
+        claim,
+        junit={OPTIN_TEST: "passed"},
+        ci_job="validating",
+        evidence_scope=scope,
+    )
+
+    assert any("ABSENT" in error for error in absent.errors)
+    assert any("SKIPPED" in error for error in skipped.errors)
+    assert any("RED" in error for error in failed.errors)
+    assert passed.ok, passed.errors
+
+
+def test_scoped_validating_report_is_not_ok_when_selected_test_skips() -> None:
+    scope = {OPTIN_TEST}
+    results = [
+        vc.validate_claim(
+            _claim(
+                tier="validating",
+                evidence=[{"path": OPTIN_TEST, "proves": "x"}],
+            ),
+            junit={OPTIN_TEST: "skipped"},
+            ci_job="validating",
+            evidence_scope=scope,
+        )
+    ]
+
+    blob = vc.render_json(
+        results,
+        now="2026-07-14T00:00:00Z",
+        junit_used=True,
+        junit_job="validating",
+        junit_scope=scope,
+    )
+    assert blob["green_check_run"] is True
+    assert blob["green_check_job"] == "validating"
+    assert blob["green_check_scope"] == [OPTIN_TEST]
+    assert blob["ok"] is False
+
+
+def test_real_validating_scope_checks_only_its_two_declared_files() -> None:
+    scope = {PARALLELS_TEST, OPTIN_TEST}
+    results = vc.validate_all(
+        vc.load_registry(),
+        junit={PARALLELS_TEST: "passed", OPTIN_TEST: "passed"},
+        ci_job="validating",
+        evidence_scope=scope,
+    )
+    errors = [error for result in results for error in result.errors]
+
+    assert errors == []
+    assert vc.validate_evidence_scope(results, "validating", scope) == []
+    unselected = {
+        evidence.path: evidence.junit_status
+        for result in results
+        for evidence in result.evidence
+        if evidence.ci_job == "validating" and evidence.path not in scope
+    }
+    assert unselected
+    assert set(unselected.values()) == {"unknown"}
+
+
+def test_scoped_validating_evidence_rejects_unregistered_path() -> None:
+    results = vc.validate_all(vc.load_registry())
+
+    errors = vc.validate_evidence_scope(
+        results,
+        "validating",
+        {"tests/e2e/test_not_registered.py"},
+    )
+
+    assert errors == [
+        "[validating] scoped evidence is not registered for this job: "
+        "tests/e2e/test_not_registered.py"
+    ]
+
+
 def test_junit_file_is_passed_when_one_case_passes_and_an_optional_case_skips(
     tmp_path: Path,
 ) -> None:
@@ -275,6 +375,18 @@ def test_cli_requires_junit_for_non_structural_supported_check() -> None:
     assert vc.main(["--check"]) == 1
     assert vc.main(["--check", "--structure-only"]) == 0
     assert vc.main(["--check", "--junit", "missing.xml"]) == 1
+    assert (
+        vc.main(
+            [
+                "--check",
+                "--ci-job",
+                "validating",
+                "--junit",
+                "missing.xml",
+            ]
+        )
+        == 1
+    )
 
 
 def test_report_renders_without_crashing() -> None:
@@ -286,6 +398,8 @@ def test_report_renders_without_crashing() -> None:
     blob = vc.render_json(results, now="2026-07-14T00:00:00Z", junit_used=False)
     assert blob["ok"] is True
     assert blob["green_check_job"] is None
+    assert blob["green_check_scope"] == []
+    assert blob["validation_errors"] == []
     assert all(
         "ci_job" in evidence
         for claim in blob["claims"]

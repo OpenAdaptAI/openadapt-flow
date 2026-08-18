@@ -48,9 +48,10 @@ concurrency:
 jobs:
   docker-rdp-vision-ladder:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 3
         with:
           fetch-depth: 0
           # pull_request normally checks out a synthetic merge ref. Qualifying
@@ -59,10 +60,12 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        timeout-minutes: 3
         with:
           python-version: "3.12"
 
       - name: Install flow with the vision + rdp stack
+        timeout-minutes: 7
         run: |
           python -m pip install --upgrade pip
           # Core owns cv2/RapidOCR/Pillow/NumPy hashing; the rdp extra installs the
@@ -72,9 +75,11 @@ jobs:
           pip check
 
       - name: Build the real-RDP fixture image
+        timeout-minutes: 5
         run: docker build -t oaflow-rdp-fixture:latest benchmark/rdp_ladder/fixture
 
       - name: Start the RDP round-trip
+        timeout-minutes: 2
         run: |
           mkdir -p "${RUNNER_TEMP}/rdp-ladder-oracle"
           docker run -d --name oaflow-rdp-ladder --shm-size=1g \
@@ -84,7 +89,7 @@ jobs:
           sleep 22
 
       - name: Run the vision-ladder qualification
-        timeout-minutes: 20
+        timeout-minutes: 15
         run: |
           python benchmark/rdp_ladder/run_rdp_ladder_qualification.py \
             --container oaflow-rdp-ladder \
@@ -101,6 +106,7 @@ jobs:
       # required check.
       - name: Upload fail-closed qualification evidence
         if: always()
+        timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rdp-ladder-qualification

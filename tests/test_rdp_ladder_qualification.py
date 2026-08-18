@@ -11,6 +11,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import shutil
 import sqlite3
 import sys
@@ -443,12 +444,12 @@ def test_workflow_separates_required_evidence_from_optional_presentation() -> No
     required = workflow[required_start:presentation_start]
     presentation = workflow[presentation_start:]
 
-    assert "timeout-minutes: 25" in required
+    assert "timeout-minutes: 45" in required
     assert "run_rdp_ladder_qualification.py" in required
     qualification_start = required.index("- name: Run the vision-ladder qualification")
     qualification_end = required.index("\n\n", qualification_start)
     qualification_step = required[qualification_start:qualification_end]
-    assert "timeout-minutes: 20" in qualification_step
+    assert "timeout-minutes: 15" in qualification_step
     assert "Upload fail-closed qualification evidence" in required
     assert "name: rdp-ladder-qualification" in required
     assert "if-no-files-found: error" in required
@@ -460,6 +461,20 @@ def test_workflow_separates_required_evidence_from_optional_presentation() -> No
     teardown = required[required.index("- name: Tear down") :]
     assert "if: always()" in teardown
     assert "timeout-minutes: 2" in teardown
+
+    # Every step in the required job is bounded. Their complete maximum is
+    # 39 minutes. The 45-minute job leaves six minutes for runner and action
+    # overhead, and the qualification timeout leaves 28 minutes for setup,
+    # evidence upload, and the separately bounded teardown.
+    step_timeouts = [
+        int(value) for value in re.findall(r"timeout-minutes: (\d+)", required)
+    ]
+    assert step_timeouts == [45, 3, 3, 7, 5, 2, 15, 2, 2]
+    job_timeout, *bounded_steps = step_timeouts
+    assert sum(bounded_steps) + 5 <= job_timeout
+    qualification_timeout = 15
+    teardown_timeout = 2
+    assert job_timeout - qualification_timeout - teardown_timeout >= 8
 
     assert "needs: docker-rdp-vision-ladder" in presentation
     assert "github.event_name == 'workflow_dispatch'" in presentation

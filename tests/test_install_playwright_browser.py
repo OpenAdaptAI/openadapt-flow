@@ -433,6 +433,7 @@ def test_run_attempt_returns_fatal_when_group_cannot_be_proven_empty(
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group contract")
 def test_privileged_fallback_is_bounded_and_targets_only_the_exact_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

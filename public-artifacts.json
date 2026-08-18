@@ -101,7 +101,7 @@
     },
     {
       "path": ".github/workflows/docker-rdp-vision-ladder.yml",
-      "sha256": "aab4721d1caaebf6bb8431fa020a27a10c93983058eb8c54e2ff5c8f9174f373"
+      "sha256": "6718b41af1f03cc03b865d2cf10fa7f90d5dafbb630f38052a09bf44164252ab"
     },
     {
       "path": ".github/workflows/paper.yml",

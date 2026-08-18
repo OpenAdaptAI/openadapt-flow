@@ -124,7 +124,9 @@ def test_production_gate_rejects_missing_clean_machine_run() -> None:
 
 
 def test_production_gate_rejects_partial_clean_machine_matrix() -> None:
-    with pytest.raises(QualificationError, match="clean-machine job set/count mismatch"):
+    with pytest.raises(
+        QualificationError, match="clean-machine job set/count mismatch"
+    ):
         _require_production(FakeGitHub(clean_jobs=_clean_jobs()[:-1]))
 
 

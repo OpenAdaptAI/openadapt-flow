@@ -3223,6 +3223,19 @@ def test_push_json_schema_rejects_accepted_certainty_on_failure(monkeypatch, cap
         _assert_push_json_schema(document)
 
 
+def test_push_json_schema_rejects_server_binding_on_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: (_ for _ in ()).throw(hosted.HostedError("private")),
+    )
+    assert main(["push", "raw", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    document["binding"]["runtime_validation_id"] = _PUSH_RUNTIME_VALIDATION_ID
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -3246,6 +3259,23 @@ def test_push_json_schema_rejects_conflicting_uncertain_state(
     assert main(["push", "raw", "--json"]) == 1
     document = json.loads(capsys.readouterr().out)
     document[field] = value
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
+
+
+def test_push_json_schema_rejects_server_binding_on_uncertain_state(
+    monkeypatch, capsys
+):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            hosted.HostedDeliveryUncertain("private")
+        ),
+    )
+    assert main(["push", "raw", "--json"]) == 1
+    document = json.loads(capsys.readouterr().out)
+    document["binding"]["organization_id"] = _PUSH_ORG_ID
     with pytest.raises(jsonschema.ValidationError):
         _assert_push_json_schema(document)
 

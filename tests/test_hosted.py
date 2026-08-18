@@ -2990,6 +2990,32 @@ def test_cli_push_json_paused_for_review(monkeypatch, capsys):
     assert value["error"] is None
 
 
+def test_push_json_schema_rejects_dashboard_on_paused_review(monkeypatch, capsys):
+    monkeypatch.setattr(
+        hosted,
+        "push",
+        lambda *args, **kwargs: {
+            "uploaded": False,
+            "pending_review": True,
+            "kind": "recording",
+            "sanitized_path": "/safe/derivative",
+            "review_command": "openadapt-flow review-sanitized /safe/derivative",
+            "review_id": _PUSH_REVIEW_ID,
+            "local_binding": {
+                "source_tree_sha256": _PUSH_SOURCE_SHA,
+                "derivative_tree_sha256": _PUSH_DERIVATIVE_SHA,
+                "approved_archive_sha256": None,
+                "sanitization_policy": "outbound-phi-v1",
+            },
+        },
+    )
+    assert main(["push", "raw", "--json"]) == 0
+    document = json.loads(capsys.readouterr().out)
+    document["dashboard_url"] = "https://evil.example/runs/x"
+    with pytest.raises(jsonschema.ValidationError):
+        _assert_push_json_schema(document)
+
+
 @pytest.mark.parametrize(
     ("server_status", "next_action"),
     [

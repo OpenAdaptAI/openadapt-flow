@@ -190,6 +190,7 @@
           },
           "attestation": { "type": "null" },
           "next_action": { "const": "review_local" },
+          "dashboard_url": { "type": "null" },
           "error": { "type": "null" },
           "binding": {
             "properties": {

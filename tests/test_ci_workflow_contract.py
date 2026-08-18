@@ -124,6 +124,26 @@ def test_exhaustive_identity_ladder_corpus_runs_in_the_slow_lane_only() -> None:
     assert workflow.count(f'{flag}: "1"') == 1
 
 
+def test_supported_claims_consume_their_required_jobs_real_junit() -> None:
+    """The two required test jobs must fail when cited evidence did not run."""
+
+    workflow = CI.read_text(encoding="utf-8")
+    unit_start = workflow.index("- name: Test (fast unit suite)")
+    unit_end = workflow.index("- name: Coverage (whole-package visibility)")
+    unit = workflow[unit_start:unit_end]
+    assert "--junitxml=runs/unit-claims-junit.xml" in unit
+    assert "--ci-job test --junit runs/unit-claims-junit.xml" in unit
+
+    browser_start = workflow.index("- name: E2E (browser record -> compile -> replay)")
+    browser_end = workflow.index("- name: Upload run artifacts", browser_start)
+    browser = workflow[browser_start:browser_end]
+    assert "--junitxml=runs/e2e-claims-junit.xml" in browser
+    assert "--ci-job e2e-browser --junit runs/e2e-claims-junit.xml" in browser
+
+    claims = VALIDATE_CLAIMS.read_text(encoding="utf-8")
+    assert "validate_claims.py --check --structure-only" in claims
+
+
 def test_clean_machine_lifecycle_declares_utf8_on_every_os() -> None:
     workflow = QUICKSTART.read_text(encoding="utf-8")
     lifecycle_start = workflow.index("  lifecycle:")

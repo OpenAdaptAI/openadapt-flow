@@ -1009,6 +1009,20 @@ def _recording_privacy_notices(recording_dir: Path) -> list[str]:
                 "held a value, so Flow could not prove the new text was not a "
                 "reflection of that value"
             ),
+            "title-changed-after-a-secret-value": (
+                "the page title changed after a declared secret field held a "
+                "value. A title has no structure to reduce, so Flow withholds "
+                "it rather than guess whether it reflects the value"
+            ),
+            "declared-value-in-url": (
+                "the page URL held a declared secret value that no parameter "
+                "name identified, so structure alone could not remove it"
+            ),
+            "declared-value-in-title": ("the page title held a declared secret value"),
+            "url-cannot-be-parsed": (
+                "the page reported a URL that is not an HTTP or HTTPS URL, so "
+                "Flow could not reduce it by structure"
+            ),
             "opaque-secret-boundary": (
                 "a declared secret field sits behind a closed shadow root, "
                 "which exposes its value to no check at all"
@@ -1024,6 +1038,29 @@ def _recording_privacy_notices(recording_dir: Path) -> list[str]:
                 "exactly or not at all and never rewrites it, so the recording "
                 "holds no secret value and no altered text."
             )
+    dropped = meta.get("url_dropped_params")
+    if isinstance(dropped, list) and dropped:
+        names = sorted(
+            {str(entry.get("name")) for entry in dropped if isinstance(entry, dict)}
+        )
+        notices.append(
+            "Flow removed the value of these URL parameters and kept their "
+            f"names: {', '.join(names)}. A parameter named after a declared "
+            "secret field loses its value in every recorded URL, whatever the "
+            "value is. The rest of each URL -- origin, path and other "
+            "parameters -- is exact."
+        )
+    if meta.get("application_placed_secret_in_url") or meta.get(
+        "application_placed_secret_in_title"
+    ):
+        notices.append(
+            "WARNING: the application put a declared secret value into its own "
+            "page URL or title. Flow withheld that text, but this is an "
+            "application defect that exists with or without Flow: OWASP lists "
+            "browser history, server logs, proxies, CDNs and the Referer "
+            "header as places such a value is already exposed. Report it to "
+            "the application owner."
+        )
     withheld_identity = meta.get("identity_withheld_events")
     if isinstance(withheld_identity, int) and withheld_identity > 0:
         notices.append(

@@ -464,6 +464,28 @@ _INIT_JS = r"""
   // baseline above. It never un-sticks, because a value the field no longer
   // holds can still be reflected somewhere in this document.
   let documentHeldSecretValue = false;
+  // Whether the baseline above proves anything. It does not for a document
+  // that was BORN after some earlier document already received a declared
+  // value: the URL such a document loads with can already carry that value, so
+  // its own first sample is not evidence of a time before the value existed.
+  // Python knows the recording-wide history and reports it on the first read.
+  let seedTrusted = true;
+  let seedDecided = false;
+  // Values a declared field held at a COMMIT POINT -- `change`, `focusout`,
+  // `submit`, `pagehide`. Used for ONE purpose: deciding whether to WITHHOLD
+  // identity text after the page removes the field. Never for the URL, never
+  // for the title, and never to rewrite anything.
+  //
+  // Why this is safe where the rule that failed three reviews was not: that
+  // rule REWROTE text, so a false match corrupted evidence or leaked. Nothing
+  // here rewrites, so a false match can only withhold. Withholding costs
+  // evidence; it cannot corrupt and it cannot leak. Identity text is also a
+  // DIRECT match against the value, while a URL or a title reflects it
+  // indirectly and can lag, which is why reflected text still uses live values
+  // only. A commit point is a moment the operator stopped on, not a keystroke,
+  // and only a CONNECTED element commits, so a controlled input that fires
+  // focusout on the node it just replaced commits nothing.
+  const committedSecretValues = new Set();
   let eventsStopped = false;
   let cleaned = false;
 
@@ -514,7 +536,7 @@ _INIT_JS = r"""
     privacyStatus: () => ({ok: privacyBoundaryError === null,
                            error: privacyBoundaryError}),
     registerExistingClosedShadowHost,
-    structuralState: safePageState,
+    structuralState: (secretSeenEarlier) => safePageState(secretSeenEarlier),
   };
   window[CLEANUP_KEY] = {sessionId: SESSION_ID, stopEvents, cleanup};
 
@@ -574,6 +596,96 @@ _INIT_JS = r"""
     return values;
   }
 
+  function declaredSecretParameterNames() {
+    // Names Flow KNOWS name a secret: the operator's --secret declarations,
+    // and the name or id of every field Flow bound, which includes every
+    // auto-detected input[type=password]. This list is structure, not value:
+    // it is the same whatever the operator typed, so a rule keyed on it is
+    // deterministic. Sentry and Datadog redact URLs the same way, by parameter
+    // NAME, because searching for a value inside arbitrary text does not work.
+    const names = new Set();
+    for (const name of SECRET_NAMES) if (name) names.add(String(name));
+    for (const el of stickySecretElements) {
+      const state = secretStates.get(el) || closedSecretHosts.get(el) || null;
+      if (state && state.field) names.add(String(state.field));
+      const attribute = elementName(el);
+      if (attribute) names.add(String(attribute));
+      try { if (el.id) names.add(String(el.id)); } catch (e) {}
+    }
+    return names;
+  }
+
+  function inboundSecretParameterValues() {
+    // A same-origin GET submit carries the field's value under the field's own
+    // NAME, because that is how an HTML form works. A document that loads such
+    // a URL therefore holds a declared value it never saw typed, and its
+    // closure has no bound element to read it from. Recover it from the URL by
+    // NAME and use it to WITHHOLD identity text in this document.
+    //
+    // Only values long enough to identify. A short one matches ordinary page
+    // text by chance, and this is a net, not a proof: withholding every
+    // identity that contains a 3-character query value would cost far more
+    // evidence than it protects.
+    const values = new Set();
+    const parsed = parseHttpUrl(location.href);
+    if (parsed === null) return values;
+    const declared = declaredSecretParameterNames();
+    for (const search of [parsed.search, fragmentQuery(parsed.hash)]) {
+      if (!search) continue;
+      let params = null;
+      try { params = new URLSearchParams(search); } catch (e) { params = null; }
+      if (params === null) continue;
+      for (const [name, value] of params) {
+        if (!declared.has(name)) continue;
+        if (value && value.length >= MIN_UNAMBIGUOUS_SECRET) values.add(value);
+      }
+    }
+    return values;
+  }
+
+  function identityMatchValues() {
+    // Every value Flow may use to WITHHOLD identity text. Never to rewrite it.
+    const values = liveSecretValues();
+    for (const value of committedSecretValues) values.add(value);
+    for (const value of inboundSecretParameterValues()) values.add(value);
+    return values;
+  }
+
+  function commitConnectedValue(el) {
+    if (!el || !stickySecretElements.has(el) || !isConnectedElement(el)) return;
+    const value = currentSecretValue(el);
+    if (value) committedSecretValues.add(value);
+  }
+
+  function commitSecretValueFor(node) {
+    // A commit point that names its element: `change` and `focusout`.
+    //
+    // DECIDE AT THE MICROTASK CHECKPOINT, not now. A controlled input that
+    // replaces its focused node on every keystroke dispatches focusout DURING
+    // the replacement, while the node can still report itself as connected.
+    // One checkpoint later the page has certainly dropped it, and the value it
+    // holds is a keystroke prefix -- not a value the operator stopped on.
+    // Committing prefixes would withhold identity evidence on every chance
+    // match, which is the failure this rule exists to avoid.
+    //
+    // A real blur is unaffected: the element the operator left is still in the
+    // document at the checkpoint, and a page handler that removes it runs in a
+    // LATER task.
+    const el = secretTextEntryForNode(node) || node;
+    if (!el || !stickySecretElements.has(el)) return;
+    try {
+      Promise.resolve().then(() => commitConnectedValue(el));
+    } catch (e) {
+      commitConnectedValue(el);
+    }
+  }
+
+  function commitSecretValues() {
+    // `submit` and `pagehide`. The document is leaving, so there is no later
+    // checkpoint to defer to.
+    for (const el of stickySecretElements) commitConnectedValue(el);
+  }
+
   function secretVariants(secret) {
     const variants = new Set([secret]);
     try { variants.add(encodeURIComponent(secret)); } catch (e) {}
@@ -627,7 +739,7 @@ _INIT_JS = r"""
       }
       return null;
     }
-    const reason = secretValueIn(text, liveSecretValues());
+    const reason = secretValueIn(text, identityMatchValues());
     if (reason === null) return text;
     if (identityWithheldReason === null) identityWithheldReason = reason;
     return null;
@@ -641,7 +753,7 @@ _INIT_JS = r"""
     const text = String(value);
     if (!text) return text;
     if (opaqueSecretActive) return null;
-    return secretValueIn(text, liveSecretValues()) === null ? text : null;
+    return secretValueIn(text, identityMatchValues()) === null ? text : null;
   }
 
   function originOnlyUrl() {
@@ -649,34 +761,175 @@ _INIT_JS = r"""
     try { return location.origin + '/'; } catch (e) { return ''; }
   }
 
-  function safePageState() {
+  function parseHttpUrl(href) {
+    try {
+      const parsed = new URL(String(href));
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        return parsed;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function fragmentQuery(hash) {
+    // A fragment is either a bare anchor (`#section`) or a second query
+    // (`#a=1&b=2`). Treat it as a query only when it names things.
+    const text = String(hash || '').replace(/^#/, '');
+    return text.indexOf('=') >= 0 ? text : '';
+  }
+
+  function reduceParams(search, context, where, dropped) {
+    // Return the parameter list with the VALUE of each parameter Flow cannot
+    // report emptied. NAMES always survive: a name is app structure, and the
+    // operator needs it to read the evidence. Nothing is invented -- a dropped
+    // value becomes empty. Flow removes characters; it never adds characters
+    // the page did not show.
+    let params = null;
+    try { params = new URLSearchParams(search); } catch (e) { params = null; }
+    if (params === null) return null;
+    const parts = [];
+    for (const [name, value] of params) {
+      let reason = null;
+      if (context.declared.has(name)) {
+        // By NAME, always, whatever the value is. A same-origin GET submit
+        // carries a declared field under its own name, so this is the exact
+        // channel that leaked, closed by structure rather than by matching.
+        reason = 'declared-secret-parameter';
+      } else if (context.requireProof && value) {
+        const baseline = context.baseline;
+        const proven = baseline !== null && baseline.get(name) === value;
+        if (!proven) reason = 'unproven-parameter-value';
+      }
+      if (reason === null) {
+        parts.push(encodeURIComponent(name) + '=' + encodeURIComponent(value));
+        continue;
+      }
+      parts.push(encodeURIComponent(name) + '=');
+      if (value) dropped.push({name: name, where: where, reason: reason});
+    }
+    return parts.join('&');
+  }
+
+  function baselineParams(search) {
+    try { return new URLSearchParams(search); } catch (e) { return null; }
+  }
+
+  function pathHoldsDeclaredValue(pathname, values) {
+    // The NET for the PATH, run in BOTH directions.
+    //
+    // Direction 1, a segment holds a whole value, is step 5 and the whole-URL
+    // check already covers it. Direction 2 is the one that matters here: a
+    // page that writes the field into its path as the operator types leaves a
+    // segment the value CONTAINS but no longer equals. Matching only the live
+    // value would miss it, and Flow will not keep a previous value to catch
+    // it, so it asks the opposite question instead -- does a value Flow can
+    // see contain this segment? That reads the CURRENT value against the
+    // CURRENT text. It is not a history and not a prefix ladder, and it only
+    // ever withholds.
+    //
+    // A segment too short to identify is ignored: `/app/edit` inside a long
+    // passphrase would otherwise withhold the URL of an ordinary page.
+    const segments = String(pathname || '').split('/').filter(Boolean);
+    for (const segment of segments) {
+      if (segment.length < MIN_UNAMBIGUOUS_SECRET) continue;
+      let decoded = segment;
+      try { decoded = decodeURIComponent(segment); } catch (e) {}
+      for (const value of values) {
+        if (!value) continue;
+        if (value.indexOf(segment) >= 0 || value.indexOf(decoded) >= 0) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function reportedUrl(rawUrl, dropped) {
+    // A URL is STRUCTURE, not one opaque string. Report the origin and the
+    // path, which is what a single-page application changes when it routes,
+    // and which is app-controlled structure rather than operator input.
+    // Reduce only the parameter values Flow cannot stand behind.
+    //
+    // Returns null when Flow cannot parse the URL at all; the caller withholds.
+    const parsed = parseHttpUrl(rawUrl);
+    if (parsed === null) return null;
+    // Once this document has held a declared value, a parameter value Flow
+    // cannot prove predates that value is dropped. A document whose seed
+    // baseline Flow does not trust proves nothing at all.
+    const requireProof = documentHeldSecretValue || !seedTrusted;
+    const baselineUrl = seedTrusted ? parseHttpUrl(preSecretUrl) : null;
+    const context = {
+      declared: declaredSecretParameterNames(),
+      requireProof: requireProof,
+      baseline: null,
+    };
+    context.baseline = baselineUrl === null
+      ? null : baselineParams(baselineUrl.search);
+    const query = reduceParams(parsed.search, context, 'query', dropped);
+    const rawFragment = fragmentQuery(parsed.hash);
+    context.baseline = baselineUrl === null
+      ? null : baselineParams(fragmentQuery(baselineUrl.hash));
+    const fragment = rawFragment
+      ? reduceParams(rawFragment, context, 'fragment', dropped) : '';
+    if (query === null || fragment === null) return null;
+    // Rebuilding normalises percent-encoding. Return exactly what the page
+    // reports when Flow dropped nothing, so evidence does not drift. User
+    // information in the authority is never returned: the rebuilt form drops
+    // it with the rest of the authority.
+    if (!dropped.length && !parsed.username && !parsed.password) {
+      return String(rawUrl);
+    }
+    const hash = rawFragment
+      ? '#' + fragment
+      : (parsed.hash ? parsed.hash : '');
+    return parsed.origin + parsed.pathname
+      + (parsed.search ? '?' + query : '') + hash;
+  }
+
+  function safePageState(secretSeenEarlier) {
     // REFLECTED / CONTEXT EVIDENCE: the page URL and the document title.
     //
-    // A page can write a field's value into either one, and it can do so on a
-    // timer, so the text on show at any moment may reflect a value the field
-    // held some keystrokes ago. Matching the CURRENT value against it does not
-    // find that older reflection, and keeping the older values to match with
-    // is the rule that failed three reviews.
+    // STRUCTURE FIRST, DETECTION AS A NET.
     //
-    // Flow reports this text only when it can PROVE the text is not a
-    // reflection: the text has not changed since before this document held any
-    // declared value, so it existed before the value did. Any other text is
-    // withheld whole. Flow never rewrites it and never guesses.
+    // The URL is parsed, not treated as one opaque string. The origin and the
+    // path are reported: a path change is the single-page-application case,
+    // and the path is app structure, not operator input. Parameter NAMES are
+    // always reported. A parameter VALUE is dropped when its NAME is a
+    // declared secret field name -- deterministically, with no reference to
+    // the value -- or when Flow cannot prove the value predates the moment
+    // this document first held a declared value. Sentry and Datadog redact
+    // URLs by parameter name for the same reason: searching for a value inside
+    // arbitrary text does not work, and OWASP notes that a secret in a URL is
+    // already exposed through history, logs, proxies and Referer headers.
     //
-    // STATED LIMIT. Text that already carried the value BEFORE any declared
-    // field held it -- an operator who opens a URL that already contains the
-    // password and then types it -- passes this proof and is reported. Flow
-    // protects a declared value from the moment a bound field holds it; text
-    // that carried it earlier is ordinary recording evidence, and the same is
-    // true of the frames captured before that moment. Checking the text
-    // against the live value instead would withhold on a chance match with a
-    // keystroke prefix: a password beginning with an ordinary word would
-    // withhold the URL of every page whose text contains that word.
+    // The net: if the URL Flow is about to report still contains a value a
+    // bound field holds right now, Flow withholds the whole URL and tells the
+    // operator that the application put a declared secret into it. That
+    // matching is sound here and was not sound before, because this function
+    // now runs only from Python at the settled boundary, where the page has
+    // processed the action and its reflection matches the value the field
+    // holds. It needs no history, and the direction is fail-safe: a match
+    // withholds, so a false positive costs evidence and cannot leak.
+    //
+    // The title has no structure to exploit, so it keeps the plain rule:
+    // report it while it has not changed since before this document held a
+    // declared value, and withhold it otherwise, plus the same net.
+    //
+    // STATED LIMITS, both documented in docs/BROWSER_RECORDING.md:
+    //  * An application that debounces its URL update beyond the settle window
+    //    can still show an earlier value. The net will not match it. Flow does
+    //    NOT keep a previous value to catch that.
+    //  * Text that already carried the value BEFORE any declared field held it
+    //    predates the value and is reported.
+    if (!seedDecided) {
+      seedDecided = true;
+      if (secretSeenEarlier === true) seedTrusted = false;
+    }
     const rawUrl = String(location.href);
     const rawTitle = String(document.title == null ? '' : document.title);
     const values = liveSecretValues();
     if (values.size > 0) documentHeldSecretValue = true;
-    if (!documentHeldSecretValue && !opaqueSecretActive) {
+    if (!documentHeldSecretValue && !opaqueSecretActive && seedTrusted) {
       preSecretUrl = rawUrl;
       preSecretTitle = rawTitle;
     }
@@ -685,23 +938,60 @@ _INIT_JS = r"""
       title: rawTitle,
       doc: DOC_ID,
       // Whether this document has EVER held a declared value. Python uses it
-      // to withhold every LATER document's reflected text: a fresh closure
-      // cannot know a value an earlier document received. This stays true
-      // after the field is cleared, because the reflection can outlive it.
+      // to bind the recording-wide secret boundary across documents.
       secret: documentHeldSecretValue || opaqueSecretActive,
-      withheld: null,
+      url_withheld: null,
+      title_withheld: null,
+      dropped: [],
+      secret_in_url: false,
+      secret_in_title: false,
     };
     if (opaqueSecretActive) {
-      state.withheld = 'opaque-secret-boundary';
-    } else if (!documentHeldSecretValue) {
-      return state;
-    } else if (rawUrl !== preSecretUrl || rawTitle !== preSecretTitle) {
-      state.withheld = 'reflected-text-changed-after-a-secret-value';
+      // A closed shadow root exposes its value to no check at all.
+      state.url_withheld = 'opaque-secret-boundary';
+      state.title_withheld = 'opaque-secret-boundary';
+    } else {
+      const dropped = [];
+      const reduced = reportedUrl(rawUrl, dropped);
+      // The net runs against every value Flow can see, not only the live one.
+      // Adding a committed value can only ADD a match, and a match only
+      // withholds, so this direction cannot leak and cannot corrupt. The
+      // proof rule above still uses the live value alone.
+      const netValues = identityMatchValues();
+      const parsed = reduced === null ? null : parseHttpUrl(reduced);
+      if (reduced === null) {
+        state.url_withheld = 'url-cannot-be-parsed';
+      } else if (
+        parsed !== null
+        && pathHoldsDeclaredValue(parsed.pathname, netValues)
+      ) {
+        state.url_withheld = 'declared-value-in-url';
+        state.secret_in_url = true;
+      } else if (secretValueIn(reduced, netValues) !== null) {
+        // The application put a declared secret somewhere structure cannot
+        // reach -- a path segment, or a parameter it did not name after the
+        // field. Withhold the whole URL and say so: this is an application
+        // defect the operator needs to know about.
+        state.url_withheld = 'declared-value-in-url';
+        state.secret_in_url = true;
+      } else {
+        state.url = reduced;
+        state.dropped = dropped;
+      }
+      if (documentHeldSecretValue) {
+        if (secretValueIn(rawTitle, identityMatchValues()) !== null) {
+          state.title_withheld = 'declared-value-in-title';
+          state.secret_in_title = true;
+        } else if (rawTitle !== preSecretTitle) {
+          state.title_withheld = 'title-changed-after-a-secret-value';
+        }
+      }
     }
-    if (state.withheld !== null) {
+    if (state.url_withheld !== null) {
       state.url = originOnlyUrl();
-      state.title = '';
+      state.dropped = [];
     }
+    if (state.title_withheld !== null) state.title = '';
     return state;
   }
 
@@ -766,7 +1056,16 @@ _INIT_JS = r"""
   function targetName(el) {
     // Never inspect visible text from a secret-bound contenteditable or one of
     // its descendants. Its innerText is the secret value, not target identity.
-    if (secretTextEntryForNode(el)) return null;
+    // That is a WITHHELD name, not an absent one: the element may well have an
+    // aria-label, and a control field beside it returns its name normally. Say
+    // so, or the DOM identity tier disarms silently, exactly as a bare null
+    // selector once did.
+    if (secretTextEntryForNode(el)) {
+      if (identityWithheldReason === null) {
+        identityWithheldReason = 'secret-field-name-not-read';
+      }
+      return null;
+    }
     const aria = (el.getAttribute('aria-label') || '').trim();
     if (aria) return identityTextOrNull(aria);
     const labelledBy = (el.getAttribute('aria-labelledby') || '').trim();
@@ -1178,6 +1477,13 @@ _INIT_JS = r"""
     preSecretUrl = String(location.href);
     preSecretTitle = String(document.title == null ? '' : document.title);
   }
+  // NOTE on the title seed. Flow installs this closure at document start, so
+  // `<title>` has usually not parsed yet and the seeded title is ''. That is
+  // deliberate and it is not what carries the URL rule: safePageState refreshes
+  // both baselines at every sample taken while no declared value is held, so
+  // an ordinary page reaches its real title before the operator types. A
+  // document that ALREADY holds a value at install keeps the '' baseline and
+  // therefore withholds its title. That is the fail-closed side.
 
   function fieldLabel(el) {
     // Best available human label for the receiving field, best-first:
@@ -1406,10 +1712,15 @@ _INIT_JS = r"""
     emit(pointerEvent);
   });
 
-  // There are no commit points. Flow does not retain a value past the moment
-  // the field holds it: once the page clears the field, Flow cannot prove what
-  // any changed URL or title reflects, so it withholds that text instead of
-  // matching it against a remembered copy. See safePageState.
+  // Commit points. After each of these the page can remove the field while
+  // still showing the value somewhere -- an SPA wizard that replaces its form
+  // with a summary row is the ordinary case. The value committed here is used
+  // for ONE purpose, deciding whether to WITHHOLD identity text, and never for
+  // the URL, the title, or any rewrite. See committedSecretValues.
+  listen('change', (e) => commitSecretValueFor(inputEventTarget(e)));
+  listen('focusout', (e) => commitSecretValueFor(inputEventTarget(e)));
+  listen('submit', commitSecretValues);
+  listenOn(window, 'pagehide', commitSecretValues);
 
   listen('input', (e) => {
     refreshSecretBindings();
@@ -1631,6 +1942,9 @@ class InteractiveRecorder:
         self._structural_text_withheld = False
         self._structural_text_withheld_reasons: set[str] = set()
         self._identity_withheld_events = 0
+        self._dropped_url_parameters: set[tuple[str, str, str]] = set()
+        self._app_placed_secret_in_url = False
+        self._app_placed_secret_in_title = False
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -2023,6 +2337,17 @@ class InteractiveRecorder:
                 )
             if self._identity_withheld_events:
                 meta["identity_withheld_events"] = self._identity_withheld_events
+            if self._dropped_url_parameters:
+                # Which URL parameter VALUES the recording does not carry, and
+                # why. The names are app structure and are safe to report.
+                meta["url_dropped_params"] = [
+                    {"name": name, "where": where, "reason": reason}
+                    for name, where, reason in sorted(self._dropped_url_parameters)
+                ]
+            if self._app_placed_secret_in_url:
+                meta["application_placed_secret_in_url"] = True
+            if self._app_placed_secret_in_title:
+                meta["application_placed_secret_in_title"] = True
             if not self._owns_browser:
                 assert self._initial_attached_viewport is not None
                 meta["viewport"] = list(self._initial_attached_viewport)
@@ -2478,13 +2803,6 @@ class InteractiveRecorder:
 
         self._structural_text_withheld = True
         self._structural_text_withheld_reasons.add(reason)
-
-    def _withhold_structural_text(self, state: dict[str, Any], reason: str) -> None:
-        """Replace URL and title evidence that Flow cannot prove is safe."""
-
-        self._note_withheld_structural_text(reason)
-        state["url"] = self._origin_only_url()
-        state["title"] = ""
 
     def _cleanup_page_listeners(self) -> None:
         """Remove this session's current-document listeners before detach."""
@@ -2979,34 +3297,38 @@ class InteractiveRecorder:
         if structural_after is not None:
             self._last_structural = structural_after
 
-    def _read_scrubbed_page_state(self) -> dict[str, str]:
+    def _read_scrubbed_page_state(self) -> dict[str, Any]:
         """Sample the page-closure URL and title at a SETTLED boundary.
 
         This is the only sampling point for reflected evidence. Python calls it
         after the page has processed the action, so what the page shows is what
         the action produced. The in-page capture-phase listeners deliberately
-        emit no URL or title: they run BEFORE the page's own handlers, so
+        emit no URL and no title: they run BEFORE the page's own handlers, so
         anything they read is one action out of date.
 
-        The page decides whether its reflected text can be reported at all and
-        says so in ``withheld``. Python adds the one rule the page cannot see:
-        a LATER document cannot report reflected text once an earlier document
-        received a declared value, because each document builds a fresh closure
-        that never saw that value.
+        The page reduces its own URL by STRUCTURE -- origin and path reported,
+        parameter names kept, the values Flow cannot stand behind emptied --
+        and says what it dropped and what it withheld.
+
+        Python supplies the one fact the page cannot know: whether some EARLIER
+        document already received a declared value. A document born after that
+        moment can load with the value already in its URL, so its own first
+        sample proves nothing about a time before the value existed.
         """
 
         assert self.page is not None
+        secret_seen_earlier = bool(self._secret_doc_ids)
         try:
             safe_page_state = self.page.evaluate(
-                """sessionId => {
+                """([sessionId, secretSeenEarlier]) => {
                   const recorder = window.__oaflowRecorder;
                   if (!recorder || recorder.sessionId !== sessionId
                       || typeof recorder.structuralState !== 'function') {
                     return null;
                   }
-                  return recorder.structuralState();
+                  return recorder.structuralState(secretSeenEarlier);
                 }""",
-                self._session_id,
+                [self._session_id, secret_seen_earlier],
             )
         except Exception as exc:
             raise BrowserAttachError(
@@ -3016,7 +3338,7 @@ class InteractiveRecorder:
             raise BrowserAttachError(
                 "the page-local secret scrubber did not return structural state"
             )
-        state: dict[str, str] = {}
+        state: dict[str, Any] = {}
         for key in ("url", "title"):
             value = safe_page_state.get(key)
             if not isinstance(value, str):
@@ -3028,13 +3350,46 @@ class InteractiveRecorder:
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         if doc_id is not None and safe_page_state.get("secret") is True:
             self._secret_doc_ids.add(doc_id)
-        page_withheld = safe_page_state.get("withheld")
-        if isinstance(page_withheld, str) and page_withheld:
-            # The page already replaced the text; record the reason so the
-            # operator notice can name it.
-            self._withhold_structural_text(state, page_withheld)
+        for key, reason_key in (
+            ("url_withheld", "url"),
+            ("title_withheld", "title"),
+        ):
+            reason = safe_page_state.get(key)
+            if isinstance(reason, str) and reason:
+                self._note_withheld_structural_text(reason)
+        # An application that puts a declared secret into its own URL has a
+        # defect that exists with or without Flow: OWASP lists browser history,
+        # server logs, proxies, CDNs and the Referer header as places it is
+        # already exposed. Tell the operator.
+        if safe_page_state.get("secret_in_url") is True:
+            self._app_placed_secret_in_url = True
+        if safe_page_state.get("secret_in_title") is True:
+            self._app_placed_secret_in_title = True
+        dropped = safe_page_state.get("dropped")
+        if isinstance(dropped, list) and dropped:
+            names: list[str] = []
+            for entry in dropped:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                reason = entry.get("reason")
+                where = entry.get("where")
+                if not isinstance(name, str):
+                    continue
+                names.append(name)
+                self._dropped_url_parameters.add((name, str(where), str(reason)))
+            # The drop is a RECORDING-level fact, not a per-action one: a
+            # parameter named after a declared field loses its value in every
+            # URL Flow reports, whatever the value is. `meta.json` carries the
+            # list. Putting it on each event would land it inconsistently,
+            # because the Recorder builds an action's after-state from the
+            # backend's url/title/page-count seam alone.
+        # A LATER document builds a fresh closure that never saw the value an
+        # earlier document received. The URL is protected by structure, so it
+        # survives; the title has no structure to exploit, so it is withheld.
         if self._secret_document_left(doc_id):
-            self._withhold_structural_text(state, "secret-value-left-its-document")
+            self._note_withheld_structural_text("secret-value-left-its-document")
+            state["title"] = ""
         return state
 
     def _structural_state(self) -> dict[str, Any]:

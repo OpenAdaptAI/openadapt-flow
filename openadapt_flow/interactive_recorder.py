@@ -402,14 +402,27 @@ _INIT_JS = r"""
   const inputSessions = new WeakMap();
   const trustedSecretFieldLabels = new WeakMap();
   const stickySecretElements = new Set();
-  // Committed values, keyed by INPUT SESSION. The session is the unit that
-  // makes a keystroke prefix recognisable: every node a controlled input swaps
-  // in shares one session, so the shorter values of that session are prefixes
-  // of its longest one. Two declared fields never share a session, so one
-  // field's value can never suppress another's.
-  const secretValuesBySession = new Map();
+  // Committed values, keyed by the ELEMENT that held them at a commit point.
+  // Keying by element is what tells a real commit from a DOM-swap artifact: a
+  // controlled input that replaces its focused node makes the browser fire
+  // focusout mid-typing, and the value committed there belongs to a node the
+  // page threw away.
+  const committedSecretValues = new WeakMap();
+  // What each bound element has held, read at every scrub. A page that
+  // reflects a field as the operator types writes the PREVIOUS value into the
+  // title or the URL, so the value Flow must redact is not always the one the
+  // field holds now.
+  const observedSecretValues = new WeakMap();
   const observedSecretRoots = new WeakSet();
   const ambiguousSecretReplacements = new WeakSet();
+  // A bound element that a controlled input REPLACED with one proven
+  // successor. Only such an element can hold a keystroke prefix that Flow is
+  // allowed to drop; see retainedSecretValues.
+  const supersededSecretElements = new WeakSet();
+  // Elements that discovery bound during the MutationObserver batch being
+  // processed right now. A replacement discovery has just bound still needs to
+  // inherit the state of the node it replaced, including its input session.
+  let batchDiscoveredSecrets = null;
   let nextInputSession = 0;
   let activeSecretElement = null;
   let activeSecretState = null;
@@ -417,6 +430,9 @@ _INIT_JS = r"""
   let secretObserver = null;
   let privacyBoundaryError = null;
   let opaqueSecretActive = false;
+  // Why Flow refused to build identity evidence from free identity text, for
+  // the identity scope that is being built right now. See scrubIdentityText.
+  let identityWithheldReason = null;
   let eventsStopped = false;
   let cleaned = false;
 
@@ -449,8 +465,9 @@ _INIT_JS = r"""
     for (const el of stickySecretElements) {
       try { el.removeAttribute(SECRET_MARKER); } catch (e) {}
     }
+    // committedSecretValues is a WeakMap keyed by these elements, so it
+    // empties with them.
     stickySecretElements.clear();
-    secretValuesBySession.clear();
     activeSecretElement = null;
     activeSecretState = null;
     const current = window[GLOBAL_KEY];
@@ -520,13 +537,61 @@ _INIT_JS = r"""
     values.add(value);
   }
 
+  function committedValuesFor(el) {
+    return committedSecretValues.get(el) || null;
+  }
+
+  function noteObservedValue(el, value) {
+    // Keep the LAST value the element held, and every earlier value long
+    // enough to identify. A shorter earlier value is a keystroke prefix that
+    // matches ordinary page text by chance, and keeping it would withhold
+    // unrelated evidence for the rest of the recording.
+    if (!value) return;
+    let entry = observedSecretValues.get(el);
+    if (!entry) {
+      entry = {last: '', earlier: new Set()};
+      observedSecretValues.set(el, entry);
+    }
+    if (entry.last && entry.last !== value
+        && entry.last.length >= MIN_UNAMBIGUOUS_SECRET) {
+      entry.earlier.add(entry.last);
+    }
+    entry.last = value;
+  }
+
+  function observedValuesFor(el) {
+    const entry = observedSecretValues.get(el);
+    if (!entry) return null;
+    const values = new Set(entry.earlier);
+    if (entry.last) values.add(entry.last);
+    return values;
+  }
+
+  function isConnectedElement(el) {
+    try { return !!el.isConnected; } catch (e) { return false; }
+  }
+
   function rememberSecretValue(el) {
-    // COMMIT POINT ONLY. Call this where the page is about to clear the field
-    // or leave the document, so a value stays scrubbable after it disappears
-    // from the DOM. The value is filed under its input session, because a
-    // commit point can also fire in the middle of typing.
+    // COMMIT POINT ONLY, and only for an element the page still holds, so a
+    // value stays scrubbable after the page clears the field. The value is
+    // filed under the ELEMENT that held it, not under the field: a value
+    // committed by a node the page later replaced is a DOM-swap artifact, and
+    // only element identity separates it from a value the operator meant.
+    if (!isConnectedElement(el)) return;
     const value = currentSecretValue(el);
-    if (value) addSessionValue(secretValuesBySession, secretSessionFor(el), value);
+    if (!value) return;
+    let values = committedSecretValues.get(el);
+    if (!values) { values = new Set(); committedSecretValues.set(el, values); }
+    values.add(value);
+  }
+
+  function commitSecretValueFor(node) {
+    // A commit point that names its element: `change` and `focusout`. When a
+    // controlled input REPLACES its focused node, the focusout target is the
+    // node the page just removed, so this commits nothing and the keystroke
+    // prefix that node holds never becomes a committed value.
+    const el = secretTextEntryForNode(node) || node;
+    if (el && stickySecretElements.has(el)) rememberSecretValue(el);
   }
 
   function commitSecretValues() {
@@ -534,26 +599,47 @@ _INIT_JS = r"""
   }
 
   function retainedSecretValues() {
-    // Committed values, plus the CURRENT value of every bound secret element
-    // read at scrub time and never retained. The live read covers an
-    // as-you-type reflection without keeping the prefixes that produced it.
-    const bySession = new Map();
-    for (const [session, values] of secretValuesBySession) {
-      for (const value of values) addSessionValue(bySession, session, value);
-    }
+    // Every value Flow must redact: each committed value, and the CURRENT
+    // value of every bound element, read at scrub time and never retained.
+    //
+    // Flow drops a value in exactly one case: a node that a controlled input
+    // REPLACED holds it, the page no longer holds that node, no commit point
+    // ever recorded it, and another value of the same field continues it. That
+    // is a keystroke prefix of the value the field went on to hold.
+    //
+    // A value the field currently holds, and a value from a commit point, are
+    // never dropped. An operator who types `hunter2`, blurs, and then deletes
+    // one character still has `hunter` in the field, and `hunter` must stay
+    // redacted.
+    const retainedByKey = new Map();
+    const supersededByKey = new Map();
     for (const el of stickySecretElements) {
-      const value = currentSecretValue(el);
-      if (value) addSessionValue(bySession, secretSessionFor(el), value);
+      const key = secretSessionFor(el);
+      // Only a node that a controlled input REPLACED, and that the page no
+      // longer holds, can hold a droppable keystroke prefix. Everything else
+      // -- every value the page still holds, and every value an element that
+      // survived committed -- is retained.
+      const superseded = supersededSecretElements.has(el)
+        && !isConnectedElement(el);
+      const target = superseded ? supersededByKey : retainedByKey;
+      const live = currentSecretValue(el);
+      noteObservedValue(el, live);
+      if (live) addSessionValue(target, key, live);
+      for (const source of [committedValuesFor(el), observedValuesFor(el)]) {
+        if (!source) continue;
+        for (const value of source) addSessionValue(target, key, value);
+      }
     }
     const retained = new Set();
-    for (const values of bySession.values()) {
-      const all = Array.from(values);
-      for (const value of all) {
-        // Drop a value that another value of the SAME input session continues:
-        // it is a keystroke prefix of that session's value, not a declared
-        // value of its own. The complete value is still redacted, and keeping
-        // every prefix would withhold unrelated evidence on a chance match.
-        const continued = all.some(
+    for (const values of retainedByKey.values()) {
+      for (const value of values) retained.add(value);
+    }
+    for (const [key, values] of supersededByKey) {
+      const others = Array.from(retainedByKey.get(key) || []).concat(
+        Array.from(values)
+      );
+      for (const value of values) {
+        const continued = others.some(
           (other) => other !== value && other.startsWith(value)
         );
         if (!continued) retained.add(value);
@@ -647,9 +733,13 @@ _INIT_JS = r"""
     // becomes the scheme, the host, or the port, and a text replace across
     // them corrupts the origin that Flow validates. Any user information in
     // the URL is dropped with the rest of the authority.
-    const path = parsed.pathname.split('/').map(
-      (segment) => redactUrlToken(segment, secretValues)
-    ).join('/');
+    let redacted = false;
+    const redactToken = (token) => {
+      const result = redactUrlToken(token, secretValues);
+      if (result !== token) redacted = true;
+      return result;
+    };
+    const path = parsed.pathname.split('/').map(redactToken).join('/');
     const encode = (token) => token === SECRET_PLACEHOLDER
       ? SECRET_PLACEHOLDER : encodeURIComponent(token);
     let query = '';
@@ -657,16 +747,21 @@ _INIT_JS = r"""
       const pairs = [];
       for (const [name, value] of new URLSearchParams(parsed.search)) {
         pairs.push(
-          encode(redactUrlToken(name, secretValues))
-          + '=' + encode(redactUrlToken(value, secretValues))
+          encode(redactToken(name)) + '=' + encode(redactToken(value))
         );
       }
       if (pairs.length) query = '?' + pairs.join('&');
     } catch (e) {
+      redacted = true;
       query = parsed.search ? '?' + SECRET_PLACEHOLDER : '';
     }
     const hash = parsed.hash
-      ? '#' + encode(redactUrlToken(parsed.hash.slice(1), secretValues)) : '';
+      ? '#' + encode(redactToken(parsed.hash.slice(1))) : '';
+    // Rebuilding normalises percent-encoding and `+`. Return the URL the page
+    // reports when nothing was redacted, so evidence does not drift. User
+    // information in the authority is never returned: the rebuilt form drops
+    // it with the rest of the authority.
+    if (!redacted && !parsed.username && !parsed.password) return String(href);
     return parsed.origin + path + query + hash;
   }
 
@@ -687,6 +782,27 @@ _INIT_JS = r"""
     };
   }
 
+  function scrubIdentityText(value) {
+    // Identity free text: the accessible name, the control role, and the
+    // clicked row's identity characters. A WITHHELD result disarms an identity
+    // check exactly as a withheld selector does, so it must be visible. Note
+    // the reason for the caller instead of returning a bare null.
+    const scrubbed = scrubSecretText(value);
+    if (scrubbed === null && identityWithheldReason === null) {
+      identityWithheldReason = 'ambiguous-secret-in-identity';
+    }
+    return scrubbed;
+  }
+
+  function structuredIdentityEvidence(px, py, eventTarget) {
+    identityWithheldReason = null;
+    const sid = structuredIdentity(px, py, eventTarget);
+    return {
+      sid: sid,
+      withheld: sid === null ? identityWithheldReason : null,
+    };
+  }
+
   function structuredIdentity(px, py, eventTarget = null) {
     // Mirrors PlaywrightBackend.structured_text_at: the REAL characters of the
     // clicked row (MRN/name/DOB), excluding the clicked target's own cell.
@@ -701,7 +817,7 @@ _INIT_JS = r"""
         || row.getAttribute('aria-label')
         || ''
       ).replace(/\s+/g, ' ').trim();
-      if (declared) return scrubSecretText(declared);
+      if (declared) return scrubIdentityText(declared);
       const own = el.closest('td, th, [role="cell"], [role="gridcell"]') || el;
       own.setAttribute('data-oaflow-own', '1');
       let body = '';
@@ -713,14 +829,14 @@ _INIT_JS = r"""
       } finally {
         own.removeAttribute('data-oaflow-own');
       }
-      const joined = scrubSecretText(body.replace(/\s+/g, ' ').trim());
+      const joined = scrubIdentityText(body.replace(/\s+/g, ' ').trim());
       return joined || null;
     } catch (e) { return null; }
   }
 
   function targetRole(el) {
     const explicit = el.getAttribute('role');
-    if (explicit) return scrubSecretText(explicit);
+    if (explicit) return scrubIdentityText(explicit);
     const tag = el.tagName.toLowerCase();
     if (tag === 'button') return 'button';
     if (tag === 'a' && el.hasAttribute('href')) return 'link';
@@ -741,31 +857,31 @@ _INIT_JS = r"""
     // its descendants. Its innerText is the secret value, not target identity.
     if (secretTextEntryForNode(el)) return null;
     const aria = (el.getAttribute('aria-label') || '').trim();
-    if (aria) return scrubSecretText(aria);
+    if (aria) return scrubIdentityText(aria);
     const labelledBy = (el.getAttribute('aria-labelledby') || '').trim();
     if (labelledBy) {
       const value = labelledBy.split(/\s+/).map((id) => {
         const node = document.getElementById(id);
         return node ? (node.textContent || '').trim() : '';
       }).filter(Boolean).join(' ');
-      if (value) return scrubSecretText(value);
+      if (value) return scrubIdentityText(value);
     }
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
       if (label && (label.textContent || '').trim()) {
-        return scrubSecretText(label.textContent.trim());
+        return scrubIdentityText(label.textContent.trim());
       }
     }
     const wrapping = el.closest('label');
     if (wrapping && wrapping !== el && (wrapping.textContent || '').trim()) {
-      return scrubSecretText(wrapping.textContent.trim());
+      return scrubIdentityText(wrapping.textContent.trim());
     }
     for (const attr of ['alt', 'title', 'placeholder']) {
       const value = (el.getAttribute(attr) || '').trim();
-      if (value) return scrubSecretText(value);
+      if (value) return scrubIdentityText(value);
     }
     const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
-    return text ? scrubSecretText(text.slice(0, 200)) : null;
+    return text ? scrubIdentityText(text.slice(0, 200)) : null;
   }
 
   function identityRefusal(value) {
@@ -814,15 +930,19 @@ _INIT_JS = r"""
       refreshSecretBindings();
       const el = eventTarget || document.elementFromPoint(px, py);
       if (!el) return null;
+      identityWithheldReason = null;
       const identity = uniqueSelector(el);
       const target = {
         selector: identity.selector,
         role: targetRole(el),
         name: targetName(el),
       };
-      if (identity.withheld !== null) target.identity_withheld = identity.withheld;
-      return (target.selector || target.role || target.name
-        || identity.withheld) ? target : null;
+      // A withheld accessible name or role disarms an identity check exactly
+      // as a withheld selector does, so report either one.
+      const withheld = identity.withheld || identityWithheldReason;
+      if (withheld) target.identity_withheld = withheld;
+      return (target.selector || target.role || target.name || withheld)
+        ? target : null;
     } catch (e) { return null; }
   }
 
@@ -947,8 +1067,10 @@ _INIT_JS = r"""
     if (!state && activeSecretState && activeSecretElement
         && !activeSecretElement.isConnected && isTextEntry(el)) {
       // Some controlled inputs replace their DOM element after each change.
-      // Programmatic focus transfer is still the same input session.
+      // Programmatic focus transfer is still the same input session, and the
+      // element the page dropped can hold a keystroke prefix of this value.
       state = activeSecretState;
+      supersededSecretElements.add(activeSecretElement);
     }
     if (!state) return null;
     return {state, maskBound: bindSecretState(el, state)};
@@ -1020,7 +1142,9 @@ _INIT_JS = r"""
       if (secretStates.has(el)) continue;
       const state = declaredSecretState(el)
         || secretBoundaryStates.get(el.getRootNode()) || null;
-      if (state) bindSecretState(el, state, false);
+      if (!state) continue;
+      bindSecretState(el, state, false);
+      if (batchDiscoveredSecrets) batchDiscoveredSecrets.add(el);
     }
   }
 
@@ -1042,6 +1166,15 @@ _INIT_JS = r"""
   }
 
   function processSecretMutations(mutations) {
+    batchDiscoveredSecrets = new Set();
+    try {
+      processSecretMutationBatch(mutations);
+    } finally {
+      batchDiscoveredSecrets = null;
+    }
+  }
+
+  function processSecretMutationBatch(mutations) {
     // Apply every attribute record first. A removed declared field can lose its
     // name after removal but before its replacement is appended in the same
     // task. The old-value record binds that removed node before rewrite
@@ -1074,7 +1207,11 @@ _INIT_JS = r"""
       (el) => secretStates.has(el)
     );
     const unboundAddedEntries = liveAddedEntries.filter(
-      (el) => !secretStates.has(el)
+      // A node discovery bound in THIS batch still counts: discovery derives a
+      // NEW input session, and a field with no name and no ID has no other
+      // stable identity, so a controlled input that swaps its node would look
+      // like a new declared field on every keystroke.
+      (el) => !secretStates.has(el) || batchDiscoveredSecrets.has(el)
     );
     if (removedSecretEntries.length && unboundAddedEntries.length) {
       if (detachedRemovedEntries.length === 1 && liveAddedEntries.length === 1
@@ -1085,6 +1222,9 @@ _INIT_JS = r"""
           secretStates.get(removedSecretEntries[0]),
           false
         );
+        // The removed node is the only kind of node that can hold a keystroke
+        // prefix Flow may drop: one proven successor continues its value.
+        supersededSecretElements.add(removedSecretEntries[0]);
       } else {
         // A multi-node rewrite has no proven field mapping. Mask every
         // possible replacement, but refuse its first input. Assigning one
@@ -1233,6 +1373,19 @@ _INIT_JS = r"""
     // and focus or type into it in one JavaScript task before classification.
     refreshSecretBindings();
     const el = inputEventTarget(e);
+    if (activeSecretState && activeSecretElement && el !== activeSecretElement
+        && !activeSecretElement.isConnected && isTextEntry(el)) {
+      // The page replaced the element the operator was typing into. Continue
+      // the SAME input session instead of deriving a new one: a field with no
+      // name and no ID has no other stable identity, so a new session per swap
+      // would make every keystroke look like a new declared field. The element
+      // the page dropped can hold a keystroke prefix of this value.
+      supersededSecretElements.add(activeSecretElement);
+      bindSecretState(
+        el, secretStates.get(activeSecretElement) || activeSecretState
+      );
+      return;
+    }
     const declared = declaredSecretState(el);
     if (declared) {
       // Bind before the first key event. Application code can remove a
@@ -1262,9 +1415,11 @@ _INIT_JS = r"""
       activeSecretState = null;
     }
     const target = deepEventTarget(e);
+    const rowIdentity = structuredIdentityEvidence(e.clientX, e.clientY, target);
     pointerDown = {
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY, target),
+      sid: rowIdentity.sid,
+      sid_withheld: rowIdentity.withheld,
       structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
     };
@@ -1278,49 +1433,57 @@ _INIT_JS = r"""
     if (Math.hypot(endX - start.x, endY - start.y) < 5) return;
     suppressClick = true;
     setTimeout(() => { suppressClick = false; }, 0);
-    emit({
+    const dragEvent = {
       kind: 'drag', x: start.x, y: start.y, end_x: endX, end_y: endY,
       sid: start.sid, structural: start.structural,
       end_structural: structuralTarget(endX, endY, deepEventTarget(e)),
       idr: start.idr,
       url: location.href, title: document.title,
-    });
+    };
+    if (start.sid_withheld) dragEvent.sid_withheld = start.sid_withheld;
+    emit(dragEvent);
   });
 
   listen('click', (e) => {
     if (e.button !== 0) return;
     if (suppressClick) { suppressClick = false; return; }
     const target = deepEventTarget(e);
-    emit({
+    const rowIdentity = structuredIdentityEvidence(e.clientX, e.clientY, target);
+    const pointerEvent = {
       kind: 'click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY, target),
+      sid: rowIdentity.sid,
       structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
       url: location.href, title: document.title,
-    });
+    };
+    if (rowIdentity.withheld) pointerEvent.sid_withheld = rowIdentity.withheld;
+    emit(pointerEvent);
   });
 
   listen('contextmenu', (e) => {
     const target = deepEventTarget(e);
-    emit({
+    const rowIdentity = structuredIdentityEvidence(e.clientX, e.clientY, target);
+    const pointerEvent = {
       kind: 'right_click',
       x: Math.round(e.clientX), y: Math.round(e.clientY),
-      sid: structuredIdentity(e.clientX, e.clientY, target),
+      sid: rowIdentity.sid,
       structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
       url: location.href, title: document.title,
-    });
+    };
+    if (rowIdentity.withheld) pointerEvent.sid_withheld = rowIdentity.withheld;
+    emit(pointerEvent);
   });
 
   // Commit points. After each of these the page can clear the field or leave
-  // the document, so a committed value stays scrubbable once the value is no
-  // longer readable from the DOM. A commit point can still fire in the middle
-  // of typing -- replacing a focused element fires focusout -- which is why a
-  // committed value is filed under its declared field and a value that the
-  // same field continues is dropped as a keystroke prefix.
-  listen('change', commitSecretValues);
-  listen('focusout', commitSecretValues);
+  // the document, so a committed value stays scrubbable once the DOM no longer
+  // holds it. `change` and `focusout` commit only the element they name: when
+  // a controlled input replaces its focused node, the focusout target is the
+  // node the page just removed, so a keystroke prefix never becomes a
+  // committed value.
+  listen('change', (e) => commitSecretValueFor(inputEventTarget(e)));
+  listen('focusout', (e) => commitSecretValueFor(inputEventTarget(e)));
   listen('submit', commitSecretValues);
   listenOn(window, 'pagehide', commitSecretValues);
 
@@ -2343,10 +2506,16 @@ class InteractiveRecorder:
         received_secret_input = kind == "input" and event.get("secret") is True
         if doc_id is not None and (holds_secret or received_secret_input):
             self._secret_doc_ids.add(doc_id)
+        # Count the action ONCE, whichever identity evidence Flow withheld: a
+        # selector, an accessible name or role, or the clicked row's identity
+        # characters. Each one disarms an identity check the same way.
+        withheld_identity = bool(event.get("sid_withheld"))
         for key in ("structural", "end_structural"):
             target = event.get(key)
             if isinstance(target, dict) and target.get("identity_withheld"):
-                self._identity_withheld_events += 1
+                withheld_identity = True
+        if withheld_identity:
+            self._identity_withheld_events += 1
         if self._secret_document_left(doc_id):
             self._withhold_structural_text(event)
 

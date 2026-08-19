@@ -3098,3 +3098,231 @@ def test_page_closure_keeps_evidence_when_a_secret_input_swaps_its_node() -> Non
     assert click["structural"]["name"] == "Save chart"
     assert "identity_withheld" not in click["structural"]
     assert click["url"] == "http://host.test/hospital/charts"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_redacts_a_value_the_field_still_holds_after_a_commit() -> None:
+    """A committed value must never suppress the value the field holds now.
+
+    The operator types a value, leaves the field (which commits it), returns
+    and deletes one character. The field now holds a SHORTER value that the
+    committed one continues. It is the live secret, not a keystroke prefix.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-backspace-test"
+    binding_name = "__oaflow_emit_backspace_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>session</title>"
+                        "<input id='token' name='token' type='password'"
+                        ' oninput="'
+                        "document.title = 'session for ' + this.value;"
+                        "history.replaceState({}, '', '/charts/' + this.value);"
+                        '">'
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type("hunter2")
+            page.click("#chart-save")
+            page.click("#token")
+            page.keyboard.press("Backspace")
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    # `hunter` is what the field holds; `hunter2` is what it committed. Neither
+    # may reach an event, in whole or in part.
+    assert "hunter" not in payload
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["url"] == "http://host.test/charts/[secret]"
+    assert click["title"] == "session for [secret]"
+    assert click["structural"]["selector"] == "#chart-save"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_evidence_when_an_unnamed_password_swaps_its_node() -> None:
+    """A password field with no name and no ID still needs a stable key.
+
+    Discovery derives a NEW input session for each replacement, so without an
+    inherited session every keystroke looks like a new declared field, no
+    prefix is ever recognised, and every later scrub becomes ambiguous.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-unnamed-swap-test"
+    binding_name = "__oaflow_emit_unnamed_swap_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ())
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "charlie1"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Charts home</title>"
+                        "<input type='password' oninput=\""
+                        "const next = document.createElement('input');"
+                        "next.type = 'password';"
+                        "next.setAttribute('oninput',"
+                        " this.getAttribute('oninput'));"
+                        "next.value = this.value;"
+                        "this.replaceWith(next);"
+                        "next.focus();"
+                        '">'
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/hospital/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("input[type=password]")
+            page.keyboard.type(secret)
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert secret not in payload
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["structural"]["selector"] == "#chart-save"
+    assert click["structural"]["name"] == "Save chart"
+    assert "identity_withheld" not in click["structural"]
+    assert click["url"] == "http://host.test/hospital/charts"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_marks_a_withheld_name_and_row_identity() -> None:
+    """A withheld accessible name or row identity must be visible too.
+
+    A withheld selector already carries its reason. A name or a row identity
+    that Flow withholds disarms the same identity check, so it must carry one
+    as well, and the recorder must count the action.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-withheld-name-test"
+    binding_name = "__oaflow_emit_withheld_name_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Charts</title>"
+                        "<input id='token' name='token' type='password'>"
+                        "<ul><li>Alice Example row<button>Save chart</button>"
+                        "</li></ul>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/list")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#token")
+            # One character. It is too short to tell a reflection from a
+            # coincidence, so every text that contains it is withheld.
+            page.keyboard.type("a")
+            page.click("button")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["structural"]["selector"] is None
+    assert click["structural"]["name"] is None
+    assert click["structural"]["identity_withheld"] == "ambiguous-secret-in-identity"
+    assert click["sid"] is None
+    assert click["sid_withheld"] == "ambiguous-secret-in-identity"
+
+
+def test_withheld_row_identity_is_counted_for_the_operator(tmp_path: Path) -> None:
+    """A withheld row identity counts as a withheld identity, like a selector."""
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    selected_frame = object()
+    session.page = SimpleNamespace(main_frame=selected_frame)
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": True,
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1.0,
+            "__oaflow_origin": "http://host.test",
+            "__oaflow_doc": "doc-1",
+            "kind": "click",
+            "url": "http://host.test/app",
+            "sid": None,
+            "sid_withheld": "ambiguous-secret-in-identity",
+            "structural": {"selector": None, "role": "button", "name": None},
+            "x": 10,
+            "y": 20,
+        },
+        source={"page": session.page, "frame": selected_frame},
+    )
+    assert session._listener_error is None
+    assert session._identity_withheld_events == 1

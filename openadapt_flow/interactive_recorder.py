@@ -31,23 +31,38 @@ Design (why it looks the way it does):
   DOM-identity tier arms on interactively-recorded bundles too.
 
 Secret literals never touch Python: a field is secret when it is ``input[type=
-password]`` or its name/id is passed via ``--secret``. The page closure holds
-the bound ELEMENT and reads its current literal at scrub time only to remove
-the exact and URL-encoded forms from later URL, title, label, and structural
-text. It emits no value for the secret input. The bound field or declared
-shadow host is masked in every retained frame.
+password]`` or its name/id is passed via ``--secret``. The page closure binds
+the ELEMENT, masks it in every retained frame, and emits no value for it.
 
-Three rules keep that redaction from becoming its own defect:
+**Flow reports captured page text exactly, or it withholds that text and says
+why. Flow never rewrites captured text.** Three earlier revisions of this file
+tried instead to remove a remembered value from text that was already captured,
+and three independent reviews each found a different defect in the retention
+rule that approach needs. That is the expected outcome: Englehardt, Acar and
+Narayanan measured every major session-replay vendor in 2017 and found that
+none redacts displayed content automatically and that all of it leaked, and
+PostHog and Sentry still carry open issues for secrets in replay URLs. The
+working answer in production tools is capture-time, element-bound,
+deny-by-default masking, which is what this module now implements.
 
-* An intermediate keystroke prefix is never retained. A one or two character
-  prefix matches unrelated identity text, and a global replace keyed on it
-  rewrites selectors, labels, titles, and the recorded URL.
-* Redaction scans the original text once and never re-reads its own output, so
-  it cannot rewrite the inside of a placeholder it already wrote.
-* Where an exact scrub is impossible or ambiguous, Flow WITHHOLDS the text and
-  says so — an origin-only URL, an empty title, an ``identity_withheld`` reason
-  on the action, ``meta.json`` keys, and a CLI line. It never keeps a partially
-  rewritten copy, and a DOM identity check never disarms silently.
+Three rules follow from it:
+
+* Matching uses ONLY the values that bound elements hold at match time, read
+  live from the DOM. No value is kept after the field stops holding it, and a
+  node the page detached is not a source of values.
+* Identity evidence (selector, role, accessible name, clicked-row identity,
+  and the receiving field's name) is EXACT or WITHHELD with a stated reason.
+  Replay compares it against the live page, so a rewritten copy would compare
+  against text the page never held, invisibly.
+* Reflected evidence (the page URL and title) is sampled from Python at the
+  settled boundary, never in the capture-phase listener, which runs before the
+  page's own handlers and therefore reads the previous action's text. Flow
+  reports it only while it has not changed since before the document held any
+  declared value; otherwise it withholds an origin-only URL and an empty title.
+
+Every withheld item is visible: an ``identity_withheld`` reason on the action,
+``meta.json`` keys, and a CLI line. A DOM identity check never disarms
+silently.
 
 See ``ir.Step.secret`` and ``docs`` for the full contract and its boundary.
 """
@@ -381,7 +396,6 @@ _INIT_JS = r"""
   const SECRET_MARKER = __SECRET_MARKER__;
   const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
-  const SECRET_PLACEHOLDER = '[secret]';
   // One identity for this DOCUMENT. The init script builds a fresh closure per
   // document, so a value typed in an earlier document cannot be scrubbed here.
   // Python compares this id against the document that received a secret and
@@ -389,12 +403,28 @@ _INIT_JS = r"""
   const DOC_ID = SESSION_ID + ':doc:' + String(Date.now()) + ':'
     + Math.random().toString(36).slice(2);
   // A secret value shorter than this occurs inside ordinary page text by
-  // chance, so a substring match cannot be read as a reflection of the secret.
-  // Flow WITHHOLDS the whole text in that case. It never rewrites part of it:
-  // a partial rewrite corrupts unrelated identity evidence, and keeping the
-  // text would leak a short secret. Length is the only signal available in the
-  // page, so the ambiguous side fails closed.
+  // chance, so a match cannot be read as a reflection of the secret. Flow
+  // withholds the text either way, and reports the ambiguous case under its
+  // own reason so the operator can tell a chance match from a real one.
   const MIN_UNAMBIGUOUS_SECRET = 6;
+  //
+  // ONE RULE GOVERNS EVERY TEXT THIS CLOSURE PRODUCES: Flow reports captured
+  // text EXACTLY, or it withholds that text and states why. Flow never
+  // rewrites captured text.
+  //
+  // Post-hoc removal of a secret value from already-captured text is the
+  // approach the session-replay industry has never made work. Englehardt,
+  // Acar and Narayanan measured every major replay vendor in 2017 and found
+  // that no vendor redacts displayed content automatically and that all of it
+  // leaked; PostHog and Sentry still carry open issues for secrets in replay
+  // URLs today. The industry answer is capture-time, element-bound,
+  // deny-by-default masking, which is what this closure does.
+  //
+  // A rewrite is also worse than a refusal for identity evidence. Replay
+  // compares identity text against what the page shows, so a rewritten copy
+  // is a comparison against text the page never held, and the substitution is
+  // invisible to that comparison. Withholding disarms the check loudly.
+  //
   const listeners = [];
   const secretStates = new WeakMap();
   const closedSecretHosts = new WeakMap();
@@ -402,23 +432,8 @@ _INIT_JS = r"""
   const inputSessions = new WeakMap();
   const trustedSecretFieldLabels = new WeakMap();
   const stickySecretElements = new Set();
-  // Committed values, keyed by the ELEMENT that held them at a commit point.
-  // Keying by element is what tells a real commit from a DOM-swap artifact: a
-  // controlled input that replaces its focused node makes the browser fire
-  // focusout mid-typing, and the value committed there belongs to a node the
-  // page threw away.
-  const committedSecretValues = new WeakMap();
-  // What each bound element has held, read at every scrub. A page that
-  // reflects a field as the operator types writes the PREVIOUS value into the
-  // title or the URL, so the value Flow must redact is not always the one the
-  // field holds now.
-  const observedSecretValues = new WeakMap();
   const observedSecretRoots = new WeakSet();
   const ambiguousSecretReplacements = new WeakSet();
-  // A bound element that a controlled input REPLACED with one proven
-  // successor. Only such an element can hold a keystroke prefix that Flow is
-  // allowed to drop; see retainedSecretValues.
-  const supersededSecretElements = new WeakSet();
   // Elements that discovery bound during the MutationObserver batch being
   // processed right now. A replacement discovery has just bound still needs to
   // inherit the state of the node it replaced, including its input session.
@@ -431,8 +446,24 @@ _INIT_JS = r"""
   let privacyBoundaryError = null;
   let opaqueSecretActive = false;
   // Why Flow refused to build identity evidence from free identity text, for
-  // the identity scope that is being built right now. See scrubIdentityText.
+  // the identity scope that is being built right now. See identityTextOrNull.
   let identityWithheldReason = null;
+  // Reflected text (the URL and the title) that this document showed while no
+  // declared secret field held a value. Text that has not changed since then
+  // CANNOT be a reflection of a value that did not yet exist, so Flow reports
+  // it exactly. Text that HAS changed may be a reflection of any version of
+  // the value, including one the field no longer holds, and no rule that
+  // reads only the current DOM can decide which. Flow withholds it.
+  //
+  // These two strings are page text, not secret values. Nothing ever matches
+  // against them: they answer one question, "did this text exist before the
+  // secret did", and they are never emitted.
+  let preSecretUrl = null;
+  let preSecretTitle = null;
+  // Sticky: a document that has held a declared value stops refreshing the
+  // baseline above. It never un-sticks, because a value the field no longer
+  // holds can still be reflected somewhere in this document.
+  let documentHeldSecretValue = false;
   let eventsStopped = false;
   let cleaned = false;
 
@@ -465,8 +496,8 @@ _INIT_JS = r"""
     for (const el of stickySecretElements) {
       try { el.removeAttribute(SECRET_MARKER); } catch (e) {}
     }
-    // committedSecretValues is a WeakMap keyed by these elements, so it
-    // empties with them.
+    // No value is filed against these elements, so clearing the Set releases
+    // everything this closure held about them.
     stickySecretElements.clear();
     activeSecretElement = null;
     activeSecretState = null;
@@ -519,133 +550,28 @@ _INIT_JS = r"""
     return '';
   }
 
-  function secretSessionFor(el) {
-    // The DECLARED FIELD is the grouping unit where it exists: a controlled
-    // input that swaps its node keeps the declared name but takes a new input
-    // session on each swap, so the session alone cannot recognise its own
-    // prefixes. Two declared fields never share a name, so one field's value
-    // can never suppress another's.
-    const state = secretStates.get(el) || closedSecretHosts.get(el) || null;
-    if (state && state.field) return 'field:' + String(state.field);
-    if (state && state.inputSession) return 'session:' + state.inputSession;
-    return 'session:' + inputSessionFor(el);
-  }
-
-  function addSessionValue(bySession, session, value) {
-    let values = bySession.get(session);
-    if (!values) { values = new Set(); bySession.set(session, values); }
-    values.add(value);
-  }
-
-  function committedValuesFor(el) {
-    return committedSecretValues.get(el) || null;
-  }
-
-  function noteObservedValue(el, value) {
-    // Keep the LAST value the element held, and every earlier value long
-    // enough to identify. A shorter earlier value is a keystroke prefix that
-    // matches ordinary page text by chance, and keeping it would withhold
-    // unrelated evidence for the rest of the recording.
-    if (!value) return;
-    let entry = observedSecretValues.get(el);
-    if (!entry) {
-      entry = {last: '', earlier: new Set()};
-      observedSecretValues.set(el, entry);
-    }
-    if (entry.last && entry.last !== value
-        && entry.last.length >= MIN_UNAMBIGUOUS_SECRET) {
-      entry.earlier.add(entry.last);
-    }
-    entry.last = value;
-  }
-
-  function observedValuesFor(el) {
-    const entry = observedSecretValues.get(el);
-    if (!entry) return null;
-    const values = new Set(entry.earlier);
-    if (entry.last) values.add(entry.last);
-    return values;
-  }
-
   function isConnectedElement(el) {
     try { return !!el.isConnected; } catch (e) { return false; }
   }
 
-  function rememberSecretValue(el) {
-    // COMMIT POINT ONLY, and only for an element the page still holds, so a
-    // value stays scrubbable after the page clears the field. The value is
-    // filed under the ELEMENT that held it, not under the field: a value
-    // committed by a node the page later replaced is a DOM-swap artifact, and
-    // only element identity separates it from a value the operator meant.
-    if (!isConnectedElement(el)) return;
-    const value = currentSecretValue(el);
-    if (!value) return;
-    let values = committedSecretValues.get(el);
-    if (!values) { values = new Set(); committedSecretValues.set(el, values); }
-    values.add(value);
-  }
-
-  function commitSecretValueFor(node) {
-    // A commit point that names its element: `change` and `focusout`. When a
-    // controlled input REPLACES its focused node, the focusout target is the
-    // node the page just removed, so this commits nothing and the keystroke
-    // prefix that node holds never becomes a committed value.
-    const el = secretTextEntryForNode(node) || node;
-    if (el && stickySecretElements.has(el)) rememberSecretValue(el);
-  }
-
-  function commitSecretValues() {
-    for (const el of stickySecretElements) rememberSecretValue(el);
-  }
-
-  function retainedSecretValues() {
-    // Every value Flow must redact: each committed value, and the CURRENT
-    // value of every bound element, read at scrub time and never retained.
+  function liveSecretValues() {
+    // Every declared value a bound element holds RIGHT NOW, read from the DOM
+    // at match time. Nothing here survives the call.
     //
-    // Flow drops a value in exactly one case: a node that a controlled input
-    // REPLACED holds it, the page no longer holds that node, no commit point
-    // ever recorded it, and another value of the same field continues it. That
-    // is a keystroke prefix of the value the field went on to hold.
-    //
-    // A value the field currently holds, and a value from a commit point, are
-    // never dropped. An operator who types `hunter2`, blurs, and then deletes
-    // one character still has `hunter` in the field, and `hunter` must stay
-    // redacted.
-    const retainedByKey = new Map();
-    const supersededByKey = new Map();
+    // Only a CONNECTED element counts. A controlled input that swaps its node
+    // on every keystroke leaves detached nodes behind, each still holding the
+    // keystroke prefix it had when the page dropped it. Those prefixes are not
+    // values the operator entered, and three earlier revisions of this file
+    // each shipped a different defect while trying to decide which of them to
+    // keep. This closure keeps none of them: the page tells Flow what the
+    // field holds, and Flow asks the page every time.
+    const values = new Set();
     for (const el of stickySecretElements) {
-      const key = secretSessionFor(el);
-      // Only a node that a controlled input REPLACED, and that the page no
-      // longer holds, can hold a droppable keystroke prefix. Everything else
-      // -- every value the page still holds, and every value an element that
-      // survived committed -- is retained.
-      const superseded = supersededSecretElements.has(el)
-        && !isConnectedElement(el);
-      const target = superseded ? supersededByKey : retainedByKey;
-      const live = currentSecretValue(el);
-      noteObservedValue(el, live);
-      if (live) addSessionValue(target, key, live);
-      for (const source of [committedValuesFor(el), observedValuesFor(el)]) {
-        if (!source) continue;
-        for (const value of source) addSessionValue(target, key, value);
-      }
+      if (!isConnectedElement(el)) continue;
+      const value = currentSecretValue(el);
+      if (value) values.add(value);
     }
-    const retained = new Set();
-    for (const values of retainedByKey.values()) {
-      for (const value of values) retained.add(value);
-    }
-    for (const [key, values] of supersededByKey) {
-      const others = Array.from(retainedByKey.get(key) || []).concat(
-        Array.from(values)
-      );
-      for (const value of values) {
-        const continued = others.some(
-          (other) => other !== value && other.startsWith(value)
-        );
-        if (!continued) retained.add(value);
-      }
-    }
-    return retained;
+    return values;
   }
 
   function secretVariants(secret) {
@@ -657,141 +583,124 @@ _INIT_JS = r"""
     return Array.from(variants).filter(Boolean);
   }
 
-  function redactSecretOccurrences(value, secretValues) {
-    // ONE left-to-right pass over the ORIGINAL text. The pass never re-reads
-    // its own output, so a replacement cannot rewrite the inside of a
-    // placeholder that an earlier value wrote.
-    // Returns {text, ambiguous}. `ambiguous` marks a match that a value too
-    // short to identify produced. The caller must WITHHOLD that text: it
-    // cannot tell a real reflection from an ordinary coincidence.
-    const text = String(value);
-    const needles = [];
+  function secretValueIn(value, secretValues) {
+    // DETECT, never rewrite. Returns the reason this text cannot be reported,
+    // or null when the text holds no declared value and is safe to report
+    // exactly as the page shows it.
+    const text = String(value == null ? '' : value);
+    if (!text) return null;
+    let found = null;
     for (const secret of secretValues) {
       if (!secret) continue;
       const ambiguous = secret.length < MIN_UNAMBIGUOUS_SECRET;
       for (const variant of secretVariants(secret)) {
-        needles.push({variant: variant, ambiguous: ambiguous});
+        if (!variant || text.indexOf(variant) < 0) continue;
+        // A short value matches ordinary page text by chance. Report that
+        // separately: the operator reads a different meaning into "this text
+        // held your value" than into "this text could have held your value".
+        if (ambiguous) return 'ambiguous-secret-in-identity';
+        found = 'secret-value-in-identity';
       }
     }
-    if (!needles.length) return {text: text, ambiguous: false};
-    needles.sort((left, right) => right.variant.length - left.variant.length);
-    let out = '';
-    let ambiguous = false;
-    let index = 0;
-    while (index < text.length) {
-      let matched = null;
-      for (const needle of needles) {
-        if (text.startsWith(needle.variant, index)) { matched = needle; break; }
-      }
-      if (matched === null) {
-        out += text[index];
-        index += 1;
-        continue;
-      }
-      out += SECRET_PLACEHOLDER;
-      if (matched.ambiguous) ambiguous = true;
-      index += matched.variant.length;
-    }
-    return {text: out, ambiguous: ambiguous};
+    return found;
   }
 
-  function scrubTextWithSecretValues(value, secretValues) {
-    // Free text: title, label, role, name, and structural row text. Returns
-    // NULL when Flow must withhold the text, so no caller keeps a corrupted or
-    // leaking copy.
+  function identityTextOrNull(value) {
+    // IDENTITY / MACHINE EVIDENCE: the accessible name, the control role, the
+    // clicked row's identity characters, and the receiving field's name.
+    // Replay re-reads the page and compares it against this text, so the text
+    // must be what the page held or nothing at all. A rewritten copy would
+    // make replay compare against characters the page never showed, and
+    // nothing downstream could see that the substitution happened.
+    //
+    // EXACT, or WITHHELD with a reason. Never rewritten.
     if (value == null) return value;
-    if (opaqueSecretActive) return String(value) ? SECRET_PLACEHOLDER : '';
-    const result = redactSecretOccurrences(value, secretValues);
-    return result.ambiguous ? null : result.text;
-  }
-
-  function scrubSecretText(value) {
-    return scrubTextWithSecretValues(value, retainedSecretValues());
-  }
-
-  function redactUrlToken(token, secretValues) {
-    // A URL token is a path segment, a query name, a query value, or the
-    // fragment. Redact it WHOLE. A partial rewrite inside a URL can corrupt
-    // the scheme, host, or port that Flow validates, and half a token is not
-    // evidence.
-    const text = String(token == null ? '' : token);
+    const text = String(value);
     if (!text) return text;
-    if (opaqueSecretActive) return SECRET_PLACEHOLDER;
-    const result = redactSecretOccurrences(text, secretValues);
-    return result.text === text ? text : SECRET_PLACEHOLDER;
+    if (opaqueSecretActive) {
+      // A closed shadow root does not expose its literal, so Flow cannot rule
+      // out that this text contains it.
+      if (identityWithheldReason === null) {
+        identityWithheldReason = 'opaque-secret-boundary';
+      }
+      return null;
+    }
+    const reason = secretValueIn(text, liveSecretValues());
+    if (reason === null) return text;
+    if (identityWithheldReason === null) identityWithheldReason = reason;
+    return null;
   }
 
-  function scrubSecretUrl(href, secretValues) {
-    let parsed = null;
-    try { parsed = new URL(String(href)); } catch (e) { parsed = null; }
-    if (parsed === null || (parsed.protocol !== 'http:'
-        && parsed.protocol !== 'https:')) {
-      const scrubbed = scrubTextWithSecretValues(href, secretValues);
-      return scrubbed === null ? '' : scrubbed;
-    }
-    // The origin is the declared application origin. A typed secret never
-    // becomes the scheme, the host, or the port, and a text replace across
-    // them corrupts the origin that Flow validates. Any user information in
-    // the URL is dropped with the rest of the authority.
-    let redacted = false;
-    const redactToken = (token) => {
-      const result = redactUrlToken(token, secretValues);
-      if (result !== token) redacted = true;
-      return result;
-    };
-    const path = parsed.pathname.split('/').map(redactToken).join('/');
-    const encode = (token) => token === SECRET_PLACEHOLDER
-      ? SECRET_PLACEHOLDER : encodeURIComponent(token);
-    let query = '';
-    try {
-      const pairs = [];
-      for (const [name, value] of new URLSearchParams(parsed.search)) {
-        pairs.push(
-          encode(redactToken(name)) + '=' + encode(redactToken(value))
-        );
-      }
-      if (pairs.length) query = '?' + pairs.join('&');
-    } catch (e) {
-      redacted = true;
-      query = parsed.search ? '?' + SECRET_PLACEHOLDER : '';
-    }
-    const hash = parsed.hash
-      ? '#' + encode(redactToken(parsed.hash.slice(1))) : '';
-    // Rebuilding normalises percent-encoding and `+`. Return the URL the page
-    // reports when nothing was redacted, so evidence does not drift. User
-    // information in the authority is never returned: the rebuilt form drops
-    // it with the rest of the authority.
-    if (!redacted && !parsed.username && !parsed.password) return String(href);
-    return parsed.origin + path + query + hash;
+  function labelTextOrNull(value) {
+    // The receiving field's human label. Passive compile-time evidence, not an
+    // identity tier, so a withheld label does not disarm an identity check and
+    // is not counted as one. It still follows the one rule: exact or nothing.
+    if (value == null) return value;
+    const text = String(value);
+    if (!text) return text;
+    if (opaqueSecretActive) return null;
+    return secretValueIn(text, liveSecretValues()) === null ? text : null;
+  }
+
+  function originOnlyUrl() {
+    // The declared origin with an empty path: a URL that carries no value.
+    try { return location.origin + '/'; } catch (e) { return ''; }
   }
 
   function safePageState() {
-    if (opaqueSecretActive) {
-      return {url: location.origin + '/', title: '', doc: DOC_ID, secret: true};
+    // REFLECTED / CONTEXT EVIDENCE: the page URL and the document title.
+    //
+    // A page can write a field's value into either one, and it can do so on a
+    // timer, so the text on show at any moment may reflect a value the field
+    // held some keystrokes ago. Matching the CURRENT value against it does not
+    // find that older reflection, and keeping the older values to match with
+    // is the rule that failed three reviews.
+    //
+    // Flow reports this text only when it can PROVE the text is not a
+    // reflection: the text has not changed since before this document held any
+    // declared value, so it existed before the value did. Any other text is
+    // withheld whole. Flow never rewrites it and never guesses.
+    //
+    // STATED LIMIT. Text that already carried the value BEFORE any declared
+    // field held it -- an operator who opens a URL that already contains the
+    // password and then types it -- passes this proof and is reported. Flow
+    // protects a declared value from the moment a bound field holds it; text
+    // that carried it earlier is ordinary recording evidence, and the same is
+    // true of the frames captured before that moment. Checking the text
+    // against the live value instead would withhold on a chance match with a
+    // keystroke prefix: a password beginning with an ordinary word would
+    // withhold the URL of every page whose text contains that word.
+    const rawUrl = String(location.href);
+    const rawTitle = String(document.title == null ? '' : document.title);
+    const values = liveSecretValues();
+    if (values.size > 0) documentHeldSecretValue = true;
+    if (!documentHeldSecretValue && !opaqueSecretActive) {
+      preSecretUrl = rawUrl;
+      preSecretTitle = rawTitle;
     }
-    const values = retainedSecretValues();
-    const title = scrubTextWithSecretValues(document.title, values);
-    return {
-      url: scrubSecretUrl(location.href, values),
-      title: title === null ? '' : title,
+    const state = {
+      url: rawUrl,
+      title: rawTitle,
       doc: DOC_ID,
-      // Whether THIS document still holds a declared value. A document that
-      // holds the value can scrub itself; one that does not cannot, so Python
-      // withholds its URL and title once an earlier document held one.
-      secret: values.size > 0,
+      // Whether this document has EVER held a declared value. Python uses it
+      // to withhold every LATER document's reflected text: a fresh closure
+      // cannot know a value an earlier document received. This stays true
+      // after the field is cleared, because the reflection can outlive it.
+      secret: documentHeldSecretValue || opaqueSecretActive,
+      withheld: null,
     };
-  }
-
-  function scrubIdentityText(value) {
-    // Identity free text: the accessible name, the control role, and the
-    // clicked row's identity characters. A WITHHELD result disarms an identity
-    // check exactly as a withheld selector does, so it must be visible. Note
-    // the reason for the caller instead of returning a bare null.
-    const scrubbed = scrubSecretText(value);
-    if (scrubbed === null && identityWithheldReason === null) {
-      identityWithheldReason = 'ambiguous-secret-in-identity';
+    if (opaqueSecretActive) {
+      state.withheld = 'opaque-secret-boundary';
+    } else if (!documentHeldSecretValue) {
+      return state;
+    } else if (rawUrl !== preSecretUrl || rawTitle !== preSecretTitle) {
+      state.withheld = 'reflected-text-changed-after-a-secret-value';
     }
-    return scrubbed;
+    if (state.withheld !== null) {
+      state.url = originOnlyUrl();
+      state.title = '';
+    }
+    return state;
   }
 
   function structuredIdentityEvidence(px, py, eventTarget) {
@@ -817,7 +726,7 @@ _INIT_JS = r"""
         || row.getAttribute('aria-label')
         || ''
       ).replace(/\s+/g, ' ').trim();
-      if (declared) return scrubIdentityText(declared);
+      if (declared) return identityTextOrNull(declared);
       const own = el.closest('td, th, [role="cell"], [role="gridcell"]') || el;
       own.setAttribute('data-oaflow-own', '1');
       let body = '';
@@ -829,14 +738,14 @@ _INIT_JS = r"""
       } finally {
         own.removeAttribute('data-oaflow-own');
       }
-      const joined = scrubIdentityText(body.replace(/\s+/g, ' ').trim());
+      const joined = identityTextOrNull(body.replace(/\s+/g, ' ').trim());
       return joined || null;
     } catch (e) { return null; }
   }
 
   function targetRole(el) {
     const explicit = el.getAttribute('role');
-    if (explicit) return scrubIdentityText(explicit);
+    if (explicit) return identityTextOrNull(explicit);
     const tag = el.tagName.toLowerCase();
     if (tag === 'button') return 'button';
     if (tag === 'a' && el.hasAttribute('href')) return 'link';
@@ -857,39 +766,40 @@ _INIT_JS = r"""
     // its descendants. Its innerText is the secret value, not target identity.
     if (secretTextEntryForNode(el)) return null;
     const aria = (el.getAttribute('aria-label') || '').trim();
-    if (aria) return scrubIdentityText(aria);
+    if (aria) return identityTextOrNull(aria);
     const labelledBy = (el.getAttribute('aria-labelledby') || '').trim();
     if (labelledBy) {
       const value = labelledBy.split(/\s+/).map((id) => {
         const node = document.getElementById(id);
         return node ? (node.textContent || '').trim() : '';
       }).filter(Boolean).join(' ');
-      if (value) return scrubIdentityText(value);
+      if (value) return identityTextOrNull(value);
     }
     if (el.id) {
       const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
       if (label && (label.textContent || '').trim()) {
-        return scrubIdentityText(label.textContent.trim());
+        return identityTextOrNull(label.textContent.trim());
       }
     }
     const wrapping = el.closest('label');
     if (wrapping && wrapping !== el && (wrapping.textContent || '').trim()) {
-      return scrubIdentityText(wrapping.textContent.trim());
+      return identityTextOrNull(wrapping.textContent.trim());
     }
     for (const attr of ['alt', 'title', 'placeholder']) {
       const value = (el.getAttribute(attr) || '').trim();
-      if (value) return scrubIdentityText(value);
+      if (value) return identityTextOrNull(value);
     }
     const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
-    return text ? scrubIdentityText(text.slice(0, 200)) : null;
+    return text ? identityTextOrNull(text.slice(0, 200)) : null;
   }
 
   function identityRefusal(value) {
     // Why this identity attribute cannot become evidence, or null when it can.
-    const scrubbed = scrubSecretText(value);
-    if (scrubbed === null) return 'ambiguous-secret-in-identity';
-    if (scrubbed !== value) return 'secret-value-in-identity';
-    return null;
+    // A selector is machine evidence in the strictest sense: replay resolves it
+    // against the live DOM, so a rewritten selector resolves to nothing, or to
+    // the wrong element. Exact or withheld, never rewritten.
+    if (opaqueSecretActive) return value ? 'opaque-secret-boundary' : null;
+    return secretValueIn(value, liveSecretValues());
   }
 
   function uniqueSelector(el) {
@@ -1067,10 +977,8 @@ _INIT_JS = r"""
     if (!state && activeSecretState && activeSecretElement
         && !activeSecretElement.isConnected && isTextEntry(el)) {
       // Some controlled inputs replace their DOM element after each change.
-      // Programmatic focus transfer is still the same input session, and the
-      // element the page dropped can hold a keystroke prefix of this value.
+      // Programmatic focus transfer is still the same input session.
       state = activeSecretState;
-      supersededSecretElements.add(activeSecretElement);
     }
     if (!state) return null;
     return {state, maskBound: bindSecretState(el, state)};
@@ -1222,9 +1130,6 @@ _INIT_JS = r"""
           secretStates.get(removedSecretEntries[0]),
           false
         );
-        // The removed node is the only kind of node that can hold a keystroke
-        // prefix Flow may drop: one proven successor continues its value.
-        supersededSecretElements.add(removedSecretEntries[0]);
       } else {
         // A multi-node rewrite has no proven field mapping. Mask every
         // possible replacement, but refuse its first input. Assigning one
@@ -1258,6 +1163,20 @@ _INIT_JS = r"""
   });
   observeSecretRoot(document.documentElement || document, null);
   discoverOpenShadowRoots(document);
+  // Seed the reflected-text baseline as soon as discovery has bound whatever
+  // declared fields this document already has. Flow installs this closure at
+  // document start, so the URL and the title here are what the document showed
+  // before it could reflect anything the operator typed into it.
+  //
+  // A field that ALREADY holds a value is the exception. Flow cannot tell
+  // whether the text on show already reflects that value, so it takes no
+  // baseline: every later URL and title from this document is withheld.
+  if (liveSecretValues().size > 0) {
+    documentHeldSecretValue = true;
+  } else {
+    preSecretUrl = String(location.href);
+    preSecretTitle = String(document.title == null ? '' : document.title);
+  }
 
   function fieldLabel(el) {
     // Best available human label for the receiving field, best-first:
@@ -1265,15 +1184,18 @@ _INIT_JS = r"""
     // aria-labelledby, placeholder, name attribute, title. Mirrors
     // PlaywrightBackend.focused_field_label exactly. Passive metadata for
     // the compile-time parameter-proposal pass; NEVER the field's value.
+    // Exact or withheld, like every other text this closure reports: a label
+    // rewritten to a placeholder proposes a parameter name the page never
+    // showed, and the operator confirms that name without being told.
     try {
       if (trustedSecretFieldLabels.has(el)) {
-        // Scrub the cached label against EVERY declared secret value, not only
+        // Check the cached label against EVERY declared secret value, not only
         // this field's own value. Discovery walks the document in order, so a
         // field bound before another declared field caches a label that can
         // contain the OTHER field's pre-filled value.
-        return scrubSecretText(trustedSecretFieldLabels.get(el));
+        return labelTextOrNull(trustedSecretFieldLabels.get(el));
       }
-      const clean = (s) => scrubSecretText(
+      const clean = (s) => labelTextOrNull(
         (s || '').replace(/\s+/g, ' ').trim()
       );
       if (el.id) {
@@ -1323,15 +1245,27 @@ _INIT_JS = r"""
 
   function emit(o) {
     try {
-      const state = safePageState();
-      o.url = state.url;
-      o.title = state.title;
+      // AN EVENT CARRIES NO REFLECTED TEXT. This handler runs in the CAPTURE
+      // phase, before the page's own listeners, so `location.href` and
+      // `document.title` here still hold what they held BEFORE this action.
+      // Sampling them here produced evidence one action out of date, and the
+      // value history that existed only to repair that staleness is what three
+      // reviews found separate defects in.
+      //
+      // Flow samples the URL and the title from Python instead, through
+      // structuralState(), at the same settled boundary that captures the
+      // after-frame. Drop any reflected text a caller attached.
+      delete o.url;
+      delete o.title;
       // The ORIGIN is structural, not evidence text: Flow already declared it,
-      // and a secret never becomes part of it. Send it beside the scrubbed URL
-      // so the origin guard never parses redacted text.
+      // and a secret never becomes part of it. It cannot go stale inside a
+      // document, because leaving the declared origin stops the recording.
       o.__oaflow_origin = location.origin;
-      o.__oaflow_doc = state.doc;
-      o.__oaflow_doc_holds_secret = state.secret === true;
+      o.__oaflow_doc = DOC_ID;
+      o.__oaflow_doc_holds_secret = (
+        opaqueSecretActive || documentHeldSecretValue
+        || liveSecretValues().size > 0
+      );
       o.__oaflow_session = SESSION_ID;
       o.__oaflow_top_level = window === window.top;
       o.__oaflow_viewport = [Math.round(window.innerWidth),
@@ -1364,7 +1298,7 @@ _INIT_JS = r"""
     if (resizeTimer !== null) clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => {
       resizeTimer = null;
-      emit({kind: 'viewport', url: location.href, title: document.title});
+      emit({kind: 'viewport'});
     }, 100);
   });
   listen('focusin', (e) => {
@@ -1378,9 +1312,7 @@ _INIT_JS = r"""
       // The page replaced the element the operator was typing into. Continue
       // the SAME input session instead of deriving a new one: a field with no
       // name and no ID has no other stable identity, so a new session per swap
-      // would make every keystroke look like a new declared field. The element
-      // the page dropped can hold a keystroke prefix of this value.
-      supersededSecretElements.add(activeSecretElement);
+      // would make every keystroke look like a new declared field.
       bindSecretState(
         el, secretStates.get(activeSecretElement) || activeSecretState
       );
@@ -1438,7 +1370,6 @@ _INIT_JS = r"""
       sid: start.sid, structural: start.structural,
       end_structural: structuralTarget(endX, endY, deepEventTarget(e)),
       idr: start.idr,
-      url: location.href, title: document.title,
     };
     if (start.sid_withheld) dragEvent.sid_withheld = start.sid_withheld;
     emit(dragEvent);
@@ -1455,7 +1386,6 @@ _INIT_JS = r"""
       sid: rowIdentity.sid,
       structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
-      url: location.href, title: document.title,
     };
     if (rowIdentity.withheld) pointerEvent.sid_withheld = rowIdentity.withheld;
     emit(pointerEvent);
@@ -1470,22 +1400,15 @@ _INIT_JS = r"""
       sid: rowIdentity.sid,
       structural: structuralTarget(e.clientX, e.clientY, target),
       idr: identifierRect(),
-      url: location.href, title: document.title,
     };
     if (rowIdentity.withheld) pointerEvent.sid_withheld = rowIdentity.withheld;
     emit(pointerEvent);
   });
 
-  // Commit points. After each of these the page can clear the field or leave
-  // the document, so a committed value stays scrubbable once the DOM no longer
-  // holds it. `change` and `focusout` commit only the element they name: when
-  // a controlled input replaces its focused node, the focusout target is the
-  // node the page just removed, so a keystroke prefix never becomes a
-  // committed value.
-  listen('change', (e) => commitSecretValueFor(inputEventTarget(e)));
-  listen('focusout', (e) => commitSecretValueFor(inputEventTarget(e)));
-  listen('submit', commitSecretValues);
-  listenOn(window, 'pagehide', commitSecretValues);
+  // There are no commit points. Flow does not retain a value past the moment
+  // the field holds it: once the page clears the field, Flow cannot prove what
+  // any changed URL or title reflects, so it withholds that text instead of
+  // matching it against a remembered copy. See safePageState.
 
   listen('input', (e) => {
     refreshSecretBindings();
@@ -1527,21 +1450,28 @@ _INIT_JS = r"""
     }
     const r = (el.getBoundingClientRect && el.getBoundingClientRect())
       || { left: 0, top: 0, width: 0, height: 0 };
+    // The receiving field's NAME is machine evidence: it becomes the parameter
+    // the compiler binds and the replayer fills. A rewritten name would name a
+    // parameter the page does not have, so it is exact or withheld.
+    identityWithheldReason = null;
+    const rawField = elementName(el) || el.id || null;
+    const field = secret ? secretBinding.state.field : identityTextOrNull(rawField);
     const o = {
       kind: 'input',
-      field: secret
-        ? secretBinding.state.field
-        : scrubSecretText(elementName(el) || el.id || null),
+      field: field,
       label: fieldLabel(el),
       secret: secret,
       __oaflow_input_session: secret
         ? secretBinding.state.inputSession : inputSessionFor(el),
       rect: [Math.round(r.left), Math.round(r.top),
              Math.round(r.width), Math.round(r.height)],
-      url: location.href, title: document.title,
     };
-    // A secret literal stays in this page closure only. It is retained here so
-    // later URL, title, and structural evidence can be scrubbed before emit.
+    if (!secret && rawField !== null && field === null) {
+      o.identity_withheld = identityWithheldReason;
+    }
+    // A secret literal never leaves the page closure. The element reference is
+    // retained so the value can be READ LIVE at the next match; the value
+    // itself is not retained anywhere.
     if (secret) {
       o.__oaflow_secret_mask_bound = secretBinding.maskBound;
     } else {
@@ -1573,19 +1503,17 @@ _INIT_JS = r"""
     if (modifiers.length && !pureModifier && !shiftedText && !e.repeat) {
       emit({
         kind: 'hotkey', key: e.key, modifiers,
-        url: location.href, title: document.title,
-      });
+        });
       return;
     }
     if (SPECIAL.indexOf(e.key) < 0) return;
-    emit({ kind: 'key', key: e.key, url: location.href, title: document.title });
+    emit({kind: 'key', key: e.key});
   });
 
   listen('wheel', (e) => {
     emit({
       kind: 'scroll',
       dx: Math.round(e.deltaX), dy: Math.round(e.deltaY),
-      url: location.href, title: document.title,
     });
   });
 })();
@@ -1700,6 +1628,7 @@ class InteractiveRecorder:
         # from any LATER document is withheld instead of retained unscrubbed.
         self._secret_doc_ids: set[str] = set()
         self._structural_text_withheld = False
+        self._structural_text_withheld_reasons: set[str] = set()
         self._identity_withheld_events = 0
 
     # -- lifecycle -----------------------------------------------------------
@@ -2086,8 +2015,11 @@ class InteractiveRecorder:
             if self._structural_text_withheld:
                 # The operator must be able to see that Flow dropped URL and
                 # title evidence, and why. Silence here would read as evidence
-                # the page simply did not have.
-                meta["structural_text_withheld"] = "secret-value-left-its-document"
+                # the page simply did not have. Every distinct reason is named:
+                # one recording can hit more than one.
+                meta["structural_text_withheld"] = ",".join(
+                    sorted(self._structural_text_withheld_reasons)
+                )
             if self._identity_withheld_events:
                 meta["identity_withheld_events"] = self._identity_withheld_events
             if not self._owns_browser:
@@ -2507,17 +2439,24 @@ class InteractiveRecorder:
         if doc_id is not None and (holds_secret or received_secret_input):
             self._secret_doc_ids.add(doc_id)
         # Count the action ONCE, whichever identity evidence Flow withheld: a
-        # selector, an accessible name or role, or the clicked row's identity
-        # characters. Each one disarms an identity check the same way.
-        withheld_identity = bool(event.get("sid_withheld"))
+        # selector, an accessible name or role, the receiving field's name, or
+        # the clicked row's identity characters. Each one disarms an identity
+        # check the same way.
+        withheld_identity = bool(
+            event.get("sid_withheld") or event.get("identity_withheld")
+        )
         for key in ("structural", "end_structural"):
             target = event.get(key)
             if isinstance(target, dict) and target.get("identity_withheld"):
                 withheld_identity = True
         if withheld_identity:
             self._identity_withheld_events += 1
+        # An event carries no URL or title of its own: Flow samples reflected
+        # text at the settled boundary instead (see _read_scrubbed_page_state).
+        # Note the reason here so the operator still learns that an action came
+        # from a document whose reflected text Flow could no longer prove safe.
         if self._secret_document_left(doc_id):
-            self._withhold_structural_text(event)
+            self._note_withheld_structural_text("secret-value-left-its-document")
 
     def _secret_document_left(self, doc_id: Optional[str]) -> bool:
         """True when a declared secret stayed behind in an EARLIER document.
@@ -2533,14 +2472,18 @@ class InteractiveRecorder:
             return False
         return doc_id is None or doc_id not in self._secret_doc_ids
 
-    def _withhold_structural_text(self, state: dict[str, Any]) -> None:
-        """Replace URL and title evidence that Flow can no longer scrub."""
+    def _note_withheld_structural_text(self, reason: str) -> None:
+        """Record WHY Flow withheld reflected text, for the operator notice."""
 
         self._structural_text_withheld = True
-        if "url" in state:
-            state["url"] = self._origin_only_url()
-        if "title" in state:
-            state["title"] = ""
+        self._structural_text_withheld_reasons.add(reason)
+
+    def _withhold_structural_text(self, state: dict[str, Any], reason: str) -> None:
+        """Replace URL and title evidence that Flow cannot prove is safe."""
+
+        self._note_withheld_structural_text(reason)
+        state["url"] = self._origin_only_url()
+        state["title"] = ""
 
     def _cleanup_page_listeners(self) -> None:
         """Remove this session's current-document listeners before detach."""
@@ -3036,7 +2979,20 @@ class InteractiveRecorder:
             self._last_structural = structural_after
 
     def _read_scrubbed_page_state(self) -> dict[str, str]:
-        """Read only the page-closure URL/title sanitized at the source."""
+        """Sample the page-closure URL and title at a SETTLED boundary.
+
+        This is the only sampling point for reflected evidence. Python calls it
+        after the page has processed the action, so what the page shows is what
+        the action produced. The in-page capture-phase listeners deliberately
+        emit no URL or title: they run BEFORE the page's own handlers, so
+        anything they read is one action out of date.
+
+        The page decides whether its reflected text can be reported at all and
+        says so in ``withheld``. Python adds the one rule the page cannot see:
+        a LATER document cannot report reflected text once an earlier document
+        received a declared value, because each document builds a fresh closure
+        that never saw that value.
+        """
 
         assert self.page is not None
         try:
@@ -3062,14 +3018,22 @@ class InteractiveRecorder:
         state: dict[str, str] = {}
         for key in ("url", "title"):
             value = safe_page_state.get(key)
-            if isinstance(value, str):
-                state[key] = value
+            if not isinstance(value, str):
+                raise BrowserAttachError(
+                    "the page-local secret scrubber did not return structural state"
+                )
+            state[key] = value
         raw_doc_id = safe_page_state.get("doc")
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         if doc_id is not None and safe_page_state.get("secret") is True:
             self._secret_doc_ids.add(doc_id)
+        page_withheld = safe_page_state.get("withheld")
+        if isinstance(page_withheld, str) and page_withheld:
+            # The page already replaced the text; record the reason so the
+            # operator notice can name it.
+            self._withhold_structural_text(state, page_withheld)
         if self._secret_document_left(doc_id):
-            self._withhold_structural_text(state)
+            self._withhold_structural_text(state, "secret-value-left-its-document")
         return state
 
     def _structural_state(self) -> dict[str, Any]:

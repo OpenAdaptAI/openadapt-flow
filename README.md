@@ -312,13 +312,14 @@ boundary.
 
 **Secret input values stay page-local.** An `input[type=password]` field (or a
 field named with `--secret <name>`) becomes a secret parameter. Flow does not
-send its literal to Python. It masks the bound field region in saved frames and
-removes the literal and its common URL-encoded forms from later URL, title,
-label, and structural text in the same document. A shadow field whose identity
-can change must use a host with the same declared name or ID; Flow masks the
-complete host. It refuses an unbound shadow input before it accepts a value. At
-replay, Flow injects the secret from the environment and fails fast when it is
-absent:
+send its literal to Python. It masks the bound field region in saved frames.
+For every other piece of page text, **Flow reports it exactly or withholds it
+and says why. Flow never rewrites captured text.** Matching uses only the value
+a bound element holds at that moment, read live from the DOM; no value is kept
+after the field stops holding it. A shadow field whose identity can change must
+use a host with the same declared name or ID; Flow masks the complete host. It
+refuses an unbound shadow input before it accepts a value. At replay, Flow
+injects the secret from the environment and fails fast when it is absent:
 
 ```bash
 openadapt-flow record --backend web --url https://your.app --out rec --secret password
@@ -326,14 +327,25 @@ export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
+Evidence splits in two. **Identity evidence** — the DOM selector, the control
+role, the accessible name, the clicked row's identity characters, and the
+receiving field's name — is exact or withheld with a stated reason, because
+replay compares it against the live page and a rewritten copy would compare
+against text the page never showed. **Reflected evidence** — the page URL and
+the title — is sampled from Python once the page has settled, never inside the
+capture-phase listener, which runs before the page's own handlers and so reads
+the previous action's text. Flow reports it only while it has not changed since
+before that document held any declared value; a page that writes the value into
+its URL or title therefore yields an origin-only URL and an empty title rather
+than a guess. The same applies to every later document, because each document
+builds a fresh closure that never saw the value. `meta.json` records what was
+withheld and why, and the CLI prints it.
+
 This source-time contract does not track an application-defined transform of a
-secret or an application copy into an unrelated visible element. Those pixels
-remain raw recording evidence. A page closure cannot scrub a document it no
-longer owns, so once a declared secret has received input, Flow withholds the
-page URL and title for every later document: a same-origin form submit that
-reflects the value into the next query string leaves an origin-only URL and an
-empty title, and the CLI reports what it withheld. Keep every raw recording
-inside its approved local boundary.
+secret or an application copy into an unrelated visible element, and it starts
+at the moment a bound field holds the value: text and pixels captured before
+then are ordinary recording evidence. Keep every raw recording inside its
+approved local boundary.
 
 **Compiled is not the same as certified safe.** `lint` reports a bundle's
 coverage gaps (clicks that act with no identity check, steps that assert

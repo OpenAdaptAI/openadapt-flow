@@ -12,6 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from urllib.request import urlopen
 
 import pytest
@@ -1138,7 +1139,10 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     label_event = next(
         event for event in input_events if event.get("field") == "label-equals-secret"
     )
-    assert label_event["label"] == "[secret]"
+    # Flow does not rewrite captured text. A label that holds another declared
+    # field's value is WITHHELD, not replaced by a placeholder: a placeholder
+    # would propose a parameter name the page never showed.
+    assert label_event["label"] is None
     assert {
         event.get("value") for event in input_events if not event.get("secret")
     } == {
@@ -1151,8 +1155,11 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     )
     click = next(event for event in events if event.get("kind") == "click")
     assert click["structural"]["selector"] is None
-    assert click["structural"]["role"] == "[secret]"
-    assert click["structural"]["name"] == "[secret]"
+    # Identity evidence is EXACT or WITHHELD. Replay compares the role and the
+    # accessible name against the live page, so a placeholder here would make
+    # replay compare against characters the page never held.
+    assert click["structural"]["role"] is None
+    assert click["structural"]["name"] is None
     # A refused DOM identity says WHY. It is never a bare null selector that
     # reads as "this element simply had no stable identity".
     assert click["structural"]["identity_withheld"] == "secret-value-in-identity"
@@ -2671,6 +2678,27 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
 # ---------------------------------------------------------------------------
 
 
+def _sample_reflected_state(page: Any, session_id: str) -> dict:
+    """Sample reflected evidence exactly the way the recorder does.
+
+    ``InteractiveRecorder._read_scrubbed_page_state`` calls this same entry
+    point, from Python, at a settled boundary after the page has processed the
+    action. The in-page capture-phase listeners emit no URL and no title at
+    all, so this is the ONLY path by which reflected text reaches a recording.
+    Tests assert here for that reason: an assertion on an event field would
+    test a channel that no longer reaches disk.
+    """
+
+    return page.evaluate(
+        """sessionId => {
+          const recorder = window.__oaflowRecorder;
+          if (!recorder || recorder.sessionId !== sessionId) return null;
+          return recorder.structuralState();
+        }""",
+        session_id,
+    )
+
+
 def _page_closure_init_js(session_id: str, binding_name: str, secrets: tuple) -> str:
     return (
         interactive_recorder_module._INIT_JS.replace(
@@ -2733,23 +2761,26 @@ def test_page_closure_keeps_url_and_identity_evidence_for_a_lowercase_secret() -
             page.keyboard.type(secret)
             page.click("#chart-save")
             page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
         finally:
             browser.close()
 
     payload = json.dumps(events)
     assert secret not in payload
     assert events
-    # The origin travels beside the scrubbed URL, so the origin guard never
-    # parses redacted text. Every recorded URL stays on the real origin.
+    # The origin travels beside the event, so the origin guard reads a value
+    # no redaction rule can touch. Every event stays on the real origin.
     assert {event["__oaflow_origin"] for event in events} == {"http://host.test"}
-    # A URL is redacted by WHOLE token. While the typed prefix is still too
-    # short to identify (``char`` here) the path segment that contains it is
-    # withheld: fail closed, never a partial rewrite. The scheme, the host and
-    # the port are never rewritten, so no event leaves the declared origin.
-    assert {event["url"] for event in events} <= {
-        "http://host.test/hospital/charts",
-        "http://host.test/hospital/[secret]",
-    }
+    # An event carries NO reflected text: the capture-phase listener runs
+    # before the page's own handlers, so anything it read would be one action
+    # out of date.
+    assert not any("url" in event or "title" in event for event in events)
+    # This page never changes its URL or its title, so both predate the secret
+    # value and both stay EXACT -- including the path segment ``charts``, which
+    # contains the typed prefix ``char``.
+    assert reflected_state["url"] == "http://host.test/hospital/charts"
+    assert reflected_state["title"] == "Charts home"
+    assert reflected_state["withheld"] is None
     secret_inputs = [
         event
         for event in events
@@ -2763,7 +2794,6 @@ def test_page_closure_keeps_url_and_identity_evidence_for_a_lowercase_secret() -
     assert click["structural"]["selector"] == "#chart-save"
     assert click["structural"]["name"] == "Save chart"
     assert "identity_withheld" not in click["structural"]
-    assert click["title"] == "Charts home"
 
 
 @pytest.mark.timeout(60)
@@ -2828,7 +2858,10 @@ def test_page_closure_scrubs_a_cached_label_holding_another_declared_secret() ->
         for event in events
         if event.get("kind") == "input" and event.get("field") == "confirm-secret"
     }
-    assert labels == {"Confirm [secret]"}
+    # WITHHELD, not rewritten. The cached label holds the OTHER declared
+    # field's pre-filled value, so Flow reports no label for this field rather
+    # than a placeholder the page never showed.
+    assert labels == {None}
 
 
 def test_attached_recorder_reads_the_origin_the_page_reports(tmp_path: Path) -> None:
@@ -2910,6 +2943,15 @@ def test_structural_text_is_withheld_after_a_secret_leaves_its_document(
             source={"page": session.page, "frame": selected_frame},
         )
 
+    page_state = {
+        "url": "http://host.test/app",
+        "title": "App",
+        "doc": "doc-1",
+        "secret": True,
+        "withheld": None,
+    }
+    session.page.evaluate = lambda _js, _session_id: dict(page_state)
+
     send(
         "doc-1",
         {
@@ -2918,21 +2960,40 @@ def test_structural_text_is_withheld_after_a_secret_leaves_its_document(
             "secret": True,
             "__oaflow_secret_mask_bound": True,
             "__oaflow_input_session": f"{session._session_id}:input:1",
-            "url": "http://host.test/app",
-            "title": "App",
         },
     )
     assert session._listener_error is None
-    # The same document still scrubs at the source, so its evidence stays.
-    assert session._pyq[-1]["url"] == "http://host.test/app"
-    send(
-        "doc-2",
-        {"kind": "click", "url": "http://host.test/?token=hunter2", "title": "Done"},
+    # An event carries no reflected text of its own. The recorder samples it at
+    # the settled boundary, and the document that received the value can still
+    # report text that predates the value.
+    assert "url" not in session._pyq[-1]
+    assert session._read_scrubbed_page_state() == {
+        "url": "http://host.test/app",
+        "title": "App",
+    }
+    assert session._structural_text_withheld is False
+
+    # A same-origin GET form submit builds a NEW document. Its closure never
+    # saw the value, so it cannot rule the value out of the query string it now
+    # shows. Flow withholds that document's reflected text.
+    page_state.update(
+        {
+            "url": "http://host.test/?token=hunter2",
+            "title": "Done",
+            "doc": "doc-2",
+            "secret": False,
+        }
     )
+    send("doc-2", {"kind": "click"})
     assert session._listener_error is None
-    assert session._pyq[-1]["url"] == "http://host.test/"
-    assert session._pyq[-1]["title"] == ""
+    assert session._read_scrubbed_page_state() == {
+        "url": "http://host.test/",
+        "title": "",
+    }
     assert session._structural_text_withheld is True
+    assert session._structural_text_withheld_reasons == {
+        "secret-value-left-its-document"
+    }
 
 
 def test_recording_privacy_notices_report_what_flow_withheld(tmp_path: Path) -> None:
@@ -3087,6 +3148,7 @@ def test_page_closure_keeps_evidence_when_a_secret_input_swaps_its_node() -> Non
             page.keyboard.type(secret)
             page.click("#chart-save")
             page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
         finally:
             browser.close()
 
@@ -3097,16 +3159,22 @@ def test_page_closure_keeps_evidence_when_a_secret_input_swaps_its_node() -> Non
     assert click["structural"]["selector"] == "#chart-save"
     assert click["structural"]["name"] == "Save chart"
     assert "identity_withheld" not in click["structural"]
-    assert click["url"] == "http://host.test/hospital/charts"
+    # Only a CONNECTED node's value is ever matched, so the prefixes the
+    # detached nodes still hold cannot withhold unrelated evidence. This page
+    # never changes its URL, so the URL predates the value and stays exact.
+    assert reflected_state["url"] == "http://host.test/hospital/charts"
+    assert reflected_state["withheld"] is None
 
 
 @pytest.mark.timeout(60)
-def test_page_closure_redacts_a_value_the_field_still_holds_after_a_commit() -> None:
-    """A committed value must never suppress the value the field holds now.
+def test_page_closure_withholds_reflected_text_the_field_no_longer_matches() -> None:
+    """The shorter value left in the field must never reach reflected text.
 
-    The operator types a value, leaves the field (which commits it), returns
-    and deletes one character. The field now holds a SHORTER value that the
-    committed one continues. It is the live secret, not a keystroke prefix.
+    The operator types a value, leaves the field, returns and deletes one
+    character. The field now holds a SHORTER value, and the page still shows
+    the longer one in its URL and title until the next keystroke reflects
+    again. No rule that reads only the current DOM can scrub that, so Flow
+    withholds the reflected text and reports why. Reproduction (a).
     """
 
     executable = _chromium_executable()
@@ -3154,16 +3222,26 @@ def test_page_closure_redacts_a_value_the_field_still_holds_after_a_commit() -> 
             page.keyboard.press("Backspace")
             page.click("#chart-save")
             page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+            raw = page.evaluate("() => [location.href, document.title]")
         finally:
             browser.close()
 
     payload = json.dumps(events)
-    # `hunter` is what the field holds; `hunter2` is what it committed. Neither
-    # may reach an event, in whole or in part.
+    # `hunter` is what the field holds now; `hunter2` is what it held before.
+    # Neither may reach an event or the sampled reflected state, in whole or in
+    # part.
     assert "hunter" not in payload
+    assert "hunter" not in json.dumps(reflected_state)
+    # The page really does still show the value: this is a live leak the
+    # withholding rule is closing, not a page that never reflected.
+    assert "hunter" in raw[0] and "hunter" in raw[1]
+    assert reflected_state["url"] == "http://host.test/"
+    assert reflected_state["title"] == ""
+    assert reflected_state["withheld"] == "reflected-text-changed-after-a-secret-value"
+    # Identity evidence is unaffected: the button holds no declared value, so
+    # it stays exact.
     click = [event for event in events if event.get("kind") == "click"][-1]
-    assert click["url"] == "http://host.test/charts/[secret]"
-    assert click["title"] == "session for [secret]"
     assert click["structural"]["selector"] == "#chart-save"
 
 
@@ -3223,6 +3301,7 @@ def test_page_closure_keeps_evidence_when_an_unnamed_password_swaps_its_node() -
             page.keyboard.type(secret)
             page.click("#chart-save")
             page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
         finally:
             browser.close()
 
@@ -3232,7 +3311,8 @@ def test_page_closure_keeps_evidence_when_an_unnamed_password_swaps_its_node() -
     assert click["structural"]["selector"] == "#chart-save"
     assert click["structural"]["name"] == "Save chart"
     assert "identity_withheld" not in click["structural"]
-    assert click["url"] == "http://host.test/hospital/charts"
+    assert reflected_state["url"] == "http://host.test/hospital/charts"
+    assert reflected_state["withheld"] is None
 
 
 @pytest.mark.timeout(60)
@@ -3326,3 +3406,592 @@ def test_withheld_row_identity_is_counted_for_the_operator(tmp_path: Path) -> No
     )
     assert session._listener_error is None
     assert session._identity_withheld_events == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the redaction redesign (fourth review round).
+#
+# Three earlier revisions tried to remove a REMEMBERED value from text that was
+# already captured. Three independent reviews each found a different defect in
+# the retention rule that approach needs. The tests below pin the rules that
+# replaced it: match only what a bound element holds right now, report identity
+# evidence exactly or withhold it, and sample reflected text at the settled
+# boundary. Each test states the defect it closes and fails on commit 7acd716.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_all_evidence_for_a_password_starting_with_a_word() -> None:
+    """A password that begins with a common word rewrites nothing. Finding 1.
+
+    The operator types ``invoice-2026-quarterly-passphrase`` on a page whose
+    URL, title, clicked-row identity and button id all contain the word
+    ``invoice``. While the field held exactly ``invoice`` that word was a live
+    declared value; the retention rule then kept it for the rest of the
+    recording, and every one of those five pieces of evidence was rewritten or
+    nulled. Nothing is retained now, so at click time the only declared value
+    is the complete passphrase, which none of that evidence contains.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-common-word-test"
+    binding_name = "__oaflow_emit_common_word_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("password",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "invoice-2026-quarterly-passphrase"
+    row_identity = "MRN 44120 invoice Alice Example"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>invoice queue 2026</title>"
+                        "<input id='password' name='password' type='password'>"
+                        f"<ul><li>{row_identity}"
+                        "<button id='invoice-submit'>Post invoice</button>"
+                        "</li></ul>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/invoices/2026-queue")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#password")
+            page.keyboard.type(secret)
+            page.click("#invoice-submit")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert secret not in payload
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    # IDENTITY / MACHINE EVIDENCE, exact. Replay re-reads the page and compares
+    # against these, so each one must be what the page held.
+    assert click["sid"] == row_identity
+    assert "sid_withheld" not in click
+    assert click["structural"]["selector"] == "#invoice-submit"
+    assert click["structural"]["name"] == "Post invoice"
+    assert "identity_withheld" not in click["structural"]
+    # REFLECTED / CONTEXT EVIDENCE, exact: neither changed after the field held
+    # a value, so neither can be a reflection of it.
+    assert reflected_state["url"] == "http://host.test/invoices/2026-queue"
+    assert reflected_state["title"] == "invoice queue 2026"
+    assert reflected_state["withheld"] is None
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_a_stale_reflection_from_a_swapping_input() -> None:
+    """A node swap combined with an as-you-type reflection. The second P1.
+
+    The page replaces its input element on every keystroke AND writes the value
+    into the URL and the title -- but stops reflecting past eight characters,
+    so what it shows at the end is a PREFIX the field no longer holds. The
+    retention rule treated that prefix as a droppable keystroke artifact of the
+    replaced node, so nothing redacted it and it reached the recording. Flow
+    now proves reflected text safe only while it has not changed since before
+    the field held a value, so this text is withheld whole.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-stale-swap-test"
+    binding_name = "__oaflow_emit_stale_swap_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("swap-secret",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "charlie-alpha"
+    stale_prefix = "charlie-"
+    reflect = (
+        "if (this.value.length <= 8) {"
+        "document.title = 'session for ' + this.value;"
+        "history.replaceState({}, '', '/charts/' + this.value);"
+        "}"
+        "const next = document.createElement('input');"
+        "next.name = 'swap-secret';"
+        "next.type = 'password';"
+        "next.setAttribute('oninput', this.getAttribute('oninput'));"
+        "next.value = this.value;"
+        "this.replaceWith(next);"
+        "next.focus();"
+    )
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>session</title>"
+                        "<input id='swap-secret' name='swap-secret'"
+                        f" type='password' oninput=\"{reflect}\">"
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("[name='swap-secret']")
+            page.keyboard.type(secret)
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+            raw = page.evaluate("() => [location.href, document.title]")
+        finally:
+            browser.close()
+
+    # The page really is showing a value the field no longer holds. Without
+    # this the test would pass on a page that simply never reflected.
+    assert raw == [
+        f"http://host.test/charts/{stale_prefix}",
+        f"session for {stale_prefix}",
+    ]
+    payload = json.dumps(events)
+    assert secret not in payload
+    assert stale_prefix not in payload
+    assert stale_prefix not in json.dumps(reflected_state)
+    assert reflected_state["url"] == "http://host.test/"
+    assert reflected_state["title"] == ""
+    assert reflected_state["withheld"] == "reflected-text-changed-after-a-secret-value"
+    # Identity evidence is untouched by the withholding: the button holds no
+    # declared value, so replay keeps its strongest identity tier.
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["structural"]["selector"] == "#chart-save"
+    assert click["structural"]["name"] == "Save chart"
+    assert "identity_withheld" not in click["structural"]
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_identity_that_holds_a_declared_value() -> None:
+    """Identity evidence is EXACT or WITHHELD-AND-MARKED. Never rewritten.
+
+    The page copies the typed value into a row. The old rule rewrote the row
+    identity to ``Ticket [secret] owner`` and reported nothing, so replay would
+    have compared against characters the page never showed and no downstream
+    check could see the substitution. Flow withholds the field and marks it.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-identity-rewrite-test"
+    binding_name = "__oaflow_emit_identity_rewrite_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "alpha-charlie-9"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Tickets</title>"
+                        "<input id='token' name='token' type='password'"
+                        ' oninput="'
+                        "document.getElementById('label').textContent ="
+                        " 'Ticket ' + this.value + ' owner';"
+                        '">'
+                        "<ul><li><span id='label'>Ticket owner</span>"
+                        "<button id='save'>Save</button></li></ul>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/tickets")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(secret)
+            page.click("#save")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert secret not in payload
+    # No rewritten copy of anything exists: Flow writes no placeholder into
+    # captured text, so the placeholder string appears nowhere at all.
+    assert "[secret]" not in payload
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["sid"] is None
+    assert click["sid_withheld"] == "secret-value-in-identity"
+    # The button itself holds no declared value, so its identity is untouched.
+    assert click["structural"]["selector"] == "#save"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_emits_no_reflected_text_from_the_capture_phase() -> None:
+    """An event carries no URL and no title, because it cannot carry a true one.
+
+    The in-page listeners run in the CAPTURE phase, before the page's own
+    handlers. Any URL or title read there belongs to the state BEFORE the
+    action, so an event that carried one described the previous screen. That
+    staleness was the only reason the closure kept a value history at all.
+    Flow samples reflected text from Python at the settled boundary instead.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-no-event-text-test"
+    binding_name = "__oaflow_emit_no_event_text_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ())
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>step one</title>"
+                        "<button id='next' onclick=\""
+                        "document.title = 'step two';"
+                        "history.replaceState({}, '', '/two');"
+                        '">Next</button>'
+                    ),
+                ),
+            )
+            page.goto("http://host.test/one")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#next")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+        finally:
+            browser.close()
+
+    assert events
+    for event in events:
+        assert "url" not in event
+        assert "title" not in event
+    # Sampled after the page processed the click, so it is the screen the click
+    # produced -- not the one it left. A capture-phase read would say "/one"
+    # and "step one" here.
+    assert reflected_state["url"] == "http://host.test/two"
+    assert reflected_state["title"] == "step two"
+    assert reflected_state["withheld"] is None
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_after_a_shorter_value_replaces_a_reflection() -> None:
+    """Reproduction (b): blur, clear, retype something shorter.
+
+    The page reflects the first value, the operator leaves the field, the page
+    clears it, and the operator types a shorter value that the page does not
+    reflect. The URL still shows the first value, and nothing in the DOM can
+    identify it any more.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-cleared-field-test"
+    binding_name = "__oaflow_emit_cleared_field_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    first = "hunter2-primary"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>session</title>"
+                        "<input id='token' name='token' type='password'"
+                        ' oninput="'
+                        "if (!this.dataset.done) {"
+                        "history.replaceState({}, '', '/charts/' + this.value);"
+                        "}"
+                        '">'
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(first)
+            page.click("#chart-save")
+            # The page clears the field and stops reflecting.
+            page.evaluate(
+                """() => {
+                  const el = document.getElementById('token');
+                  el.dataset.done = '1';
+                  el.value = '';
+                }"""
+            )
+            page.click("#token")
+            page.keyboard.type("abc")
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+            raw_url = page.evaluate("() => location.href")
+        finally:
+            browser.close()
+
+    assert raw_url == f"http://host.test/charts/{first}"
+    payload = json.dumps(events)
+    assert first not in payload
+    assert first not in json.dumps(reflected_state)
+    assert reflected_state["url"] == "http://host.test/"
+    assert reflected_state["withheld"] == "reflected-text-changed-after-a-secret-value"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_a_reflection_the_field_extended_past() -> None:
+    """Reproduction (c): ``alpha-one`` reflected, then extended to
+    ``alpha-one-two``.
+
+    The URL keeps the first value. Matching the current value against it finds
+    nothing, because the current value only CONTAINS the reflected one -- it is
+    not equal to it and does not appear in the URL.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-extended-value-test"
+    binding_name = "__oaflow_emit_extended_value_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>session</title>"
+                        "<input id='token' name='token' type='password'"
+                        ' oninput="'
+                        "if (this.value.length <= 9) {"
+                        "history.replaceState({}, '', '/charts/' + this.value);"
+                        "}"
+                        '">'
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type("alpha-one-two")
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+            raw_url = page.evaluate("() => location.href")
+        finally:
+            browser.close()
+
+    assert raw_url == "http://host.test/charts/alpha-one"
+    payload = json.dumps(events)
+    assert "alpha-one" not in payload
+    assert "alpha-one" not in json.dumps(reflected_state)
+    assert reflected_state["url"] == "http://host.test/"
+    assert reflected_state["withheld"] == "reflected-text-changed-after-a-secret-value"
+
+
+def test_withheld_reflected_text_names_every_reason_for_the_operator(
+    tmp_path: Path,
+) -> None:
+    """One recording can withhold reflected text for more than one reason."""
+
+    from openadapt_flow.__main__ import _recording_privacy_notices
+
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    (recording / "meta.json").write_text(
+        json.dumps(
+            {
+                "surface": "web",
+                "structural_text_withheld": (
+                    "reflected-text-changed-after-a-secret-value,"
+                    "secret-value-left-its-document"
+                ),
+            }
+        )
+    )
+    notices = _recording_privacy_notices(recording)
+    assert len(notices) == 2
+    assert any(
+        "changed after a declared secret field held a value" in n for n in notices
+    )
+    assert any("left its document" in n for n in notices)
+    # Flow never rewrites captured text, and the operator is told so.
+    assert all("never rewrites it" in notice for notice in notices)
+
+
+def test_reflected_text_withheld_reasons_reach_the_recording_metadata(
+    tmp_path: Path,
+) -> None:
+    """Every distinct reason Flow withheld reflected text reaches meta.json."""
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    page_state = {
+        "url": "http://host.test/app",
+        "title": "App",
+        "doc": "doc-1",
+        "secret": True,
+        "withheld": "reflected-text-changed-after-a-secret-value",
+    }
+    session.page = SimpleNamespace(
+        main_frame=object(),
+        evaluate=lambda _js, _session_id: dict(page_state),
+    )
+    # The page withheld its own reflected text: the URL changed after the field
+    # held a value.
+    assert session._read_scrubbed_page_state() == {
+        "url": "http://host.test/",
+        "title": "",
+    }
+    # A later document adds the second reason.
+    page_state.update({"doc": "doc-2", "secret": False, "withheld": None})
+    assert session._read_scrubbed_page_state() == {
+        "url": "http://host.test/",
+        "title": "",
+    }
+    assert session._structural_text_withheld_reasons == {
+        "reflected-text-changed-after-a-secret-value",
+        "secret-value-left-its-document",
+    }
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_states_its_limit_for_text_that_predates_the_value() -> None:
+    """The stated limit, pinned so a change to it has to be deliberate.
+
+    Flow protects a declared value from the moment a bound field holds it. Text
+    that already carried the value BEFORE then -- an operator who opens a URL
+    that already contains the password and then types it -- predates the value
+    and is reported as ordinary recording evidence, exactly like the frames
+    captured before that moment. Checking the live value against unchanged text
+    instead would withhold on a chance match with a keystroke prefix, which is
+    the defect this redesign removed: a password beginning with an ordinary
+    word would withhold the URL of every page whose text contains that word.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-predating-url-test"
+    binding_name = "__oaflow_emit_predating_url_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    from playwright.sync_api import sync_playwright
+
+    secret = "quarterly-passphrase-9"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>session</title>"
+                        "<input id='token' name='token' type='password'>"
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto(f"http://host.test/charts?token={secret}")
+            page.expose_binding(binding_name, lambda _source, _detail: None)
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(secret)
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+            reflected_state = _sample_reflected_state(page, session_id)
+        finally:
+            browser.close()
+
+    # Reported, because it is unchanged since before the field held anything.
+    # Treat every recorded URL as sensitive recording data; this is why.
+    assert reflected_state["url"] == f"http://host.test/charts?token={secret}"
+    assert reflected_state["withheld"] is None
+    # The document is still marked, so every LATER document withholds.
+    assert reflected_state["secret"] is True

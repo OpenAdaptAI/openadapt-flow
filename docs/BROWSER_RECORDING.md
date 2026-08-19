@@ -2,7 +2,7 @@
 
 OpenAdapt has one supported browser recording contract. `openadapt-flow`
 uses a Playwright page to retain ordered input events, DOM identity, field
-geometry, exact before/after frames, and source-time secret redaction. The
+geometry, exact before/after frames, and capture-time secret masking. The
 result is the same compile-ready recording for both browser entry modes:
 
 - **Launch mode:** Flow starts a new Chromium browser and opens `--url`.
@@ -91,10 +91,10 @@ Diagnostic messages omit URL query and fragment values. The exact selector is
 used only to bind the requested tab and is not stored as separate attachment
 metadata. The CDP endpoint is not stored. The normal recording evidence does
 retain the declared app URL and each observed page URL before and after an
-action. Those URLs can contain query or fragment values. After a declared
-secret input, the page closure removes that exact literal and its common
-URL-encoded forms before it emits later URL or title evidence from the same
-document. Treat all other URL data as sensitive recording data.
+action. Those URLs can contain query or fragment values. Once a declared secret
+field holds a value, Flow reports that document's URL and title only while
+neither has changed since before the value existed, and withholds both
+otherwise. Treat all other URL data as sensitive recording data.
 
 ## Safety and privacy contract
 
@@ -148,29 +148,49 @@ document. Treat all other URL data as sensitive recording data.
   before focus, changes either attribute during input, or replaces the active
   input element during the same input session. The listener consumes queued DOM
   changes before each focus or input event, including a field that appears,
-  changes, or receives a replacement inside one JavaScript task. The closure
-  removes the exact literal and its common URL-encoded forms from later URL,
-  title, label, and structural text in the same document before any event
-  crosses into Python. Flow removes its marker when it detaches, including from
-  a page-owned element that is no longer in the DOM.
-- Redaction never rewrites part of a URL authority and never rewrites its own
-  output. The page sends `location.origin` beside the redacted URL, so the
-  origin guard reads a value that redaction cannot touch. A URL is redacted one
-  whole token at a time (path segment, query name, query value, fragment). A
-  declared value that is too short to tell a real reflection from an ordinary
-  coincidence never produces a partial rewrite: Flow withholds that URL token,
-  or that whole title, label, or structural text, instead. Every piece of
-  identity evidence Flow withholds states why, so a DOM identity check can
-  never disarm silently: a withheld selector (an element ID, `data-testid`,
-  `data-test`, or `name` that holds a declared value), a withheld accessible
-  name or role, and a withheld clicked-row identity (`sid_withheld`) all carry
-  a reason in the event, and the CLI summary counts the actions.
-- Redaction keeps every value the field currently holds and every value a
-  commit point recorded. Flow drops a value only where a controlled input
-  replaced the node that held it and the field went on to hold a value that
-  continues it: that value is a keystroke prefix, not a second secret. A
+  changes, or receives a replacement inside one JavaScript task. Flow removes
+  its marker when it detaches, including from a page-owned element that is no
+  longer in the DOM.
+- **Flow reports captured page text exactly, or it withholds that text and
+  states why. Flow never rewrites captured text.** There is no placeholder
+  substitution anywhere in the recorder. Removing a value from text that was
+  already captured is a known-unsolved problem: Englehardt, Acar and Narayanan
+  measured every major session-replay vendor in 2017 and found that none
+  redacts displayed content automatically and that all of it leaked, and
+  PostHog and Sentry still carry open issues for secrets in replay URLs. The
+  working answer in production tools is capture-time, element-bound,
+  deny-by-default masking, which is what Flow does.
+- Matching uses only the values that bound elements hold at that moment, read
+  live from the DOM. Flow keeps no value after the field stops holding it, and
+  a node the page detached is not a source of values: a controlled input that
+  replaces its element on every keystroke leaves keystroke prefixes on the
+  nodes it dropped, and those prefixes match ordinary page text by chance. A
   replacement inherits the input session of the node it replaced, so a field
   with no `name` and no `id` keeps one identity across the swap.
+- **Identity evidence** -- the DOM selector (an element ID, `data-testid`,
+  `data-test`, or `name`), the control role, the accessible name, the clicked
+  row's identity characters, and the receiving field's name -- is exact or
+  withheld. Replay resolves and compares these against the live page, so a
+  rewritten copy would silently compare against characters the page never
+  showed. Every withheld item states why in the event (`identity_withheld`,
+  `sid_withheld`), so a DOM identity check can never disarm silently, and the
+  CLI summary counts the actions. A declared value too short to tell a real
+  match from an ordinary coincidence is reported separately
+  (`ambiguous-secret-in-identity`).
+- **Reflected evidence** -- the page URL and the document title -- is sampled
+  from Python at the settled boundary, the same boundary that captures the
+  after-frame. The in-page listeners run in the capture phase, before the
+  page's own handlers, so any URL or title they read describes the state before
+  the action; they therefore emit none. Flow reports reflected text only while
+  it has not changed since before that document held any declared value, and so
+  cannot be a reflection of that value. Any other reflected text is withheld
+  whole: an origin-only URL and an empty title. A page that writes the value
+  into its URL or title on a timer can show a version the field no longer
+  holds, and no rule that reads only the current DOM can tell that apart from
+  ordinary page text, so Flow refuses rather than guesses.
+- The page sends `location.origin` beside each event. The origin guard reads
+  that value and never the reflected text, so withholding a URL never weakens
+  the origin refusal.
 - Flow traverses and observes open shadow roots at every event boundary. If a
   shadow field can lose its name, ID, or password type before the first event,
   give the shadow host the same `--secret FIELD` name or ID. Flow then masks the
@@ -179,12 +199,28 @@ document. Treat all other URL data as sensitive recording data.
   no node content crosses into Python. Flow refuses before the first frame when
   the closed field exists but its host does not bind that declaration. It also
   refuses a later unbound shadow input before it accepts a value.
-- Each document builds its own page closure, so a closure cannot scrub a value
-  that a previous document received. Once a declared secret field receives
-  input, Flow withholds the page URL and title for every later document: a
-  same-origin GET form submit that reflects the value into the next query
-  string leaves an origin-only URL and an empty title. `meta.json` records
-  `structural_text_withheld`, and `record` prints what it withheld.
+- Each document builds its own page closure, so a closure never saw a value a
+  previous document received. Once a declared secret field receives input, Flow
+  withholds the page URL and title for every later document: a same-origin GET
+  form submit that reflects the value into the next query string leaves an
+  origin-only URL and an empty title. `meta.json` records every distinct reason
+  in `structural_text_withheld`, and `record` prints one line for each.
+- Withholding reflected text costs evidence, and the cost is stated here. A
+  page that changes its URL or title after a declared secret field has held a
+  value reports an origin-only URL and an empty title for the rest of that
+  document, whether or not the change had anything to do with the value. A
+  single-page application that routes after a password entry is the common
+  case. Identity evidence, action coordinates, and the recorded before/after
+  frames are unaffected, so replay keeps its strongest identity tiers.
+- Flow protects a declared value from the moment a bound field holds it. Text
+  and pixels captured BEFORE that moment are ordinary recording evidence. If an
+  operator opens a URL that already contains the password and then types that
+  password into a declared field, the URL predates the value, passes the proof
+  above, and is recorded. Checking the live value against unchanged text
+  instead would withhold on a chance match with a keystroke prefix: a password
+  beginning with an ordinary word would withhold the URL of every page whose
+  text contains that word. Treat every recorded URL as sensitive recording
+  data.
 - Source-time field handling does not track an application-defined transform of
   a secret or a copy into an unrelated visible element. Those pixels, all other
   typed values, and other visible page content are recording evidence and can

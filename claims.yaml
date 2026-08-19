@@ -92,9 +92,40 @@ claims:
         node: test_page_closure_keeps_url_and_identity_evidence_for_a_lowercase_secret
         proves: >-
           A lowercase secret typed one character at a time into a page whose
-          URL, title, and button ID share those characters leaves the origin,
-          the DOM selector, and the accessible name exact. Redaction never
-          rewrites part of a URL authority and never rewrites its own output.
+          URL, title, and button ID share those characters leaves the URL, the
+          title, the DOM selector, and the accessible name exact.
+      - path: tests/test_browser_attach.py
+        node: test_page_closure_keeps_all_evidence_for_a_password_starting_with_a_word
+        proves: >-
+          A password that begins with a common English word leaves that word
+          exact in the page URL, the page title, the clicked row's identity
+          characters, the accessible name, and an unrelated button ID. Matching
+          uses only the value the field holds at that moment, so an
+          intermediate keystroke prefix never becomes a matching value.
+      - path: tests/test_browser_attach.py
+        node: test_page_closure_withholds_identity_that_holds_a_declared_value
+        proves: >-
+          Identity evidence that holds a declared value is WITHHELD with a
+          stated reason, never rewritten. Replay compares identity evidence
+          against the live page, so a rewritten copy would compare against
+          characters the page never showed, invisibly. No placeholder string
+          appears anywhere in the recorded evidence.
+      - path: tests/test_browser_attach.py
+        node: test_page_closure_withholds_a_stale_reflection_from_a_swapping_input
+        proves: >-
+          A page that replaces its input element on every keystroke and writes
+          the value into its URL and title can end up showing a version the
+          field no longer holds. Flow withholds that reflected text whole --
+          an origin-only URL and an empty title -- instead of matching it
+          against the current value, and keeps the clicked element's identity
+          evidence exact.
+      - path: tests/test_browser_attach.py
+        node: test_page_closure_emits_no_reflected_text_from_the_capture_phase
+        proves: >-
+          No browser event carries a URL or a title. The in-page listeners run
+          in the capture phase, before the page's own handlers, so anything
+          they read describes the state before the action. Flow samples
+          reflected evidence from Python at the settled boundary instead.
     caveats:
       - >-
         "Supported" is scoped to the reference headless-browser backend in this

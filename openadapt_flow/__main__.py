@@ -996,13 +996,34 @@ def _recording_privacy_notices(recording_dir: Path) -> list[str]:
     except (OSError, ValueError):
         return []
     notices: list[str] = []
-    if meta.get("structural_text_withheld"):
-        notices.append(
-            "A declared secret value left its document (for example a form "
-            "submit that reflects the value into the next URL). The page "
-            "cannot scrub a later document, so Flow withheld the page URL and "
-            "title after that point. The recording holds no secret value."
-        )
+    raw_withheld = meta.get("structural_text_withheld")
+    if raw_withheld:
+        explained = {
+            "secret-value-left-its-document": (
+                "a declared secret value left its document (for example a form "
+                "submit that reflects the value into the next URL), and the new "
+                "document builds a page closure that never saw that value"
+            ),
+            "reflected-text-changed-after-a-secret-value": (
+                "the page URL or title changed after a declared secret field "
+                "held a value, so Flow could not prove the new text was not a "
+                "reflection of that value"
+            ),
+            "opaque-secret-boundary": (
+                "a declared secret field sits behind a closed shadow root, "
+                "which exposes its value to no check at all"
+            ),
+        }
+        for reason in [
+            part.strip() for part in str(raw_withheld).split(",") if part.strip()
+        ]:
+            notices.append(
+                "Flow withheld the page URL and title because "
+                f"{explained.get(reason, reason)}. Those actions carry an "
+                "origin-only URL and an empty title. Flow reports page text "
+                "exactly or not at all and never rewrites it, so the recording "
+                "holds no secret value and no altered text."
+            )
     withheld_identity = meta.get("identity_withheld_events")
     if isinstance(withheld_identity, int) and withheld_identity > 0:
         notices.append(

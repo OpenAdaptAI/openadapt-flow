@@ -1313,10 +1313,12 @@ _INIT_JS = r"""
     });
   });
 
-  // Commit points. After each of these the bound element can no longer take a
-  // keystroke, or the page is about to clear it or leave the document. A
-  // committed value stays scrubbable after the page empties the field. No
-  // intermediate keystroke prefix is committed here.
+  // Commit points. After each of these the page can clear the field or leave
+  // the document, so a committed value stays scrubbable once the value is no
+  // longer readable from the DOM. A commit point can still fire in the middle
+  // of typing -- replacing a focused element fires focusout -- which is why a
+  // committed value is filed under its declared field and a value that the
+  // same field continues is dropped as a keystroke prefix.
   listen('change', commitSecretValues);
   listen('focusout', commitSecretValues);
   listen('submit', commitSecretValues);

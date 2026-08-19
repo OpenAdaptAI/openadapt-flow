@@ -872,6 +872,20 @@ _INIT_JS = r"""
     const fragment = rawFragment
       ? reduceParams(rawFragment, context, 'fragment', dropped) : '';
     if (query === null || fragment === null) return null;
+    // A BARE fragment names nothing (`#section`), so structure cannot reduce
+    // it. Treat the whole fragment as one unnamed value and apply the same
+    // proof a named parameter value gets.
+    let bareFragment = rawFragment ? '' : String(parsed.hash || '');
+    if (bareFragment && requireProof) {
+      const baselineHash = baselineUrl === null
+        ? '' : String(baselineUrl.hash || '');
+      if (baselineHash !== bareFragment) {
+        dropped.push({
+          name: '', where: 'fragment', reason: 'unproven-parameter-value',
+        });
+        bareFragment = '';
+      }
+    }
     // Rebuilding normalises percent-encoding. Return exactly what the page
     // reports when Flow dropped nothing, so evidence does not drift. User
     // information in the authority is never returned: the rebuilt form drops
@@ -879,9 +893,7 @@ _INIT_JS = r"""
     if (!dropped.length && !parsed.username && !parsed.password) {
       return String(rawUrl);
     }
-    const hash = rawFragment
-      ? '#' + fragment
-      : (parsed.hash ? parsed.hash : '');
+    const hash = rawFragment ? '#' + fragment : bareFragment;
     return parsed.origin + parsed.pathname
       + (parsed.search ? '?' + query : '') + hash;
   }

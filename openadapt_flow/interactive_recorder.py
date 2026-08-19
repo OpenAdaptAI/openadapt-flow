@@ -31,11 +31,25 @@ Design (why it looks the way it does):
   DOM-identity tier arms on interactively-recorded bundles too.
 
 Secret literals never touch Python: a field is secret when it is ``input[type=
-password]`` or its name/id is passed via ``--secret``. The page closure retains
-the current literal only to remove its exact and URL-encoded forms from later
-URL, title, label, and structural text. It emits no value for the secret input.
-The bound field or declared shadow host is masked in every retained frame. See
-``ir.Step.secret`` and ``docs`` for the full contract and reflection boundary.
+password]`` or its name/id is passed via ``--secret``. The page closure holds
+the bound ELEMENT and reads its current literal at scrub time only to remove
+the exact and URL-encoded forms from later URL, title, label, and structural
+text. It emits no value for the secret input. The bound field or declared
+shadow host is masked in every retained frame.
+
+Three rules keep that redaction from becoming its own defect:
+
+* An intermediate keystroke prefix is never retained. A one or two character
+  prefix matches unrelated identity text, and a global replace keyed on it
+  rewrites selectors, labels, titles, and the recorded URL.
+* Redaction scans the original text once and never re-reads its own output, so
+  it cannot rewrite the inside of a placeholder it already wrote.
+* Where an exact scrub is impossible or ambiguous, Flow WITHHOLDS the text and
+  says so — an origin-only URL, an empty title, an ``identity_withheld`` reason
+  on the action, ``meta.json`` keys, and a CLI line. It never keeps a partially
+  rewritten copy, and a DOM identity check never disarms silently.
+
+See ``ir.Step.secret`` and ``docs`` for the full contract and its boundary.
 """
 
 from __future__ import annotations
@@ -367,6 +381,20 @@ _INIT_JS = r"""
   const SECRET_MARKER = __SECRET_MARKER__;
   const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
+  const SECRET_PLACEHOLDER = '[secret]';
+  // One identity for this DOCUMENT. The init script builds a fresh closure per
+  // document, so a value typed in an earlier document cannot be scrubbed here.
+  // Python compares this id against the document that received a secret and
+  // withholds later structural text instead of retaining an unscrubbable copy.
+  const DOC_ID = SESSION_ID + ':doc:' + String(Date.now()) + ':'
+    + Math.random().toString(36).slice(2);
+  // A secret value shorter than this occurs inside ordinary page text by
+  // chance, so a substring match cannot be read as a reflection of the secret.
+  // Flow WITHHOLDS the whole text in that case. It never rewrites part of it:
+  // a partial rewrite corrupts unrelated identity evidence, and keeping the
+  // text would leak a short secret. Length is the only signal available in the
+  // page, so the ambiguous side fails closed.
+  const MIN_UNAMBIGUOUS_SECRET = 6;
   const listeners = [];
   const secretStates = new WeakMap();
   const closedSecretHosts = new WeakMap();
@@ -470,41 +498,153 @@ _INIT_JS = r"""
   }
 
   function rememberSecretValue(el) {
+    // COMMIT POINT ONLY. Call this where the element can no longer receive a
+    // keystroke, or the page is about to clear it or leave the document. An
+    // intermediate keystroke prefix is never committed: a one or two character
+    // prefix matches unrelated identity text, and a global replace keyed on it
+    // corrupts selectors, labels, titles, and the recorded URL.
     const value = currentSecretValue(el);
     if (value) stickySecretValues.add(value);
   }
 
-  function scrubTextWithSecretValues(value, secretValues) {
-    if (value == null) return value;
-    if (opaqueSecretActive) return String(value) ? '[secret]' : '';
-    let scrubbed = String(value);
-    const values = Array.from(secretValues).filter(Boolean).sort(
-      (left, right) => right.length - left.length
-    );
-    for (const secret of values) {
-      const variants = new Set([secret]);
-      try { variants.add(encodeURIComponent(secret)); } catch (e) {}
-      try {
-        variants.add(new URLSearchParams([['value', secret]]).toString().slice(6));
-      } catch (e) {}
-      for (const variant of variants) {
-        if (variant) scrubbed = scrubbed.split(variant).join('[secret]');
+  function commitSecretValues() {
+    for (const el of stickySecretElements) rememberSecretValue(el);
+  }
+
+  function retainedSecretValues() {
+    // Committed values, plus the CURRENT value of every bound secret element
+    // read at scrub time and never retained. The live read covers an
+    // as-you-type reflection without keeping the prefixes that produced it.
+    const values = new Set(stickySecretValues);
+    for (const el of stickySecretElements) {
+      const live = currentSecretValue(el);
+      if (live) values.add(live);
+    }
+    return values;
+  }
+
+  function secretVariants(secret) {
+    const variants = new Set([secret]);
+    try { variants.add(encodeURIComponent(secret)); } catch (e) {}
+    try {
+      variants.add(new URLSearchParams([['value', secret]]).toString().slice(6));
+    } catch (e) {}
+    return Array.from(variants).filter(Boolean);
+  }
+
+  function redactSecretOccurrences(value, secretValues) {
+    // ONE left-to-right pass over the ORIGINAL text. The pass never re-reads
+    // its own output, so a replacement cannot rewrite the inside of a
+    // placeholder that an earlier value wrote.
+    // Returns {text, ambiguous}. `ambiguous` marks a match that a value too
+    // short to identify produced. The caller must WITHHOLD that text: it
+    // cannot tell a real reflection from an ordinary coincidence.
+    const text = String(value);
+    const needles = [];
+    for (const secret of secretValues) {
+      if (!secret) continue;
+      const ambiguous = secret.length < MIN_UNAMBIGUOUS_SECRET;
+      for (const variant of secretVariants(secret)) {
+        needles.push({variant: variant, ambiguous: ambiguous});
       }
     }
-    return scrubbed;
+    if (!needles.length) return {text: text, ambiguous: false};
+    needles.sort((left, right) => right.variant.length - left.variant.length);
+    let out = '';
+    let ambiguous = false;
+    let index = 0;
+    while (index < text.length) {
+      let matched = null;
+      for (const needle of needles) {
+        if (text.startsWith(needle.variant, index)) { matched = needle; break; }
+      }
+      if (matched === null) {
+        out += text[index];
+        index += 1;
+        continue;
+      }
+      out += SECRET_PLACEHOLDER;
+      if (matched.ambiguous) ambiguous = true;
+      index += matched.variant.length;
+    }
+    return {text: out, ambiguous: ambiguous};
+  }
+
+  function scrubTextWithSecretValues(value, secretValues) {
+    // Free text: title, label, role, name, and structural row text. Returns
+    // NULL when Flow must withhold the text, so no caller keeps a corrupted or
+    // leaking copy.
+    if (value == null) return value;
+    if (opaqueSecretActive) return String(value) ? SECRET_PLACEHOLDER : '';
+    const result = redactSecretOccurrences(value, secretValues);
+    return result.ambiguous ? null : result.text;
   }
 
   function scrubSecretText(value) {
-    return scrubTextWithSecretValues(value, stickySecretValues);
+    return scrubTextWithSecretValues(value, retainedSecretValues());
+  }
+
+  function redactUrlToken(token, secretValues) {
+    // A URL token is a path segment, a query name, a query value, or the
+    // fragment. Redact it WHOLE. A partial rewrite inside a URL can corrupt
+    // the scheme, host, or port that Flow validates, and half a token is not
+    // evidence.
+    const text = String(token == null ? '' : token);
+    if (!text) return text;
+    if (opaqueSecretActive) return SECRET_PLACEHOLDER;
+    const result = redactSecretOccurrences(text, secretValues);
+    return result.text === text ? text : SECRET_PLACEHOLDER;
+  }
+
+  function scrubSecretUrl(href, secretValues) {
+    let parsed = null;
+    try { parsed = new URL(String(href)); } catch (e) { parsed = null; }
+    if (parsed === null || (parsed.protocol !== 'http:'
+        && parsed.protocol !== 'https:')) {
+      const scrubbed = scrubTextWithSecretValues(href, secretValues);
+      return scrubbed === null ? '' : scrubbed;
+    }
+    // The origin is the declared application origin. A typed secret never
+    // becomes the scheme, the host, or the port, and a text replace across
+    // them corrupts the origin that Flow validates. Any user information in
+    // the URL is dropped with the rest of the authority.
+    const path = parsed.pathname.split('/').map(
+      (segment) => redactUrlToken(segment, secretValues)
+    ).join('/');
+    const encode = (token) => token === SECRET_PLACEHOLDER
+      ? SECRET_PLACEHOLDER : encodeURIComponent(token);
+    let query = '';
+    try {
+      const pairs = [];
+      for (const [name, value] of new URLSearchParams(parsed.search)) {
+        pairs.push(
+          encode(redactUrlToken(name, secretValues))
+          + '=' + encode(redactUrlToken(value, secretValues))
+        );
+      }
+      if (pairs.length) query = '?' + pairs.join('&');
+    } catch (e) {
+      query = parsed.search ? '?' + SECRET_PLACEHOLDER : '';
+    }
+    const hash = parsed.hash
+      ? '#' + encode(redactUrlToken(parsed.hash.slice(1), secretValues)) : '';
+    return parsed.origin + path + query + hash;
   }
 
   function safePageState() {
     if (opaqueSecretActive) {
-      return {url: location.origin + '/', title: ''};
+      return {url: location.origin + '/', title: '', doc: DOC_ID, secret: true};
     }
+    const values = retainedSecretValues();
+    const title = scrubTextWithSecretValues(document.title, values);
     return {
-      url: scrubSecretText(location.href),
-      title: scrubSecretText(document.title),
+      url: scrubSecretUrl(location.href, values),
+      title: title === null ? '' : title,
+      doc: DOC_ID,
+      // Whether THIS document still holds a declared value. A document that
+      // holds the value can scrub itself; one that does not cannot, so Python
+      // withholds its URL and title once an earlier document held one.
+      secret: values.size > 0,
     };
   }
 
@@ -589,20 +729,45 @@ _INIT_JS = r"""
     return text ? scrubSecretText(text.slice(0, 200)) : null;
   }
 
+  function identityRefusal(value) {
+    // Why this identity attribute cannot become evidence, or null when it can.
+    const scrubbed = scrubSecretText(value);
+    if (scrubbed === null) return 'ambiguous-secret-in-identity';
+    if (scrubbed !== value) return 'secret-value-in-identity';
+    return null;
+  }
+
   function uniqueSelector(el) {
+    // Returns {selector, withheld}. `withheld` names WHY Flow refused to build
+    // identity evidence from a secret-bearing attribute. The DOM identity tier
+    // must never disarm silently, so the reason travels with the event instead
+    // of leaving a bare null selector that looks healthy.
+    let withheld = null;
     if (el.id) {
-      if (scrubSecretText(el.id) !== el.id) return null;
-      const selector = `#${CSS.escape(el.id)}`;
-      if (document.querySelectorAll(selector).length === 1) return selector;
+      const refusal = identityRefusal(el.id);
+      if (refusal !== null) {
+        withheld = refusal;
+      } else {
+        const selector = `#${CSS.escape(el.id)}`;
+        if (document.querySelectorAll(selector).length === 1) {
+          return {selector: selector, withheld: null};
+        }
+      }
     }
     for (const attr of ['data-testid', 'data-test', 'name']) {
       const value = el.getAttribute(attr);
       if (!value) continue;
-      if (scrubSecretText(value) !== value) continue;
+      const refusal = identityRefusal(value);
+      if (refusal !== null) {
+        if (withheld === null) withheld = refusal;
+        continue;
+      }
       const selector = `${el.tagName.toLowerCase()}[${attr}="${CSS.escape(value)}"]`;
-      if (document.querySelectorAll(selector).length === 1) return selector;
+      if (document.querySelectorAll(selector).length === 1) {
+        return {selector: selector, withheld: null};
+      }
     }
-    return null;
+    return {selector: null, withheld: withheld};
   }
 
   function structuralTarget(px, py, eventTarget = null) {
@@ -610,12 +775,15 @@ _INIT_JS = r"""
       refreshSecretBindings();
       const el = eventTarget || document.elementFromPoint(px, py);
       if (!el) return null;
+      const identity = uniqueSelector(el);
       const target = {
-        selector: uniqueSelector(el),
+        selector: identity.selector,
         role: targetRole(el),
         name: targetName(el),
       };
-      return (target.selector || target.role || target.name) ? target : null;
+      if (identity.withheld !== null) target.identity_withheld = identity.withheld;
+      return (target.selector || target.role || target.name
+        || identity.withheld) ? target : null;
     } catch (e) { return null; }
   }
 
@@ -658,10 +826,12 @@ _INIT_JS = r"""
       if (label) trustedSecretFieldLabels.set(el, label);
     }
     secretStates.set(el, state);
+    // The value stays inside this closure. The element reference is retained
+    // here, so a pre-filled or still-typed value is read live at scrub time
+    // and cannot enter URL, title, or structural metadata. Binding does NOT
+    // commit the value: binding runs on every input event, and committing
+    // there retains each keystroke prefix.
     stickySecretElements.add(el);
-    // The value stays inside this closure. Retain an existing value now so a
-    // pre-filled secret cannot later enter URL, title, or structural metadata.
-    rememberSecretValue(el);
     if (activate) {
       activeSecretElement = el;
       activeSecretState = state;
@@ -918,10 +1088,11 @@ _INIT_JS = r"""
     // the compile-time parameter-proposal pass; NEVER the field's value.
     try {
       if (trustedSecretFieldLabels.has(el)) {
-        return scrubTextWithSecretValues(
-          trustedSecretFieldLabels.get(el),
-          [currentSecretValue(el)]
-        );
+        // Scrub the cached label against EVERY declared secret value, not only
+        // this field's own value. Discovery walks the document in order, so a
+        // field bound before another declared field caches a label that can
+        // contain the OTHER field's pre-filled value.
+        return scrubSecretText(trustedSecretFieldLabels.get(el));
       }
       const clean = (s) => scrubSecretText(
         (s || '').replace(/\s+/g, ' ').trim()
@@ -976,6 +1147,12 @@ _INIT_JS = r"""
       const state = safePageState();
       o.url = state.url;
       o.title = state.title;
+      // The ORIGIN is structural, not evidence text: Flow already declared it,
+      // and a secret never becomes part of it. Send it beside the scrubbed URL
+      // so the origin guard never parses redacted text.
+      o.__oaflow_origin = location.origin;
+      o.__oaflow_doc = state.doc;
+      o.__oaflow_doc_holds_secret = state.secret === true;
       o.__oaflow_session = SESSION_ID;
       o.__oaflow_top_level = window === window.top;
       o.__oaflow_viewport = [Math.round(window.innerWidth),
@@ -1097,6 +1274,15 @@ _INIT_JS = r"""
     });
   });
 
+  // Commit points. After each of these the bound element can no longer take a
+  // keystroke, or the page is about to clear it or leave the document. A
+  // committed value stays scrubbable after the page empties the field. No
+  // intermediate keystroke prefix is committed here.
+  listen('change', commitSecretValues);
+  listen('focusout', commitSecretValues);
+  listen('submit', commitSecretValues);
+  listenOn(window, 'pagehide', commitSecretValues);
+
   listen('input', (e) => {
     refreshSecretBindings();
     const el = inputEventTarget(e);
@@ -1132,9 +1318,8 @@ _INIT_JS = r"""
     }
     const secretBinding = secretStateForInput(el);
     const secret = secretBinding !== null;
-    if (secret) {
-      if (!isTextEntry(el) && closedSecretHosts.has(el)) opaqueSecretActive = true;
-      rememberSecretValue(el);
+    if (secret && !isTextEntry(el) && closedSecretHosts.has(el)) {
+      opaqueSecretActive = true;
     }
     const r = (el.getBoundingClientRect && el.getBoundingClientRect())
       || { left: 0, top: 0, width: 0, height: 0 };
@@ -1231,8 +1416,10 @@ class InteractiveRecorder:
             Callable[[], Optional[list[dict[str, Any]]]]
         ] = None,
         stop_when: Optional[Callable[[], bool]] = None,
+        surface: str = "web",
     ) -> None:
         self._url = url
+        self._surface = surface
         self._out_dir = Path(out_dir)
         self._secret_fields = set(secret_fields)
         self._param_fields = set(param_fields)
@@ -1303,6 +1490,13 @@ class InteractiveRecorder:
         self._initial_attached_viewport: Optional[tuple[int, int]] = None
         self._viewport_dirty = False
         self._viewport_history: list[dict[str, Any]] = []
+        # Source-time secret boundary state. The page closure scrubs only the
+        # document that holds the secret field, because each document builds a
+        # fresh closure. Once a declared secret receives input, structural text
+        # from any LATER document is withheld instead of retained unscrubbed.
+        self._secret_doc_ids: set[str] = set()
+        self._structural_text_withheld = False
+        self._identity_withheld_events = 0
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -1680,6 +1874,18 @@ class InteractiveRecorder:
                 if self._owns_browser
                 else "openadapt-flow-playwright-cdp"
             )
+            # Stamp the surface BEFORE the atomic publish. A recording that the
+            # publish step still has to modify is not complete when it appears
+            # at the final path, and a crash in that window publishes a
+            # surface-unbound recording.
+            meta["surface"] = self._surface
+            if self._structural_text_withheld:
+                # The operator must be able to see that Flow dropped URL and
+                # title evidence, and why. Silence here would read as evidence
+                # the page simply did not have.
+                meta["structural_text_withheld"] = "secret-value-left-its-document"
+            if self._identity_withheld_events:
+                meta["identity_withheld_events"] = self._identity_withheld_events
             if not self._owns_browser:
                 assert self._initial_attached_viewport is not None
                 meta["viewport"] = list(self._initial_attached_viewport)
@@ -1929,6 +2135,9 @@ class InteractiveRecorder:
         event = dict(detail)
         if event.pop("__oaflow_session", None) != self._session_id:
             return
+        raw_event_origin = event.pop("__oaflow_origin", None)
+        raw_doc_id = event.pop("__oaflow_doc", None)
+        doc_holds_secret = event.pop("__oaflow_doc_holds_secret", None) is True
         kind = event.get("kind")
         if kind == "privacy_refusal":
             self._listener_error = BrowserAttachError(
@@ -1995,11 +2204,25 @@ class InteractiveRecorder:
             "viewport",
         }:
             return
+        self._track_secret_document(
+            kind, event, raw_doc_id, holds_secret=doc_holds_secret
+        )
         if not self._owns_browser:
+            if not isinstance(raw_event_origin, str):
+                self._listener_error = BrowserAttachError(
+                    "a browser event did not report its document origin; "
+                    "recording stopped before accepting the event"
+                )
+                self.done = True
+                return
             try:
+                # The page sends location.origin beside the scrubbed URL. The
+                # guard must never parse redacted text: a secret that shares a
+                # character with the URL would rewrite the origin and refuse a
+                # valid recording with a false diagnosis.
                 event_origin = _http_origin(
-                    str(event["url"]),
-                    label="the browser event URL",
+                    str(raw_event_origin),
+                    label="the browser event origin",
                 )
             except Exception:
                 event_origin = None
@@ -2050,6 +2273,64 @@ class InteractiveRecorder:
             self.done = True
             return
         self._pyq.append(event)
+
+    def _origin_only_url(self) -> str:
+        """The declared origin with an empty path: a URL that holds no value."""
+
+        origin = self._attached_origin
+        if origin is None:
+            try:
+                origin = _http_origin(self._url, label="the declared app URL")
+            except BrowserAttachError:
+                return ""
+        scheme, host, port = origin
+        if port == (443 if scheme == "https" else 80):
+            return f"{scheme}://{host}/"
+        return f"{scheme}://{host}:{port}/"
+
+    def _track_secret_document(
+        self,
+        kind: str,
+        event: dict[str, Any],
+        raw_doc_id: Any,
+        *,
+        holds_secret: bool = False,
+    ) -> None:
+        """Bind secret scrubbing to the document that holds the secret."""
+
+        doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
+        received_secret_input = kind == "input" and event.get("secret") is True
+        if doc_id is not None and (holds_secret or received_secret_input):
+            self._secret_doc_ids.add(doc_id)
+        for key in ("structural", "end_structural"):
+            target = event.get(key)
+            if isinstance(target, dict) and target.get("identity_withheld"):
+                self._identity_withheld_events += 1
+        if self._secret_document_left(doc_id):
+            self._withhold_structural_text(event)
+
+    def _secret_document_left(self, doc_id: Optional[str]) -> bool:
+        """True when a declared secret stayed behind in an EARLIER document.
+
+        Each document builds its own recorder closure, so a document that does
+        not hold the value cannot scrub it. A same-origin GET form submit, for
+        example, reflects the value into the next document's query string. A
+        later document that DOES hold the value scrubs itself and keeps its
+        evidence.
+        """
+
+        if not self._secret_doc_ids:
+            return False
+        return doc_id is None or doc_id not in self._secret_doc_ids
+
+    def _withhold_structural_text(self, state: dict[str, Any]) -> None:
+        """Replace URL and title evidence that Flow can no longer scrub."""
+
+        self._structural_text_withheld = True
+        if "url" in state:
+            state["url"] = self._origin_only_url()
+        if "title" in state:
+            state["title"] = ""
 
     def _cleanup_page_listeners(self) -> None:
         """Remove this session's current-document listeners before detach."""
@@ -2573,6 +2854,12 @@ class InteractiveRecorder:
             value = safe_page_state.get(key)
             if isinstance(value, str):
                 state[key] = value
+        raw_doc_id = safe_page_state.get("doc")
+        doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
+        if doc_id is not None and safe_page_state.get("secret") is True:
+            self._secret_doc_ids.add(doc_id)
+        if self._secret_document_left(doc_id):
+            self._withhold_structural_text(state)
         return state
 
     def _structural_state(self) -> dict[str, Any]:
@@ -2619,6 +2906,7 @@ def record_interactive(
         Callable[[], Optional[list[dict[str, Any]]]]
     ] = None,
     stop_when: Optional[Callable[[], bool]] = None,
+    surface: str = "web",
     **kwargs: Any,
 ) -> Path:
     """Record a live demonstration the user drives against ``url``.
@@ -2659,6 +2947,8 @@ def record_interactive(
             verifier.
         stop_when: Optional recording completion condition. It is evaluated
             after queued events are persisted and before the browser closes.
+        surface: Recorded surface stamped into ``meta.json`` before the
+            recording is published. The compiler binds the bundle to it.
 
     Returns:
         The recording directory.
@@ -2674,6 +2964,7 @@ def record_interactive(
         browser_page_url=browser_page_url,
         system_of_record_reader=system_of_record_reader,
         stop_when=stop_when,
+        surface=surface,
         **kwargs,
     )
     session.start()

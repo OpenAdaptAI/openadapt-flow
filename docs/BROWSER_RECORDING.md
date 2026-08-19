@@ -153,6 +153,17 @@ document. Treat all other URL data as sensitive recording data.
   title, label, and structural text in the same document before any event
   crosses into Python. Flow removes its marker when it detaches, including from
   a page-owned element that is no longer in the DOM.
+- Redaction never rewrites part of a URL authority and never rewrites its own
+  output. The page sends `location.origin` beside the redacted URL, so the
+  origin guard reads a value that redaction cannot touch. A URL is redacted one
+  whole token at a time (path segment, query name, query value, fragment). A
+  declared value that is too short to tell a real reflection from an ordinary
+  coincidence never produces a partial rewrite: Flow withholds that URL token,
+  or that whole title, label, or structural text, instead. Where an element's
+  own ID, `data-testid`, `data-test`, or `name` holds a declared value, Flow
+  records no DOM selector for the action and states why in the event
+  (`identity_withheld`) and in the CLI summary, so a DOM identity check can
+  never disarm silently.
 - Flow traverses and observes open shadow roots at every event boundary. If a
   shadow field can lose its name, ID, or password type before the first event,
   give the shadow host the same `--secret FIELD` name or ID. Flow then masks the
@@ -161,11 +172,16 @@ document. Treat all other URL data as sensitive recording data.
   no node content crosses into Python. Flow refuses before the first frame when
   the closed field exists but its host does not bind that declaration. It also
   refuses a later unbound shadow input before it accepts a value.
+- Each document builds its own page closure, so a closure cannot scrub a value
+  that a previous document received. Once a declared secret field receives
+  input, Flow withholds the page URL and title for every later document: a
+  same-origin GET form submit that reflects the value into the next query
+  string leaves an origin-only URL and an empty title. `meta.json` records
+  `structural_text_withheld`, and `record` prints what it withheld.
 - Source-time field handling does not track an application-defined transform of
-  a secret, a copy into an unrelated visible element, or a reflection that first
-  appears after a document navigation. Those pixels, new-document metadata, all
-  other typed values, and other visible page content are recording evidence and
-  can contain sensitive data. Keep raw recordings inside the approved local
+  a secret or a copy into an unrelated visible element. Those pixels, all other
+  typed values, and other visible page content are recording evidence and can
+  contain sensitive data. Keep raw recordings inside the approved local
   boundary.
 - Secret masks cover every frame in the selected page. Before each masked
   screenshot, Flow snapshots the frame inventory and its lifecycle generation.

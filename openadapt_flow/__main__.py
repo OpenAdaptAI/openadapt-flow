@@ -594,6 +594,10 @@ def _stamp_recording_surface(recording_dir: Path, surface: str) -> None:
     The compiler binds the compiled bundle to this exact surface. Best-effort
     by design: a recording written by an older converter without ``meta.json``
     simply compiles to a legacy, surface-unbound bundle.
+
+    A recorder that stamps the surface itself before it publishes the
+    recording leaves nothing to do here. This function then writes nothing, so
+    a complete recording is never modified after its atomic publish.
     """
     import json
 
@@ -601,6 +605,8 @@ def _stamp_recording_surface(recording_dir: Path, surface: str) -> None:
     try:
         meta = json.loads(meta_path.read_text())
     except (OSError, ValueError):
+        return
+    if meta.get("surface") == surface:
         return
     meta["surface"] = surface
     meta_path.write_text(json.dumps(meta, indent=2))
@@ -955,6 +961,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
             headless=args.headless,
             cdp_endpoint=getattr(args, "browser_cdp_endpoint", None),
             browser_page_url=getattr(args, "browser_page_url", None),
+            surface="web",
         )
     except BrowserAttachError as exc:
         raise SystemExit(f"record: browser attachment refused: {exc}") from exc
@@ -963,12 +970,48 @@ def _cmd_record(args: argparse.Namespace) -> int:
     secrets = sorted(args.secret or ())
     if secrets:
         print(
-            "Secret field(s) recorded (values NOT stored): "
+            "Secret field(s) recorded (no value stored, and each value is "
+            "redacted from the recorded URL, title, label, and structural "
+            "text): "
             + ", ".join(secrets)
             + ". At replay, export "
             + ", ".join(f"OPENADAPT_FLOW_SECRET_{name.upper()}" for name in secrets)
         )
+    for notice in _recording_privacy_notices(out):
+        print(notice)
     return 0
+
+
+def _recording_privacy_notices(recording_dir: Path) -> list[str]:
+    """Report exactly what the recorder had to withhold, or nothing.
+
+    The claim that a secret value is not stored is the claim the operator uses
+    to decide whether a recording is safe to keep or to share. Where the
+    recorder had to drop evidence to keep that claim true, say so here.
+    """
+    import json
+
+    try:
+        meta = json.loads((Path(recording_dir) / "meta.json").read_text())
+    except (OSError, ValueError):
+        return []
+    notices: list[str] = []
+    if meta.get("structural_text_withheld"):
+        notices.append(
+            "A declared secret value left its document (for example a form "
+            "submit that reflects the value into the next URL). The page "
+            "cannot scrub a later document, so Flow withheld the page URL and "
+            "title after that point. The recording holds no secret value."
+        )
+    withheld_identity = meta.get("identity_withheld_events")
+    if isinstance(withheld_identity, int) and withheld_identity > 0:
+        notices.append(
+            f"{withheld_identity} action(s) carry no DOM selector: the element "
+            "identity contained a declared secret value, so Flow refused to "
+            "record it. Replay uses the remaining identity tiers for those "
+            "actions."
+        )
+    return notices
 
 
 def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:

@@ -662,6 +662,7 @@ def test_attached_recorder_refuses_invalid_viewport_evidence(tmp_path: Path) -> 
             "__oaflow_top_level": True,
             "__oaflow_viewport": [0, 800],
             "__oaflow_dpr": 2,
+            "__oaflow_origin": "https://app.example.test",
             "kind": "click",
             "url": "https://app.example.test/work",
             "x": 10,
@@ -852,15 +853,26 @@ _CLOSED_SHADOW_HTML = b"""<!doctype html>
 </body></html>"""
 
 
+_GET_FORM_HTML = b"""<!doctype html>
+<html><head><title>Token form</title></head><body>
+  <form id="token-form" method="get" action="/">
+    <label for="token">Token</label>
+    <input id="token" name="token" type="text">
+    <button id="submit-token" type="submit">Submit</button>
+  </form>
+</body></html>"""
+
+
 @pytest.fixture(scope="module")
 def attach_app_url() -> str:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802 - stdlib callback name
-            payload = (
-                _CLOSED_SHADOW_HTML
-                if self.path.startswith("/closed-shadow")
-                else _ATTACH_HTML
-            )
+            if self.path.startswith("/closed-shadow"):
+                payload = _CLOSED_SHADOW_HTML
+            elif self.path.startswith("/get-form"):
+                payload = _GET_FORM_HTML
+            else:
+                payload = _ATTACH_HTML
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(payload)))
@@ -1188,7 +1200,16 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         endpoint = f"http://127.0.0.1:{port}"
 
         for trial in range(3):
-            secret = f"ATTACH-SECRET-{trial}-NEVER-PERSIST"
+            # Trial 1 types a LOWERCASE secret whose characters occur in the
+            # attach URL http://127.0.0.1:<port>/. An uppercase phrase shares
+            # no character with that URL, and that blind spot hid a redaction
+            # defect that rewrote the URL of every event and refused the whole
+            # recording on the first keystroke.
+            secret = (
+                "hunter2-attach-secret"
+                if trial == 1
+                else f"ATTACH-SECRET-{trial}-NEVER-PERSIST"
+            )
             secret_rect: dict[str, int] = {}
 
             def drive(page, pump, *, secret_value=secret, trial_number=trial):
@@ -2636,3 +2657,369 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Source-time secret boundary: a short keystroke prefix must not corrupt or
+# abort anything. Every OTHER live secret in this file is an uppercase phrase
+# that shares no character with an http://127.0.0.1:<port>/ URL, which hid
+# three defects. The cases below use lowercase secrets whose first characters
+# occur in the page URL, the page title, and the element identity.
+# ---------------------------------------------------------------------------
+
+
+def _page_closure_init_js(session_id: str, binding_name: str, secrets: tuple) -> str:
+    return (
+        interactive_recorder_module._INIT_JS.replace(
+            "__SESSION_ID__", json.dumps(session_id)
+        )
+        .replace("__BINDING_NAME__", json.dumps(binding_name))
+        .replace("__SECRET_NAMES__", json.dumps(list(secrets)))
+        .replace("__SECRET_MARKER__", json.dumps("data-oaflow-secret-test"))
+        .replace("__IDENT_NAMES__", "[]")
+        .replace("__SPECIAL_KEYS__", "[]")
+    )
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_url_and_identity_evidence_for_a_lowercase_secret() -> None:
+    """A typed prefix must never rewrite the URL, the title, or the identity.
+
+    Real Chromium types ``charlie1`` one character at a time into a declared
+    secret field on ``http://host.test/hospital/charts``. The prefixes ``c``,
+    ``ch``, ``cha`` and ``char`` occur in that URL, in the page title, and in
+    the id of an unrelated button.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-lowercase-test"
+    binding_name = "__oaflow_emit_lowercase_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("password",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "charlie1"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Charts home</title>"
+                        "<input id='password' name='password' type='password'>"
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/hospital/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#password")
+            page.keyboard.type(secret)
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert secret not in payload
+    assert events
+    # The origin travels beside the scrubbed URL, so the origin guard never
+    # parses redacted text. Every recorded URL stays on the real origin.
+    assert {event["__oaflow_origin"] for event in events} == {"http://host.test"}
+    # A URL is redacted by WHOLE token. While the typed prefix is still too
+    # short to identify (``char`` here) the path segment that contains it is
+    # withheld: fail closed, never a partial rewrite. The scheme, the host and
+    # the port are never rewritten, so no event leaves the declared origin.
+    assert {event["url"] for event in events} <= {
+        "http://host.test/hospital/charts",
+        "http://host.test/hospital/[secret]",
+    }
+    secret_inputs = [
+        event
+        for event in events
+        if event.get("kind") == "input" and event.get("secret") is True
+    ]
+    assert len(secret_inputs) == len(secret)
+    clicks = [event for event in events if event.get("kind") == "click"]
+    click = clicks[-1]
+    # The DOM identity tier stays armed: an unrelated button keeps its exact
+    # id and name, and nothing is withheld.
+    assert click["structural"]["selector"] == "#chart-save"
+    assert click["structural"]["name"] == "Save chart"
+    assert "identity_withheld" not in click["structural"]
+    assert click["title"] == "Charts home"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_scrubs_a_cached_label_holding_another_declared_secret() -> None:
+    """A cached field label must be scrubbed against EVERY declared secret.
+
+    Discovery walks the document in order. A declared field that appears
+    BEFORE another declared field caches its label while the other field
+    already holds a pre-filled value.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-cached-label-test"
+    binding_name = "__oaflow_emit_cached_label_test"
+    init_js = _page_closure_init_js(
+        session_id, binding_name, ("confirm-secret", "primary-secret")
+    )
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    primary = "hunter2-primary-value"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Sign in</title>"
+                        f"<label for='confirm-secret'>Confirm {primary}</label>"
+                        "<input id='confirm-secret' name='confirm-secret'"
+                        " type='password'>"
+                        "<input id='primary-secret' name='primary-secret'"
+                        f" type='password' value='{primary}'>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/sign-in")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("#confirm-secret")
+            page.keyboard.type("second-value")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert primary not in payload
+    labels = {
+        event.get("label")
+        for event in events
+        if event.get("kind") == "input" and event.get("field") == "confirm-secret"
+    }
+    assert labels == {"Confirm [secret]"}
+
+
+def test_attached_recorder_reads_the_origin_the_page_reports(tmp_path: Path) -> None:
+    """The origin guard must not parse the scrubbed URL text.
+
+    A declared secret that shares one character with the tab URL used to
+    rewrite the URL of every event, which refused the whole recording with a
+    false diagnosis on the first keystroke.
+    """
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    selected_frame = object()
+    session.page = SimpleNamespace(main_frame=selected_frame)
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": True,
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1.0,
+            "__oaflow_origin": "http://host.test",
+            "__oaflow_doc": "doc-1",
+            "kind": "click",
+            "url": "http://host.test/[secret]",
+            "x": 10,
+            "y": 20,
+        },
+        source={"page": session.page, "frame": selected_frame},
+    )
+    assert session._listener_error is None
+    assert session.done is False
+    assert len(session._pyq) == 1
+
+    # An event without a reported origin is refused, and says exactly that.
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": True,
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1.0,
+            "kind": "click",
+            "url": "http://host.test/app",
+            "x": 10,
+            "y": 20,
+        },
+        source={"page": session.page, "frame": selected_frame},
+    )
+    assert session.done is True
+    assert "did not report its document origin" in str(session._listener_error)
+
+
+def test_structural_text_is_withheld_after_a_secret_leaves_its_document(
+    tmp_path: Path,
+) -> None:
+    """A later document cannot scrub a value the previous document received."""
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    selected_frame = object()
+    session.page = SimpleNamespace(main_frame=selected_frame)
+
+    def send(doc_id: str, event: dict) -> None:
+        session._enqueue_browser_event(
+            {
+                "__oaflow_session": session._session_id,
+                "__oaflow_top_level": True,
+                "__oaflow_viewport": [1280, 800],
+                "__oaflow_dpr": 1.0,
+                "__oaflow_origin": "http://host.test",
+                "__oaflow_doc": doc_id,
+                **event,
+            },
+            source={"page": session.page, "frame": selected_frame},
+        )
+
+    send(
+        "doc-1",
+        {
+            "kind": "input",
+            "field": "token",
+            "secret": True,
+            "__oaflow_secret_mask_bound": True,
+            "__oaflow_input_session": f"{session._session_id}:input:1",
+            "url": "http://host.test/app",
+            "title": "App",
+        },
+    )
+    assert session._listener_error is None
+    # The same document still scrubs at the source, so its evidence stays.
+    assert session._pyq[-1]["url"] == "http://host.test/app"
+    send(
+        "doc-2",
+        {"kind": "click", "url": "http://host.test/?token=hunter2", "title": "Done"},
+    )
+    assert session._listener_error is None
+    assert session._pyq[-1]["url"] == "http://host.test/"
+    assert session._pyq[-1]["title"] == ""
+    assert session._structural_text_withheld is True
+
+
+def test_recording_privacy_notices_report_what_flow_withheld(tmp_path: Path) -> None:
+    """The operator decides on the recording from exactly these lines."""
+
+    from openadapt_flow.__main__ import _recording_privacy_notices
+
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    assert _recording_privacy_notices(recording) == []
+    (recording / "meta.json").write_text(
+        json.dumps({"surface": "web", "identity_withheld_events": 2})
+    )
+    (notice,) = _recording_privacy_notices(recording)
+    assert "no DOM selector" in notice
+    (recording / "meta.json").write_text(
+        json.dumps(
+            {
+                "surface": "web",
+                "structural_text_withheld": "secret-value-left-its-document",
+            }
+        )
+    )
+    (notice,) = _recording_privacy_notices(recording)
+    assert "withheld the page URL and title" in notice
+
+
+def test_stamping_a_recorded_surface_does_not_rewrite_a_published_recording(
+    tmp_path: Path,
+) -> None:
+    """The recorder stamps the surface, so the publish step writes nothing."""
+
+    from openadapt_flow.__main__ import _stamp_recording_surface
+
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    meta_path = recording / "meta.json"
+    meta_path.write_text(json.dumps({"surface": "web", "source": "test"}))
+    before = meta_path.read_bytes()
+    _stamp_recording_surface(recording, "web")
+    assert meta_path.read_bytes() == before
+    _stamp_recording_surface(recording, "windows")
+    assert json.loads(meta_path.read_text())["surface"] == "windows"
+
+
+@pytest.mark.timeout(120)
+def test_launched_recording_withholds_url_evidence_after_a_get_form_submit(
+    attach_app_url: str,
+    tmp_path: Path,
+) -> None:
+    """A same-origin GET submit reflects the typed secret into the next URL.
+
+    The next document builds a fresh recorder closure, so the page cannot
+    scrub that value. Flow withholds the URL and the title instead, stamps the
+    surface before it publishes, and reports both to the operator.
+    """
+
+    if _chromium_executable() is None:
+        pytest.skip("no Chromium executable is installed")
+    secret = "hunter2-token-value"
+
+    def drive(page, pump):
+        page.click("#token")
+        pump()
+        page.keyboard.type(secret)
+        pump()
+        pump()
+        page.click("#submit-token")
+        pump()
+        pump()
+
+    recording = record_interactive(
+        f"{attach_app_url}get-form",
+        tmp_path / "recording-get-form",
+        secret_fields=("token",),
+        headless=True,
+        script=drive,
+    )
+    body = "\n".join(
+        path.read_text(errors="replace") for path in sorted(recording.glob("*.json*"))
+    )
+    assert secret not in body
+    assert "token=" not in body
+    meta = json.loads((recording / "meta.json").read_text())
+    # Stamped before the atomic publish, not mutated afterwards.
+    assert meta["surface"] == "web"
+    assert meta["structural_text_withheld"] == "secret-value-left-its-document"
+    from openadapt_flow.__main__ import _recording_privacy_notices
+
+    assert any(
+        "withheld the page URL and title" in notice
+        for notice in _recording_privacy_notices(recording)
+    )

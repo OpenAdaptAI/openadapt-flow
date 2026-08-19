@@ -327,10 +327,13 @@ openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
 This source-time contract does not track an application-defined transform of a
-secret, an application copy into an unrelated visible element, or a reflection
-that first appears after a document navigation. Those pixels and new-document
-metadata remain raw recording evidence. Keep every raw recording inside its
-approved local boundary.
+secret or an application copy into an unrelated visible element. Those pixels
+remain raw recording evidence. A page closure cannot scrub a document it no
+longer owns, so once a declared secret has received input, Flow withholds the
+page URL and title for every later document: a same-origin form submit that
+reflects the value into the next query string leaves an origin-only URL and an
+empty title, and the CLI reports what it withheld. Keep every raw recording
+inside its approved local boundary.
 
 **Compiled is not the same as certified safe.** `lint` reports a bundle's
 coverage gaps (clicks that act with no identity check, steps that assert

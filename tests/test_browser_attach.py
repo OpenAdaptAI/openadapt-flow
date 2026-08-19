@@ -3026,3 +3026,75 @@ def test_launched_recording_withholds_url_evidence_after_a_get_form_submit(
         "withheld the page URL and title" in notice
         for notice in _recording_privacy_notices(recording)
     )
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_evidence_when_a_secret_input_swaps_its_node() -> None:
+    """A controlled input that swaps its node per keystroke leaves prefixes.
+
+    Each removed node keeps the value it held. Those are keystroke prefixes of
+    the value the page still holds, and treating them as declared values would
+    withhold unrelated evidence on a chance match. The complete value stays
+    redacted.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-swap-test"
+    binding_name = "__oaflow_emit_swap_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("swap-secret",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "charlie1"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            executable_path=str(executable),
+            headless=True,
+            args=["--no-sandbox"],
+        )
+        try:
+            page = browser.new_page()
+            page.route(
+                "http://host.test/**",
+                lambda route: route.fulfill(
+                    content_type="text/html",
+                    body=(
+                        "<title>Charts home</title>"
+                        "<input id='swap-secret' name='swap-secret'"
+                        " type='password' oninput=\""
+                        "const next = document.createElement('input');"
+                        "next.name = 'swap-secret';"
+                        "next.type = 'password';"
+                        "next.setAttribute('oninput',"
+                        " this.getAttribute('oninput'));"
+                        "next.value = this.value;"
+                        "this.replaceWith(next);"
+                        "next.focus();"
+                        '">'
+                        "<button id='chart-save'>Save chart</button>"
+                    ),
+                ),
+            )
+            page.goto("http://host.test/hospital/charts")
+            page.expose_binding(
+                binding_name,
+                lambda _source, detail: events.append(detail),
+            )
+            page.evaluate(init_js)
+            page.click("[name='swap-secret']")
+            page.keyboard.type(secret)
+            page.click("#chart-save")
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    payload = json.dumps(events)
+    assert secret not in payload
+    clicks = [event for event in events if event.get("kind") == "click"]
+    click = clicks[-1]
+    assert click["structural"]["selector"] == "#chart-save"
+    assert click["structural"]["name"] == "Save chart"
+    assert "identity_withheld" not in click["structural"]
+    assert click["url"] == "http://host.test/hospital/charts"

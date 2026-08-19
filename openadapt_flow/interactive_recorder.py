@@ -402,7 +402,12 @@ _INIT_JS = r"""
   const inputSessions = new WeakMap();
   const trustedSecretFieldLabels = new WeakMap();
   const stickySecretElements = new Set();
-  const stickySecretValues = new Set();
+  // Committed values, keyed by INPUT SESSION. The session is the unit that
+  // makes a keystroke prefix recognisable: every node a controlled input swaps
+  // in shares one session, so the shorter values of that session are prefixes
+  // of its longest one. Two declared fields never share a session, so one
+  // field's value can never suppress another's.
+  const secretValuesBySession = new Map();
   const observedSecretRoots = new WeakSet();
   const ambiguousSecretReplacements = new WeakSet();
   let nextInputSession = 0;
@@ -445,7 +450,7 @@ _INIT_JS = r"""
       try { el.removeAttribute(SECRET_MARKER); } catch (e) {}
     }
     stickySecretElements.clear();
-    stickySecretValues.clear();
+    secretValuesBySession.clear();
     activeSecretElement = null;
     activeSecretState = null;
     const current = window[GLOBAL_KEY];
@@ -497,14 +502,31 @@ _INIT_JS = r"""
     return '';
   }
 
+  function secretSessionFor(el) {
+    // The DECLARED FIELD is the grouping unit where it exists: a controlled
+    // input that swaps its node keeps the declared name but takes a new input
+    // session on each swap, so the session alone cannot recognise its own
+    // prefixes. Two declared fields never share a name, so one field's value
+    // can never suppress another's.
+    const state = secretStates.get(el) || closedSecretHosts.get(el) || null;
+    if (state && state.field) return 'field:' + String(state.field);
+    if (state && state.inputSession) return 'session:' + state.inputSession;
+    return 'session:' + inputSessionFor(el);
+  }
+
+  function addSessionValue(bySession, session, value) {
+    let values = bySession.get(session);
+    if (!values) { values = new Set(); bySession.set(session, values); }
+    values.add(value);
+  }
+
   function rememberSecretValue(el) {
-    // COMMIT POINT ONLY. Call this where the element can no longer receive a
-    // keystroke, or the page is about to clear it or leave the document. An
-    // intermediate keystroke prefix is never committed: a one or two character
-    // prefix matches unrelated identity text, and a global replace keyed on it
-    // corrupts selectors, labels, titles, and the recorded URL.
+    // COMMIT POINT ONLY. Call this where the page is about to clear the field
+    // or leave the document, so a value stays scrubbable after it disappears
+    // from the DOM. The value is filed under its input session, because a
+    // commit point can also fire in the middle of typing.
     const value = currentSecretValue(el);
-    if (value) stickySecretValues.add(value);
+    if (value) addSessionValue(secretValuesBySession, secretSessionFor(el), value);
   }
 
   function commitSecretValues() {
@@ -515,12 +537,29 @@ _INIT_JS = r"""
     // Committed values, plus the CURRENT value of every bound secret element
     // read at scrub time and never retained. The live read covers an
     // as-you-type reflection without keeping the prefixes that produced it.
-    const values = new Set(stickySecretValues);
-    for (const el of stickySecretElements) {
-      const live = currentSecretValue(el);
-      if (live) values.add(live);
+    const bySession = new Map();
+    for (const [session, values] of secretValuesBySession) {
+      for (const value of values) addSessionValue(bySession, session, value);
     }
-    return values;
+    for (const el of stickySecretElements) {
+      const value = currentSecretValue(el);
+      if (value) addSessionValue(bySession, secretSessionFor(el), value);
+    }
+    const retained = new Set();
+    for (const values of bySession.values()) {
+      const all = Array.from(values);
+      for (const value of all) {
+        // Drop a value that another value of the SAME input session continues:
+        // it is a keystroke prefix of that session's value, not a declared
+        // value of its own. The complete value is still redacted, and keeping
+        // every prefix would withhold unrelated evidence on a chance match.
+        const continued = all.some(
+          (other) => other !== value && other.startsWith(value)
+        );
+        if (!continued) retained.add(value);
+      }
+    }
+    return retained;
   }
 
   function secretVariants(secret) {

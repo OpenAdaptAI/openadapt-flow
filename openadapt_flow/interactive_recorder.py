@@ -497,9 +497,13 @@ _INIT_JS = r"""
   // samples at the settled boundary, nothing in the DOM holds the value, so
   // every other source is empty and the reflected text would be reported.
   //
-  // Because it is replaced rather than accumulated, the value here at any
-  // sample is the one the operator stopped on, not a keystroke prefix: a
-  // password beginning with an ordinary word never leaves that word behind.
+  // It is REPLACED, never accumulated, so this is not a ladder of past values
+  // and a password beginning with an ordinary word never leaves that word
+  // behind. It is literally the value carried by the last `input` event on
+  // that element -- NOT "the value the operator stopped on". A page that
+  // consumes the value mid-stream leaves whatever was typed next, which is
+  // exactly why a second scan into the same field must not displace the first
+  // value while the first is still on show.
   const lastSecretValues = new WeakMap();
   let eventsStopped = false;
   let cleaned = false;
@@ -660,17 +664,33 @@ _INIT_JS = r"""
 
   function identityMatchValues() {
     // Every value Flow may use to WITHHOLD text. Never to rewrite it.
+    //
+    // The cached value is added PER ELEMENT, whenever THAT element holds
+    // nothing right now. An earlier revision instead skipped the whole cache
+    // as soon as ANY declared field held anything, so a second scan into the
+    // same cleared field, or a second declared field holding a PIN, re-exposed
+    // the first value that was still sitting in the URL. The document-wide
+    // guard was the defect; the per-element test is the same idea applied
+    // where it belongs.
+    //
+    // CONNECTED and empty: always add. That is the page that consumed its own
+    // field -- a scanner writing the badge into the URL and clearing the input
+    // -- and the element is still there to speak for.
+    //
+    // DETACHED: add only when NO connected bound element holds anything. A
+    // page that REMOVED its field leaves the value nowhere else, so it must be
+    // added. A controlled input that SWAPS its node leaves a trail of detached
+    // elements that still report `c`, `ch`, `cha`, and adding those would
+    // withhold any text containing a one-letter match -- but in that case a
+    // connected successor does hold the value, so this test excludes them.
     const values = liveSecretValues();
-    if (values.size === 0) {
-      // NOTHING in this document holds a declared value any more: the page
-      // cleared its own field, or removed it. Only then does the last observed
-      // value come into play. While a bound element still holds something, the
-      // live value is the truth and a detached node's leftover is a keystroke
-      // prefix that would withhold unrelated evidence on a chance match.
-      for (const el of stickySecretElements) {
-        const last = lastSecretValues.get(el);
-        if (last) values.add(last);
-      }
+    const anythingLive = values.size > 0;
+    for (const el of stickySecretElements) {
+      const connected = isConnectedElement(el);
+      if (connected && currentSecretValue(el)) continue;
+      if (!connected && anythingLive) continue;
+      const last = lastSecretValues.get(el) || (connected ? '' : currentSecretValue(el));
+      if (last) values.add(last);
     }
     for (const value of committedSecretValues) values.add(value);
     for (const value of inboundSecretParameterValues()) values.add(value);
@@ -1817,7 +1837,36 @@ _INIT_JS = r"""
       // does both in that handler; this is the last moment the DOM still holds
       // the value. Replace, never accumulate.
       const observed = currentSecretValue(el);
-      if (observed) lastSecretValues.set(el, observed);
+      if (observed) {
+        // The cache holds ONE value per element and this is about to replace
+        // it. A value that the next one does not CONTINUE was not edited away
+        // by the operator -- the page took it and started the field over. A
+        // scanner that writes the badge into the URL and clears the field does
+        // exactly that, and the first badge is still on show while the second
+        // is being typed. Promote it to the withhold-only committed set, which
+        // is not per element, so the second scan cannot displace the first.
+        //
+        // This cannot promote a keystroke prefix: while the operator types,
+        // each value continues the one before it. It is checked here, at the
+        // next input event, rather than at a microtask checkpoint after this
+        // one -- a checkpoint runs BETWEEN listeners, so it would observe the
+        // field before the page's own handler had cleared it.
+        const previous = lastSecretValues.get(el);
+        if (previous && previous !== observed && observed.indexOf(previous) !== 0) {
+          committedSecretValues.add(previous);
+        }
+        lastSecretValues.set(el, observed);
+        // ARM THE DOCUMENT BOUNDARY HERE, not from what the DOM holds at the
+        // settled read. A scanner that clears its own field inside its own
+        // `input` handler never holds a value at any moment Python samples, so
+        // a flag derived from the live DOM stayed false for the whole
+        // recording: the title net never ran, and Python never learned that
+        // this document had received a declared value at all. This is the
+        // moment the document PROVABLY held one, and it is what the
+        // documentation already says -- "once a declared secret field RECEIVES
+        // INPUT".
+        documentHeldSecretValue = true;
+      }
     }
     if (secret && !isTextEntry(el) && closedSecretHosts.has(el)) {
       opaqueSecretActive = true;
@@ -2826,7 +2875,7 @@ class InteractiveRecorder:
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         received_secret_input = kind == "input" and event.get("secret") is True
         if doc_id is not None and (holds_secret or received_secret_input):
-            self._secret_doc_ids.add(doc_id)
+            self._mark_secret_document(doc_id)
         # Count the action ONCE, whichever identity evidence Flow withheld: a
         # selector, an accessible name or role, the receiving field's name, or
         # the clicked row's identity characters. Each one disarms an identity
@@ -2846,6 +2895,22 @@ class InteractiveRecorder:
         # from a document whose reflected text Flow could no longer prove safe.
         if self._secret_document_left(doc_id):
             self._note_withheld_structural_text("secret-value-left-its-document")
+
+    def _mark_secret_document(self, doc_id: str) -> None:
+        """Record that this document received a declared value.
+
+        BOTH markers move together. An earlier revision added to
+        ``_secret_doc_ids`` from the input-event path but set
+        ``_first_secret_doc_id`` only from the settled page read, so a document
+        that never HELD a value at a sampling instant -- a scanner that clears
+        its own field inside its own ``input`` handler -- reached
+        ``_secret_doc_ids`` while the marker the cross-document rule keys off
+        stayed ``None``. Every later document then reported its URL.
+        """
+
+        self._secret_doc_ids.add(doc_id)
+        if self._first_secret_doc_id is None:
+            self._first_secret_doc_id = doc_id
 
     def _secret_document_left(self, doc_id: Optional[str]) -> bool:
         """True for every document AFTER the one that first held a value.
@@ -3419,9 +3484,7 @@ class InteractiveRecorder:
         raw_doc_id = safe_page_state.get("doc")
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         if doc_id is not None and safe_page_state.get("secret") is True:
-            self._secret_doc_ids.add(doc_id)
-            if self._first_secret_doc_id is None:
-                self._first_secret_doc_id = doc_id
+            self._mark_secret_document(doc_id)
         for key in ("url_withheld", "title_withheld"):
             reason = safe_page_state.get(key)
             if isinstance(reason, str) and reason:

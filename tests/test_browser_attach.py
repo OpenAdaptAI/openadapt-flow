@@ -4695,3 +4695,216 @@ def test_page_closure_withholds_a_selector_built_from_an_inbound_value() -> None
     click = [event for event in events if event.get("kind") == "click"][-1]
     assert click["structural"]["selector"] is None
     assert click["structural"]["identity_withheld"] == "secret-value-in-identity"
+
+
+# ---------------------------------------------------------------------------
+# Round-6: a page that CONSUMES its own field.
+#
+# A scanner input writes the badge into the URL and clears the field inside its
+# own `input` handler. Nothing in the DOM holds the value at any moment Python
+# samples. Each test below FAILS at d1a762e and passes here.
+# ---------------------------------------------------------------------------
+
+
+_SCANNER_BODY = (
+    "<title>Scan station</title>"
+    "<input id='token' name='token' type='text' autocomplete='off'>"
+    "<button id='next'>Next</button>"
+    "<script>const el = document.getElementById('token');"
+    "el.addEventListener('input', () => {"
+    "  if (el.value.length >= 15) {"
+    "    history.replaceState({}, '', '/scan/' + el.value);"
+    "    document.title = 'Scan ' + el.value;"
+    "    el.value = '';"
+    "  }"
+    "});</script>"
+)
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_a_title_a_consumed_field_produced() -> None:
+    """F1. The title branch was gated on a flag the live DOM never set.
+
+    `documentHeldSecretValue` was derived from what a bound field HOLDS at a
+    sample. A field the page clears inside its own `input` handler holds
+    nothing at every sample, so the flag stayed false for the whole recording
+    and the title check was never reached, while the URL check ran regardless.
+    The flag is now armed in the capture-phase `input` handler, which is the
+    moment the document provably held a value -- and is what the documentation
+    already said: "once a declared secret field RECEIVES INPUT".
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-consumed-title-test"
+    binding_name = "__oaflow_emit_consumed_title_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    from playwright.sync_api import sync_playwright
+
+    secret = "hunter2-primary"
+    with sync_playwright() as playwright:
+        browser, page = _closure_page(
+            playwright,
+            executable,
+            _SCANNER_BODY,
+            "http://host.test/station",
+            session_id,
+        )
+        try:
+            page.expose_binding(binding_name, lambda _source, _detail: None)
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(secret)
+            page.wait_for_timeout(50)
+            state = _sample_reflected_state(page, session_id)
+            raw = page.evaluate("() => [location.href, document.title]")
+        finally:
+            browser.close()
+
+    # The page really is showing the value in both channels.
+    assert raw == [f"http://host.test/scan/{secret}", f"Scan {secret}"]
+    assert secret not in json.dumps(state)
+    assert state["secret"] is True
+    assert state["title"] == ""
+    assert state["title_withheld"] == "declared-value-in-title"
+    assert state["url_withheld"] == "declared-value-in-url"
+
+
+def test_an_input_event_alone_arms_the_cross_document_boundary(
+    tmp_path: Path,
+) -> None:
+    """F2. Both document markers must move together.
+
+    `_track_secret_document` added to `_secret_doc_ids` from the input event
+    but set `_first_secret_doc_id` only from the settled page read. A document
+    that never HELD a value at a sampling instant therefore reached one marker
+    and not the other, and the cross-document rule -- which keys off the second
+    -- never engaged, so every later document reported its URL.
+    """
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    selected_frame = object()
+    session.page = SimpleNamespace(main_frame=selected_frame)
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": True,
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1.0,
+            "__oaflow_origin": "http://host.test",
+            "__oaflow_doc": "doc-1",
+            "__oaflow_doc_holds_secret": False,
+            "kind": "input",
+            "field": "token",
+            "secret": True,
+            "__oaflow_secret_mask_bound": True,
+            "__oaflow_input_session": f"{session._session_id}:input:1",
+        },
+        source={"page": session.page, "frame": selected_frame},
+    )
+    assert session._listener_error is None
+    assert session._secret_doc_ids == {"doc-1"}
+    assert session._first_secret_doc_id == "doc-1"
+    # A later document is therefore withheld, which is the whole point.
+    assert session._secret_document_left("doc-2") is True
+    assert session._secret_document_left("doc-1") is False
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_a_consumed_value_across_a_second_entry() -> None:
+    """F3. One field, two scans.
+
+    Badge one is consumed into the URL and the field is cleared; the operator
+    starts badge two. The per-element cache holds ONE value and badge two was
+    about to displace badge one while badge one was still on show. A value the
+    next one does not CONTINUE was not edited away by the operator -- the page
+    took it -- so it is promoted into the withhold-only committed set, which is
+    not per element.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-two-scans-test"
+    binding_name = "__oaflow_emit_two_scans_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    from playwright.sync_api import sync_playwright
+
+    first = "hunter2-primary"
+    with sync_playwright() as playwright:
+        browser, page = _closure_page(
+            playwright,
+            executable,
+            _SCANNER_BODY,
+            "http://host.test/station",
+            session_id,
+        )
+        try:
+            page.expose_binding(binding_name, lambda _source, _detail: None)
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(first)
+            page.wait_for_timeout(30)
+            page.keyboard.type("beta9t")  # badge two, still live
+            page.wait_for_timeout(50)
+            state = _sample_reflected_state(page, session_id)
+            live = page.evaluate("() => document.getElementById('token').value")
+        finally:
+            browser.close()
+
+    assert live == "beta9t", "badge two must still be live for this to be the case"
+    assert first not in json.dumps(state)
+    assert state["url_withheld"] == "declared-value-in-url"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_keeps_a_consumed_value_while_another_field_is_live() -> None:
+    """F4. Two declared fields.
+
+    The first is consumed into the URL and cleared; the second still holds a
+    PIN. The cache used to be skipped for the WHOLE document as soon as
+    anything held a value, so the same URL was withheld before the PIN was
+    typed and reported afterwards. The test is per element now.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-two-fields-test"
+    binding_name = "__oaflow_emit_two_fields_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token", "pin"))
+    from playwright.sync_api import sync_playwright
+
+    first = "hunter2-primary"
+    body = _SCANNER_BODY.replace(
+        "<button id='next'>Next</button>",
+        "<input id='pin' name='pin' type='text'><button id='next'>Next</button>",
+    )
+    with sync_playwright() as playwright:
+        browser, page = _closure_page(
+            playwright, executable, body, "http://host.test/station", session_id
+        )
+        try:
+            page.expose_binding(binding_name, lambda _source, _detail: None)
+            page.evaluate(init_js)
+            page.click("#token")
+            page.keyboard.type(first)
+            page.wait_for_timeout(30)
+            before_pin = _sample_reflected_state(page, session_id)
+            page.click("#pin")
+            page.keyboard.type("4821")
+            page.wait_for_timeout(50)
+            after_pin = _sample_reflected_state(page, session_id)
+        finally:
+            browser.close()
+
+    # The SAME URL, withheld before the PIN and withheld after it. A second
+    # declared field holding a value says nothing about the first field's.
+    assert before_pin["url_withheld"] == "declared-value-in-url"
+    assert first not in json.dumps(after_pin)
+    assert after_pin["url_withheld"] == "declared-value-in-url"

@@ -252,15 +252,29 @@ secret field. Treat all other URL data as sensitive recording data.
   `meta.json` records every distinct reason in `structural_text_withheld`, and
   `url_dropped_params` records a dropped parameter only for a URL Flow actually
   reports; `record` prints one line for each.
-- Matching for IDENTITY text considers four sources, and all four only ever
-  WITHHOLD: what a bound field holds now; what a bound field held at a COMMIT
-  POINT (`change`, `focusout`, `submit`, `pagehide`); the LAST value a bound
-  field was seen holding, which applies only when nothing in the document holds
-  a value any more, and which covers a page that clears or removes its own
-  field inside its own `input` handler; and an inbound declared parameter
-  value. Comparison is case-insensitive, because upper-casing an identifier
-  before showing it is normalisation rather than a transform. Every identity
-  path uses this same set, including the DOM selector. The commit point is what covers a single-page wizard that
+- Matching considers four sources, and all four only ever WITHHOLD:
+  - what a bound field holds now;
+  - what a bound field held at a COMMIT POINT (`change`, `focusout`, `submit`,
+    `pagehide`), plus any value the page took from a field and started that
+    field over from — a value the next one does not CONTINUE was not edited
+    away by the operator;
+  - the LAST value each bound field was seen holding, added per element when
+    that element holds nothing right now. A detached element is added only when
+    no connected bound field holds anything, so a page that REMOVED its field
+    is covered while a controlled input that SWAPS its node does not contribute
+    the trail of one- and two-character values its discarded nodes still
+    report;
+  - an inbound declared parameter value.
+
+  Comparison is case-insensitive, because upper-casing an identifier before
+  showing it is normalisation rather than a transform. Every identity path uses
+  this same set, including the DOM selector.
+- A page that CONSUMES its own field — a scanner that writes the badge into the
+  URL and clears the input inside the same `input` handler — holds nothing at
+  any moment Flow samples. Flow arms the document's secret boundary from the
+  `input` event itself rather than from what the DOM holds at a sample, so such
+  a document is treated as having received a declared value, its title is
+  checked, and every later document is withheld. The commit point is what covers a single-page wizard that
   removes its form and renders the value into a summary row. A commit is
   decided at the microtask checkpoint, so a controlled input that fires
   focusout on the node it just replaced commits no keystroke prefix. A spurious

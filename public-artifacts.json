@@ -605,7 +605,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "b566e24aedbdd74006cab8cd728505f752817470f04d920bc75ec1dd8bc78098"
+      "sha256": "ec4c558f3de5e8b7dfad20e0d1e7c1a1dc4df98164737341492a3a55e93dea48"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -1813,7 +1813,7 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "0ce335b61890a936568117bdd20b9befc604bb4f0ec966068a9829c7e708668a"
+      "sha256": "a1e524549e39e30d88998426c8eafcee2ce1e3ab5c955b8a485b980f853c397b"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

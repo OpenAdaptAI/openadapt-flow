@@ -334,12 +334,21 @@ replay compares it against the live page and a rewritten copy would compare
 against text the page never showed. **Reflected evidence** — the page URL and
 the title — is sampled from Python once the page has settled, never inside the
 capture-phase listener, which runs before the page's own handlers and so reads
-the previous action's text. Flow reports it only while it has not changed since
-before that document held any declared value; a page that writes the value into
-its URL or title therefore yields an origin-only URL and an empty title rather
-than a guess. The same applies to every later document, because each document
-builds a fresh closure that never saw the value. `meta.json` records what was
-withheld and why, and the CLI prints it.
+the previous action's text.
+
+A URL is reduced by **structure**: Flow reports the origin and the path, keeps
+every parameter name, and drops the value of any parameter named after a
+declared secret field — deterministically, whatever the value is. A same-origin
+form submit carries a field under its own name, so that channel closes by name
+rather than by searching for a value. A dropped value becomes empty; Flow
+removes characters from a URL and never adds characters the page did not show.
+If the URL Flow is about to report still holds a value Flow can see, it
+withholds the whole URL and warns you that the application put a secret in its
+own URL — a defect that exposes it through browser history, logs, proxies and
+`Referer` headers with or without Flow. A title has no structure to reduce, so
+it is reported only while unchanged since before that document held a value.
+`meta.json` records every dropped parameter and everything withheld, and the
+CLI prints it.
 
 This source-time contract does not track an application-defined transform of a
 secret or an application copy into an unrelated visible element, and it starts

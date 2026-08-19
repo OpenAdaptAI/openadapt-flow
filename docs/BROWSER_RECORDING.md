@@ -91,10 +91,10 @@ Diagnostic messages omit URL query and fragment values. The exact selector is
 used only to bind the requested tab and is not stored as separate attachment
 metadata. The CDP endpoint is not stored. The normal recording evidence does
 retain the declared app URL and each observed page URL before and after an
-action. Those URLs can contain query or fragment values. Once a declared secret
-field holds a value, Flow reports that document's URL and title only while
-neither has changed since before the value existed, and withholds both
-otherwise. Treat all other URL data as sensitive recording data.
+action. Those URLs can contain query or fragment values. Flow reduces every
+recorded URL by structure: it reports the origin and the path, keeps every
+parameter name, and drops the value of any parameter named after a declared
+secret field. Treat all other URL data as sensitive recording data.
 
 ## Safety and privacy contract
 
@@ -181,13 +181,43 @@ otherwise. Treat all other URL data as sensitive recording data.
   from Python at the settled boundary, the same boundary that captures the
   after-frame. The in-page listeners run in the capture phase, before the
   page's own handlers, so any URL or title they read describes the state before
-  the action; they therefore emit none. Flow reports reflected text only while
-  it has not changed since before that document held any declared value, and so
-  cannot be a reflection of that value. Any other reflected text is withheld
-  whole: an origin-only URL and an empty title. A page that writes the value
-  into its URL or title on a timer can show a version the field no longer
-  holds, and no rule that reads only the current DOM can tell that apart from
-  ordinary page text, so Flow refuses rather than guesses.
+  the action; they therefore emit none.
+- **A URL is structure, not one opaque string.** Flow parses it and reports:
+  - the **origin** and the **path**, always. A path change is the single-page
+    application case, and a path is app-controlled structure rather than
+    operator input. Reporting it is what keeps URL evidence usable for a whole
+    session after a login.
+  - every parameter **name**, in the query and in a `key=value` fragment.
+  - a parameter **value**, unless Flow drops it. A value is dropped when the
+    parameter's NAME is a declared `--secret FIELD` name, or the `name` or `id`
+    of any field Flow bound (which includes every auto-detected
+    `input[type=password]`). That drop is deterministic and never looks at the
+    value, so it holds whatever the operator typed. A same-origin GET submit
+    carries a field under its own name, so this closes that channel by
+    structure. Sentry and Datadog redact URLs the same way, by parameter name,
+    for the same reason: searching for a value inside arbitrary text does not
+    work. A value is also dropped when Flow cannot prove it predates the moment
+    this document first held a declared value. Only that ONE value is dropped;
+    the rest of the URL stays exact.
+  - **Nothing is invented.** A dropped value becomes empty. Flow removes
+    characters from a URL; it never adds characters the page did not show.
+    `meta.json` lists every dropped parameter name and why, and `record` prints
+    it.
+- **The net, which is a detection and never a rewrite.** If the URL Flow is
+  about to report still holds a value Flow can see, Flow withholds the WHOLE
+  URL, marks it, and warns the operator that the application put a declared
+  secret into its own URL. That warning matters on its own: OWASP notes such a
+  value is already exposed through browser history, server logs, proxies, CDNs
+  and the `Referer` header, with or without Flow. The net checks a path segment
+  in both containment directions, so a page that writes the field into its path
+  as the operator types cannot leave a segment behind. Matching is sound here
+  and was not sound in earlier revisions of this file: this check now runs only
+  from Python at the settled boundary, where the page has processed the action,
+  so it needs no history of previous values. The direction is fail-safe -- a
+  match withholds, so a false positive costs evidence and can never leak.
+- **The title has no structure to exploit.** Flow reports it while it has not
+  changed since before that document held any declared value, withholds it
+  otherwise, and applies the same net.
 - The page sends `location.origin` beside each event. The origin guard reads
   that value and never the reflected text, so withholding a URL never weakens
   the origin refusal.
@@ -201,31 +231,42 @@ otherwise. Treat all other URL data as sensitive recording data.
   refuses a later unbound shadow input before it accepts a value.
 - Each document builds its own page closure, so a closure never saw a value a
   previous document received. Once a declared secret field receives input, Flow
-  withholds the page URL and title for every later document: a same-origin GET
-  form submit that reflects the value into the next query string leaves an
-  origin-only URL and an empty title. `meta.json` records every distinct reason
-  in `structural_text_withheld`, and `record` prints one line for each.
-- Withholding reflected text costs evidence, and the cost is stated here. A
-  page that changes its URL or title after a declared secret field has held a
-  value reports an origin-only URL and an empty title for the rest of that
-  document, whether or not the change had anything to do with the value. A
-  single-page application that routes after a password entry is the common
-  case. Identity evidence, action coordinates, and the recorded before/after
-  frames are unaffected, so replay keeps its strongest identity tiers.
+  withholds every LATER document's TITLE. Its URL survives, because the URL is
+  reduced by structure: a same-origin GET submit carries the value under the
+  field's own name, and that parameter loses its value in every document. A
+  later document also recovers the value of any inbound query or fragment
+  parameter whose NAME is declared and uses it to withhold identity text there,
+  which is how a results page that prints the value into a row is caught.
+  `meta.json` records every distinct reason in `structural_text_withheld` and
+  every dropped parameter in `url_dropped_params`; `record` prints one line for
+  each.
+- Matching for IDENTITY text considers three sources, and all three only ever
+  WITHHOLD: what a bound field holds now, what a bound field held at a COMMIT
+  POINT (`change`, `focusout`, `submit`, `pagehide`), and an inbound declared
+  parameter value. The commit point is what covers a single-page wizard that
+  removes its form and renders the value into a summary row. A commit is
+  decided at the microtask checkpoint, so a controlled input that fires
+  focusout on the node it just replaced commits no keystroke prefix. A spurious
+  match here can only withhold; it cannot corrupt evidence and it cannot leak,
+  which is why this is safe where a rewriting rule was not. The URL and the
+  title never use a committed value for their unchanged-or-withhold proof.
+- **What this still costs.** A title is withheld for the rest of a document
+  once it changes after a declared field has held a value, and for every
+  document after that one. A parameter value Flow cannot prove predates the
+  value is dropped even when it is unrelated. Identity text is withheld
+  whenever it contains a value Flow can see, including by coincidence. Identity
+  evidence, action coordinates and the recorded before/after frames are
+  otherwise unaffected, so replay keeps its strongest identity tiers.
+- **The stated residual.** The net matches a value Flow can see against the
+  text the page shows at the settled boundary. An application that updates its
+  URL on a timer longer than the settle window, or that writes a TRANSFORM of
+  the value rather than the value, shows text no value Flow can see contains.
+  The net will not match it, and Flow does NOT keep a previous value to catch
+  it: that is the rule three reviews broke. Treat every recorded URL as
+  sensitive recording data.
 - Flow protects a declared value from the moment a bound field holds it. Text
-  and pixels captured BEFORE that moment are ordinary recording evidence. If an
-  operator opens a URL that already contains the password and then types that
-  password into a declared field, the URL predates the value, passes the proof
-  above, and is recorded. Checking the live value against unchanged text
-  instead would withhold on a chance match with a keystroke prefix: a password
-  beginning with an ordinary word would withhold the URL of every page whose
-  text contains that word. Treat every recorded URL as sensitive recording
-  data.
-- Source-time field handling does not track an application-defined transform of
-  a secret or a copy into an unrelated visible element. Those pixels, all other
-  typed values, and other visible page content are recording evidence and can
-  contain sensitive data. Keep raw recordings inside the approved local
-  boundary.
+  and pixels captured BEFORE that moment are ordinary recording evidence.
+
 - Secret masks cover every frame in the selected page. Before each masked
   screenshot, Flow snapshots the frame inventory and its lifecycle generation.
   It accepts the in-memory image only when the inventory stays unchanged

@@ -159,11 +159,18 @@ document. Treat all other URL data as sensitive recording data.
   whole token at a time (path segment, query name, query value, fragment). A
   declared value that is too short to tell a real reflection from an ordinary
   coincidence never produces a partial rewrite: Flow withholds that URL token,
-  or that whole title, label, or structural text, instead. Where an element's
-  own ID, `data-testid`, `data-test`, or `name` holds a declared value, Flow
-  records no DOM selector for the action and states why in the event
-  (`identity_withheld`) and in the CLI summary, so a DOM identity check can
-  never disarm silently.
+  or that whole title, label, or structural text, instead. Every piece of
+  identity evidence Flow withholds states why, so a DOM identity check can
+  never disarm silently: a withheld selector (an element ID, `data-testid`,
+  `data-test`, or `name` that holds a declared value), a withheld accessible
+  name or role, and a withheld clicked-row identity (`sid_withheld`) all carry
+  a reason in the event, and the CLI summary counts the actions.
+- Redaction keeps every value the field currently holds and every value a
+  commit point recorded. Flow drops a value only where a controlled input
+  replaced the node that held it and the field went on to hold a value that
+  continues it: that value is a keystroke prefix, not a second secret. A
+  replacement inherits the input session of the node it replaced, so a field
+  with no `name` and no `id` keeps one identity across the swap.
 - Flow traverses and observes open shadow roots at every event boundary. If a
   shadow field can lose its name, ID, or password type before the first event,
   give the shadow host the same `--secret FIELD` name or ID. Flow then masks the

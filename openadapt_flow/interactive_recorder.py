@@ -589,20 +589,22 @@ _INIT_JS = r"""
     // exactly as the page shows it.
     const text = String(value == null ? '' : value);
     if (!text) return null;
-    let found = null;
+    let ambiguousMatch = false;
     for (const secret of secretValues) {
       if (!secret) continue;
       const ambiguous = secret.length < MIN_UNAMBIGUOUS_SECRET;
       for (const variant of secretVariants(secret)) {
         if (!variant || text.indexOf(variant) < 0) continue;
-        // A short value matches ordinary page text by chance. Report that
-        // separately: the operator reads a different meaning into "this text
-        // held your value" than into "this text could have held your value".
-        if (ambiguous) return 'ambiguous-secret-in-identity';
-        found = 'secret-value-in-identity';
+        // A definite match outranks an ambiguous one: the operator reads a
+        // different meaning into "this text held your value" than into "this
+        // text could have held your value by chance". A value shorter than
+        // MIN_UNAMBIGUOUS_SECRET occurs inside ordinary page text often
+        // enough that its match proves nothing. Either one withholds.
+        if (!ambiguous) return 'secret-value-in-identity';
+        ambiguousMatch = true;
       }
     }
-    return found;
+    return ambiguousMatch ? 'ambiguous-secret-in-identity' : null;
   }
 
   function identityTextOrNull(value) {

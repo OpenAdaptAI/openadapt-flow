@@ -1153,6 +1153,9 @@ def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     assert click["structural"]["selector"] is None
     assert click["structural"]["role"] == "[secret]"
     assert click["structural"]["name"] == "[secret]"
+    # A refused DOM identity says WHY. It is never a bare null selector that
+    # reads as "this element simply had no stable identity".
+    assert click["structural"]["identity_withheld"] == "secret-value-in-identity"
 
 
 @pytest.mark.timeout(300)

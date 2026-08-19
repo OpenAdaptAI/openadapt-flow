@@ -397,9 +397,9 @@ _INIT_JS = r"""
   const IDENT_NAMES = __IDENT_NAMES__;
   const SPECIAL = __SPECIAL_KEYS__;
   // One identity for this DOCUMENT. The init script builds a fresh closure per
-  // document, so a value typed in an earlier document cannot be scrubbed here.
+  // document, so this closure never saw a value an earlier document received.
   // Python compares this id against the document that received a secret and
-  // withholds later structural text instead of retaining an unscrubbable copy.
+  // withholds every later document's reflected text.
   const DOC_ID = SESSION_ID + ':doc:' + String(Date.now()) + ':'
     + Math.random().toString(36).slice(2);
   // A secret value shorter than this occurs inside ordinary page text by
@@ -898,10 +898,9 @@ _INIT_JS = r"""
     }
     secretStates.set(el, state);
     // The value stays inside this closure. The element reference is retained
-    // here, so a pre-filled or still-typed value is read live at scrub time
-    // and cannot enter URL, title, or structural metadata. Binding does NOT
-    // commit the value: binding runs on every input event, and committing
-    // there retains each keystroke prefix.
+    // here, so a pre-filled or still-typed value is read live at match time
+    // and cannot enter URL, title, or structural metadata. Binding retains the
+    // ELEMENT, never the value.
     stickySecretElements.add(el);
     if (activate) {
       activeSecretElement = el;
@@ -952,7 +951,7 @@ _INIT_JS = r"""
     const state = declaredSecretHostState(host);
     if (!state) return false;
     // A closed root does not expose its literal. Remove all text metadata for
-    // the rest of this recording because an exact-value scrub is impossible.
+    // the rest of this recording because no check can see its value.
     opaqueSecretActive = true;
     closedSecretHosts.set(host, state);
     return bindSecretState(host, state, false);
@@ -1624,10 +1623,10 @@ class InteractiveRecorder:
         self._initial_attached_viewport: Optional[tuple[int, int]] = None
         self._viewport_dirty = False
         self._viewport_history: list[dict[str, Any]] = []
-        # Source-time secret boundary state. The page closure scrubs only the
-        # document that holds the secret field, because each document builds a
-        # fresh closure. Once a declared secret receives input, structural text
-        # from any LATER document is withheld instead of retained unscrubbed.
+        # Source-time secret boundary state. Each document builds a fresh
+        # closure, so a later document never saw the value an earlier one
+        # received. Once a declared secret receives input, reflected text from
+        # any LATER document is withheld.
         self._secret_doc_ids: set[str] = set()
         self._structural_text_withheld = False
         self._structural_text_withheld_reasons: set[str] = set()
@@ -2354,10 +2353,10 @@ class InteractiveRecorder:
                 self.done = True
                 return
             try:
-                # The page sends location.origin beside the scrubbed URL. The
-                # guard must never parse redacted text: a secret that shares a
-                # character with the URL would rewrite the origin and refuse a
-                # valid recording with a false diagnosis.
+                # The page sends location.origin beside every event, as its
+                # own field. The guard must never read reflected evidence
+                # text: that text can be withheld, and an origin parsed out of
+                # a withheld URL would refuse a valid recording.
                 event_origin = _http_origin(
                     str(raw_event_origin),
                     label="the browser event origin",
@@ -2434,7 +2433,7 @@ class InteractiveRecorder:
         *,
         holds_secret: bool = False,
     ) -> None:
-        """Bind secret scrubbing to the document that holds the secret."""
+        """Bind the secret boundary to the document that received the value."""
 
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         received_secret_input = kind == "input" and event.get("secret") is True
@@ -2464,10 +2463,10 @@ class InteractiveRecorder:
         """True when a declared secret stayed behind in an EARLIER document.
 
         Each document builds its own recorder closure, so a document that does
-        not hold the value cannot scrub it. A same-origin GET form submit, for
-        example, reflects the value into the next document's query string. A
-        later document that DOES hold the value scrubs itself and keeps its
-        evidence.
+        never held the value cannot rule it out of the text it now shows. A
+        same-origin GET form submit, for example, reflects the value into the
+        next document's query string. A later document that DOES hold the value
+        applies its own rule and can keep its evidence.
         """
 
         if not self._secret_doc_ids:

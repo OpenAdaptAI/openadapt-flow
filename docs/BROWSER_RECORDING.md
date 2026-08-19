@@ -229,21 +229,38 @@ secret field. Treat all other URL data as sensitive recording data.
   no node content crosses into Python. Flow refuses before the first frame when
   the closed field exists but its host does not bind that declaration. It also
   refuses a later unbound shadow input before it accepts a value.
-- Each document builds its own page closure, so a closure never saw a value a
-  previous document received. Once a declared secret field receives input, Flow
-  withholds every LATER document's TITLE. Its URL survives, because the URL is
-  reduced by structure: a same-origin GET submit carries the value under the
-  field's own name, and that parameter loses its value in every document. A
-  later document also recovers the value of any inbound query or fragment
-  parameter whose NAME is declared and uses it to withhold identity text there,
-  which is how a results page that prints the value into a row is caught.
-  `meta.json` records every distinct reason in `structural_text_withheld` and
-  every dropped parameter in `url_dropped_params`; `record` prints one line for
-  each.
-- Matching for IDENTITY text considers three sources, and all three only ever
-  WITHHOLD: what a bound field holds now, what a bound field held at a COMMIT
-  POINT (`change`, `focusout`, `submit`, `pagehide`), and an inbound declared
-  parameter value. The commit point is what covers a single-page wizard that
+- **The structural reduction applies WITHIN a document. It does not make a
+  LATER document safe.** Structure closes the QUERY channel, because a form
+  submits under the field's own name. It does not close the PATH channel: no
+  parameter name identifies a path segment, so a server that answers a submit
+  with a redirect to `/results/<value>` puts the value where structure cannot
+  reach, and the new document's closure holds nothing to match it against.
+  Once a declared secret field receives input, Flow therefore withholds the
+  URL **and** the title of every document after the one that first held that
+  value, exactly as it did before the reduction existed. A document that
+  receives a declared value of its own is not exempt: holding a value says
+  nothing about whether it loaded with an earlier document's value in its path.
+- A single-page application is unaffected by that rule. `history.pushState` and
+  `history.replaceState` do NOT build a new document, so the closure that held
+  the value is the closure being sampled, its URL is reduced by structure, and
+  a route change is reported exactly. The cross-document rule bites only on a
+  real navigation.
+- A later document does recover the value of any inbound query or fragment
+  parameter whose NAME is declared and long enough to identify, and uses it to
+  withhold IDENTITY text there. That is how a results page which prints the
+  value into a row, an element id, or an accessible name is caught.
+  `meta.json` records every distinct reason in `structural_text_withheld`, and
+  `url_dropped_params` records a dropped parameter only for a URL Flow actually
+  reports; `record` prints one line for each.
+- Matching for IDENTITY text considers four sources, and all four only ever
+  WITHHOLD: what a bound field holds now; what a bound field held at a COMMIT
+  POINT (`change`, `focusout`, `submit`, `pagehide`); the LAST value a bound
+  field was seen holding, which applies only when nothing in the document holds
+  a value any more, and which covers a page that clears or removes its own
+  field inside its own `input` handler; and an inbound declared parameter
+  value. Comparison is case-insensitive, because upper-casing an identifier
+  before showing it is normalisation rather than a transform. Every identity
+  path uses this same set, including the DOM selector. The commit point is what covers a single-page wizard that
   removes its form and renders the value into a summary row. A commit is
   decided at the microtask checkpoint, so a controlled input that fires
   focusout on the node it just replaced commits no keystroke prefix. A spurious

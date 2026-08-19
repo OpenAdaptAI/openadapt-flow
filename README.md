@@ -336,19 +336,25 @@ the title — is sampled from Python once the page has settled, never inside the
 capture-phase listener, which runs before the page's own handlers and so reads
 the previous action's text.
 
-A URL is reduced by **structure**: Flow reports the origin and the path, keeps
-every parameter name, and drops the value of any parameter named after a
-declared secret field — deterministically, whatever the value is. A same-origin
-form submit carries a field under its own name, so that channel closes by name
-rather than by searching for a value. A dropped value becomes empty; Flow
-removes characters from a URL and never adds characters the page did not show.
-If the URL Flow is about to report still holds a value Flow can see, it
-withholds the whole URL and warns you that the application put a secret in its
-own URL — a defect that exposes it through browser history, logs, proxies and
-`Referer` headers with or without Flow. A title has no structure to reduce, so
-it is reported only while unchanged since before that document held a value.
-`meta.json` records every dropped parameter and everything withheld, and the
-CLI prints it.
+Within a document, a URL is reduced by **structure**: Flow reports the origin
+and the path, keeps every parameter name, and drops the value of any parameter
+named after a declared secret field — deterministically, whatever the value is.
+A dropped value becomes empty; Flow removes characters from a URL and never
+adds characters the page did not show. A single-page application that routes
+with `history.pushState` therefore keeps its URL evidence. If the URL Flow is
+about to report still holds a value Flow can see, it withholds the whole URL
+and warns you that the application put a secret in its own URL — a defect that
+exposes it through browser history, logs, proxies and `Referer` headers with or
+without Flow.
+
+That reduction does **not** make a later document safe. A path segment has no
+parameter name to identify it, so a server that answers a form submit with a
+redirect to `/results/<value>` puts the value where structure cannot reach, and
+the new document holds nothing to match it against. Flow therefore withholds
+the URL and the title of every document after the one that first held a
+declared value. A title has no structure to reduce and follows the same rule
+within a document. `meta.json` records everything dropped and everything
+withheld, and the CLI prints it.
 
 This source-time contract does not track an application-defined transform of a
 secret or an application copy into an unrelated visible element, and it starts

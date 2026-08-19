@@ -2978,10 +2978,11 @@ def test_structural_text_is_withheld_after_a_secret_leaves_its_document(
     assert session._structural_text_withheld is False
 
     # A same-origin GET form submit builds a NEW document. Its closure never
-    # saw the value. The URL survives because the page reduced it by STRUCTURE
-    # -- the parameter keeps its name and loses its value -- so the origin and
-    # the path stay exact. The TITLE has no structure to reduce, so Flow
-    # withholds it.
+    # saw the value, and it cannot prove the URL it loaded with predates that
+    # value: a server that answers the submit with a redirect to
+    # `/results/<value>` puts the value in the PATH, which no parameter name
+    # identifies. Structure protects the query channel, not that one, so the
+    # whole URL and the title are withheld.
     page_state.update(
         {
             "url": "http://host.test/results?token=",
@@ -3000,16 +3001,16 @@ def test_structural_text_is_withheld_after_a_secret_leaves_its_document(
     send("doc-2", {"kind": "click"})
     assert session._listener_error is None
     assert session._read_scrubbed_page_state() == {
-        "url": "http://host.test/results?token=",
+        "url": "http://host.test/",
         "title": "",
     }
     assert session._structural_text_withheld is True
     assert session._structural_text_withheld_reasons == {
         "secret-value-left-its-document"
     }
-    assert session._dropped_url_parameters == {
-        ("token", "query", "declared-secret-parameter")
-    }
+    # A drop is recorded only for a URL Flow reports. This one was withheld
+    # whole, so nothing is claimed about its parameters.
+    assert session._dropped_url_parameters == set()
 
 
 def test_recording_privacy_notices_report_what_flow_withheld(tmp_path: Path) -> None:
@@ -3056,17 +3057,20 @@ def test_stamping_a_recorded_surface_does_not_rewrite_a_published_recording(
 
 
 @pytest.mark.timeout(120)
-def test_launched_recording_drops_a_declared_url_parameter_after_a_get_submit(
+def test_launched_recording_withholds_a_later_document_url_after_a_get_submit(
     attach_app_url: str,
     tmp_path: Path,
 ) -> None:
-    """A same-origin GET submit carries the value under the field's own NAME.
+    """A same-origin GET submit builds a NEW document, and it is withheld.
 
-    That is how an HTML form works, so the channel is closed by STRUCTURE and
-    not by matching: the parameter keeps its name and loses its value, in every
-    document, whatever the value is. The origin and the path stay exact, which
-    is the evidence a whole-URL refusal used to destroy. Flow stamps the
-    surface before it publishes and reports the drop to the operator.
+    Structure closes the QUERY channel: the parameter keeps its name and loses
+    its value. It does not close the PATH channel, because no parameter name
+    identifies a path segment, and a server that answers the submit with a
+    redirect to `/results/<value>` uses exactly that. A fresh closure holds no
+    value to match it against either. So a document that comes after the one
+    that first held a declared value reports an origin-only URL and an empty
+    title. Flow stamps the surface before it publishes and says what it
+    withheld.
     """
 
     if _chromium_executable() is None:
@@ -3094,38 +3098,27 @@ def test_launched_recording_drops_a_declared_url_parameter_after_a_get_submit(
         path.read_text(errors="replace") for path in sorted(recording.glob("*.json*"))
     )
     assert secret not in body
-    # The NAME survives, the VALUE does not. Nothing is invented: the value is
-    # empty, not a placeholder the page never showed.
-    assert "token=" in body
     assert f"token={secret}" not in body
     events = [
         json.loads(line)
         for line in (recording / "events.jsonl").read_text().splitlines()
     ]
-    submitted = [
-        event for event in events if str(event.get("url_after", "")).endswith("token=")
-    ]
-    assert submitted, "the results URL should be reported with an emptied value"
-    # The origin and the path are exact. This is the evidence the old
-    # whole-URL refusal destroyed: it reported an origin-only URL instead.
-    assert submitted[-1]["url_after"] == f"{attach_app_url}?token="
+    submit = events[-1]
+    # The document reached by the submit reports an origin-only URL and an
+    # empty title. Nothing about the results document survives.
+    assert submit["url_after"] == attach_app_url
+    assert submit["title_after"] == ""
     meta = json.loads((recording / "meta.json").read_text())
     # Stamped before the atomic publish, not mutated afterwards.
     assert meta["surface"] == "web"
-    assert meta["url_dropped_params"] == [
-        {
-            "name": "token",
-            "where": "query",
-            "reason": "declared-secret-parameter",
-        }
-    ]
-    # A later document has no closure that saw the value, and a title has no
-    # structure to reduce, so the title is still withheld.
     assert meta["structural_text_withheld"] == "secret-value-left-its-document"
+    # A drop is recorded only for a URL Flow actually reports. This URL was
+    # withheld whole, so naming a dropped parameter would say less than
+    # nothing.
+    assert "url_dropped_params" not in meta
     from openadapt_flow.__main__ import _recording_privacy_notices
 
     notices = _recording_privacy_notices(recording)
-    assert any("removed the value of these URL parameters" in n for n in notices)
     assert any("withheld the page URL and title" in n for n in notices)
 
 
@@ -3983,7 +3976,7 @@ def test_reflected_text_withheld_reasons_reach_the_recording_metadata(
         }
     )
     assert session._read_scrubbed_page_state() == {
-        "url": "http://host.test/next",
+        "url": "http://host.test/",
         "title": "",
     }
     assert session._structural_text_withheld_reasons == {
@@ -4448,3 +4441,257 @@ def test_page_closure_withholds_a_url_that_holds_the_value_in_its_path() -> None
     assert state["url"] == "http://host.test/"
     assert state["url_withheld"] == "declared-value-in-url"
     assert state["secret_in_url"] is True
+
+
+# ---------------------------------------------------------------------------
+# Round-5: the URL PATH channel, and the evidence the fix must NOT cost.
+#
+# Every test below FAILS at 07372d5 and passes here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.timeout(180)
+def test_launched_recording_withholds_a_redirect_that_puts_the_value_in_a_path(
+    tmp_path: Path,
+) -> None:
+    """A REST redirect answers a GET submit with `/results/<value>`.
+
+    Nothing in the new document can find that value: no bound element holds it,
+    the closure committed nothing, and no parameter NAME identifies a path
+    segment. Structure closes the query channel and not this one, so the whole
+    URL is withheld for every document after the one that first held a declared
+    value.
+    """
+
+    if _chromium_executable() is None:
+        pytest.skip("no Chromium executable is installed")
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    secret = "hunter2-primary"
+    form = (
+        b"<!doctype html><html><head><title>Token form</title></head><body>"
+        b'<form id="token-form" method="get" action="/lookup">'
+        b'<input id="token" name="token" type="text">'
+        b'<button id="submit-token" type="submit">Submit</button>'
+        b"</form></body></html>"
+    )
+    results = (
+        b"<!doctype html><html><head><title>Results</title></head><body>"
+        b'<ul><li id="row"><span id="cell">open</span></li></ul>'
+        b"</body></html>"
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            parsed = urlparse(self.path)
+            if parsed.path == "/lookup":
+                value = parse_qs(parsed.query).get("token", [""])[0]
+                self.send_response(302)
+                self.send_header("Location", f"/results/{value}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            payload = results if parsed.path.startswith("/results") else form
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    app_url = f"http://127.0.0.1:{server.server_address[1]}/"
+    try:
+
+        def drive(page, pump):
+            page.click("#token")
+            pump()
+            page.keyboard.type(secret)
+            pump()
+            pump()
+            page.click("#submit-token")
+            pump()
+            pump()
+            page.click("#cell")
+            pump()
+            pump()
+
+        recording = record_interactive(
+            f"{app_url}form",
+            tmp_path / "recording-redirect",
+            secret_fields=("token",),
+            headless=True,
+            script=drive,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    body = "\n".join(
+        path.read_text(errors="replace") for path in sorted(recording.glob("*.json*"))
+    )
+    assert secret not in body
+    events = [
+        json.loads(line)
+        for line in (recording / "events.jsonl").read_text().splitlines()
+    ]
+    assert events[-1]["url_after"] == app_url
+    assert events[-1]["title_after"] == ""
+    meta = json.loads((recording / "meta.json").read_text())
+    assert meta["structural_text_withheld"] == "secret-value-left-its-document"
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_still_reports_a_same_document_route_after_the_fix() -> None:
+    """The cross-document rule must not cost the SPA evidence again.
+
+    A single-page application routes with `history.pushState`, which does NOT
+    build a new document. The closure that held the value is the closure being
+    sampled, so its URL is still reported exactly. The cross-document rule
+    bites only on a real navigation, which is where the redirect leak lives.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-pushstate-test"
+    binding_name = "__oaflow_emit_pushstate_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ())
+    from playwright.sync_api import sync_playwright
+
+    body = (
+        "<title>Sign in</title>"
+        "<input id='password' name='password' type='password'>"
+        "<button id='sign-in' onclick=\""
+        "history.pushState({}, '', '/dashboard/overview');"
+        '">Sign in</button>'
+    )
+    with sync_playwright() as playwright:
+        browser, page = _closure_page(
+            playwright, executable, body, "http://host.test/login", session_id
+        )
+        try:
+            page.expose_binding(binding_name, lambda _source, _detail: None)
+            page.evaluate(init_js)
+            page.click("#password")
+            page.keyboard.type("hunter2-primary")
+            page.click("#sign-in")
+            page.wait_for_timeout(50)
+            state = _sample_reflected_state(page, session_id)
+            doc_id = state["doc"]
+            # Same document: the recorder closure was not rebuilt, so its
+            # document id is unchanged and Python's cross-document rule cannot
+            # apply to it.
+            after = _sample_reflected_state(page, session_id)
+        finally:
+            browser.close()
+
+    assert state["url"] == "http://host.test/dashboard/overview"
+    assert state["url_withheld"] is None
+    assert after["doc"] == doc_id
+
+
+def test_a_same_document_route_is_never_treated_as_a_later_document(
+    tmp_path: Path,
+) -> None:
+    """The Python half of the same claim, without a browser.
+
+    Only the FIRST document to hold a declared value reports its reflected
+    text. A same-document route change keeps that document id, so it keeps its
+    URL; a real navigation produces a new id and is withheld.
+    """
+
+    session = InteractiveRecorder(
+        "http://host.test/app",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    page_state = {
+        "url": "http://host.test/login",
+        "title": "Sign in",
+        "doc": "doc-1",
+        "secret": True,
+        "url_withheld": None,
+        "title_withheld": None,
+        "dropped": [],
+        "secret_in_url": False,
+        "secret_in_title": False,
+    }
+    session.page = SimpleNamespace(
+        main_frame=object(),
+        evaluate=lambda _js, _args: dict(page_state),
+    )
+    assert session._read_scrubbed_page_state()["url"] == "http://host.test/login"
+    # Same document, new route: reported exactly.
+    page_state["url"] = "http://host.test/dashboard/overview"
+    assert (
+        session._read_scrubbed_page_state()["url"]
+        == "http://host.test/dashboard/overview"
+    )
+    assert session._structural_text_withheld is False
+    # A real navigation builds a new document. Even one that holds a declared
+    # value of its own is withheld: holding a value says nothing about whether
+    # it loaded with an EARLIER document's value in its path.
+    page_state.update({"doc": "doc-2", "url": "http://host.test/results/x"})
+    assert session._read_scrubbed_page_state() == {
+        "url": "http://host.test/",
+        "title": "",
+    }
+    assert session._structural_text_withheld_reasons == {
+        "secret-value-left-its-document"
+    }
+
+
+@pytest.mark.timeout(60)
+def test_page_closure_withholds_a_selector_built_from_an_inbound_value() -> None:
+    """A selector is identity too, and it used the narrower value set.
+
+    In a document reached by a GET submit the accessible name and the row
+    identity were correctly refused, while the element id went out verbatim as
+    `#row-<value>`. All three identity paths now use the same value set.
+    """
+
+    executable = _chromium_executable()
+    if executable is None:
+        pytest.skip("no Chromium executable is installed")
+    session_id = "page-closure-inbound-selector-test"
+    binding_name = "__oaflow_emit_inbound_selector_test"
+    init_js = _page_closure_init_js(session_id, binding_name, ("token",))
+    events: list[dict] = []
+    from playwright.sync_api import sync_playwright
+
+    secret = "hunter2-primary"
+    body = (
+        "<title>Results</title>"
+        f"<ul><li id='row-{secret}'><span id='cell-{secret}'>open</span>"
+        "</li></ul>"
+    )
+    with sync_playwright() as playwright:
+        browser, page = _closure_page(
+            playwright,
+            executable,
+            body,
+            f"http://host.test/results?token={secret}",
+            session_id,
+        )
+        try:
+            page.expose_binding(
+                binding_name, lambda _source, detail: events.append(detail)
+            )
+            page.evaluate(init_js)
+            page.click("#cell-" + secret)
+            page.wait_for_timeout(50)
+        finally:
+            browser.close()
+
+    assert secret not in json.dumps(events)
+    click = [event for event in events if event.get("kind") == "click"][-1]
+    assert click["structural"]["selector"] is None
+    assert click["structural"]["identity_withheld"] == "secret-value-in-identity"

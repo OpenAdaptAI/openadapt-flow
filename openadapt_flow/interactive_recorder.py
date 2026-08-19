@@ -486,6 +486,21 @@ _INIT_JS = r"""
   // and only a CONNECTED element commits, so a controlled input that fires
   // focusout on the node it just replaced commits nothing.
   const committedSecretValues = new Set();
+  // The most recent NON-EMPTY value each bound element held, observed in the
+  // capture phase before the page's own `input` handler runs. ONE value per
+  // element, REPLACED on every keystroke -- never a ladder of past values, and
+  // never used to rewrite anything.
+  //
+  // It exists for the page that consumes its own field: a scanner input that
+  // writes the badge into the URL and then clears the field in the same
+  // handler, or a wizard that removes the field outright. By the time Python
+  // samples at the settled boundary, nothing in the DOM holds the value, so
+  // every other source is empty and the reflected text would be reported.
+  //
+  // Because it is replaced rather than accumulated, the value here at any
+  // sample is the one the operator stopped on, not a keystroke prefix: a
+  // password beginning with an ordinary word never leaves that word behind.
+  const lastSecretValues = new WeakMap();
   let eventsStopped = false;
   let cleaned = false;
 
@@ -644,8 +659,19 @@ _INIT_JS = r"""
   }
 
   function identityMatchValues() {
-    // Every value Flow may use to WITHHOLD identity text. Never to rewrite it.
+    // Every value Flow may use to WITHHOLD text. Never to rewrite it.
     const values = liveSecretValues();
+    if (values.size === 0) {
+      // NOTHING in this document holds a declared value any more: the page
+      // cleared its own field, or removed it. Only then does the last observed
+      // value come into play. While a bound element still holds something, the
+      // live value is the truth and a detached node's leftover is a keystroke
+      // prefix that would withhold unrelated evidence on a chance match.
+      for (const el of stickySecretElements) {
+        const last = lastSecretValues.get(el);
+        if (last) values.add(last);
+      }
+    }
     for (const value of committedSecretValues) values.add(value);
     for (const value of inboundSecretParameterValues()) values.add(value);
     return values;
@@ -701,12 +727,18 @@ _INIT_JS = r"""
     // exactly as the page shows it.
     const text = String(value == null ? '' : value);
     if (!text) return null;
+    // Compare case-insensitively. An application that upper-cases or
+    // lower-cases an identifier before showing it is doing normalisation, not
+    // an application-defined transform, and it is common enough that an
+    // exact-case match would miss it. Widening a WITHHOLD test can only
+    // withhold more; it can never leak and never rewrites anything.
+    const folded = text.toLowerCase();
     let ambiguousMatch = false;
     for (const secret of secretValues) {
       if (!secret) continue;
       const ambiguous = secret.length < MIN_UNAMBIGUOUS_SECRET;
       for (const variant of secretVariants(secret)) {
-        if (!variant || text.indexOf(variant) < 0) continue;
+        if (!variant || folded.indexOf(variant.toLowerCase()) < 0) continue;
         // A definite match outranks an ambiguous one: the operator reads a
         // different meaning into "this text held your value" than into "this
         // text could have held your value by chance". A value shorter than
@@ -834,9 +866,15 @@ _INIT_JS = r"""
       if (segment.length < MIN_UNAMBIGUOUS_SECRET) continue;
       let decoded = segment;
       try { decoded = decodeURIComponent(segment); } catch (e) {}
+      const folded = segment.toLowerCase();
+      const foldedDecoded = decoded.toLowerCase();
       for (const value of values) {
         if (!value) continue;
-        if (value.indexOf(segment) >= 0 || value.indexOf(decoded) >= 0) {
+        const foldedValue = value.toLowerCase();
+        if (
+          foldedValue.indexOf(folded) >= 0
+          || foldedValue.indexOf(foldedDecoded) >= 0
+        ) {
           return true;
         }
       }
@@ -1112,7 +1150,11 @@ _INIT_JS = r"""
     // against the live DOM, so a rewritten selector resolves to nothing, or to
     // the wrong element. Exact or withheld, never rewritten.
     if (opaqueSecretActive) return value ? 'opaque-secret-boundary' : null;
-    return secretValueIn(value, liveSecretValues());
+    // The SAME value set its siblings use. A selector is the strictest machine
+    // evidence there is -- replay resolves it against the live DOM -- so it
+    // must not be the one identity field built from a narrower set. Widening
+    // this can only withhold more.
+    return secretValueIn(value, identityMatchValues());
   }
 
   function uniqueSelector(el) {
@@ -1769,6 +1811,14 @@ _INIT_JS = r"""
     }
     const secretBinding = secretStateForInput(el);
     const secret = secretBinding !== null;
+    if (secret) {
+      // CAPTURE PHASE, so this runs BEFORE the page's own `input` handler. A
+      // page that writes the value somewhere and then clears its own field
+      // does both in that handler; this is the last moment the DOM still holds
+      // the value. Replace, never accumulate.
+      const observed = currentSecretValue(el);
+      if (observed) lastSecretValues.set(el, observed);
+    }
     if (secret && !isTextEntry(el) && closedSecretHosts.has(el)) {
       opaqueSecretActive = true;
     }
@@ -1951,6 +2001,7 @@ class InteractiveRecorder:
         # received. Once a declared secret receives input, reflected text from
         # any LATER document is withheld.
         self._secret_doc_ids: set[str] = set()
+        self._first_secret_doc_id: Optional[str] = None
         self._structural_text_withheld = False
         self._structural_text_withheld_reasons: set[str] = set()
         self._identity_withheld_events = 0
@@ -2797,18 +2848,25 @@ class InteractiveRecorder:
             self._note_withheld_structural_text("secret-value-left-its-document")
 
     def _secret_document_left(self, doc_id: Optional[str]) -> bool:
-        """True when a declared secret stayed behind in an EARLIER document.
+        """True for every document AFTER the one that first held a value.
 
-        Each document builds its own recorder closure, so a document that does
-        never held the value cannot rule it out of the text it now shows. A
-        same-origin GET form submit, for example, reflects the value into the
-        next document's query string. A later document that DOES hold the value
-        applies its own rule and can keep its evidence.
+        Each document builds its own recorder closure, so a later document
+        never saw the value an earlier one received: no bound element holds it,
+        nothing was committed in that closure, and a value carried in a PATH
+        segment has no parameter name to identify it. Such a document cannot
+        prove the URL it loaded with predates the value, so its reflected text
+        is withheld.
+
+        A document that receives a declared value of its own is NOT exempt. It
+        can still have loaded with an earlier document's value in its path, and
+        holding a value of its own says nothing about that. Only the FIRST
+        document to hold a declared value reports its own reflected text, and
+        that document reports it under the in-page rules.
         """
 
-        if not self._secret_doc_ids:
+        if self._first_secret_doc_id is None:
             return False
-        return doc_id is None or doc_id not in self._secret_doc_ids
+        return doc_id is None or doc_id != self._first_secret_doc_id
 
     def _note_withheld_structural_text(self, reason: str) -> None:
         """Record WHY Flow withheld reflected text, for the operator notice."""
@@ -3362,10 +3420,9 @@ class InteractiveRecorder:
         doc_id = raw_doc_id if isinstance(raw_doc_id, str) else None
         if doc_id is not None and safe_page_state.get("secret") is True:
             self._secret_doc_ids.add(doc_id)
-        for key, reason_key in (
-            ("url_withheld", "url"),
-            ("title_withheld", "title"),
-        ):
+            if self._first_secret_doc_id is None:
+                self._first_secret_doc_id = doc_id
+        for key in ("url_withheld", "title_withheld"):
             reason = safe_page_state.get(key)
             if isinstance(reason, str) and reason:
                 self._note_withheld_structural_text(reason)
@@ -3377,31 +3434,46 @@ class InteractiveRecorder:
             self._app_placed_secret_in_url = True
         if safe_page_state.get("secret_in_title") is True:
             self._app_placed_secret_in_title = True
-        dropped = safe_page_state.get("dropped")
-        if isinstance(dropped, list) and dropped:
-            names: list[str] = []
-            for entry in dropped:
-                if not isinstance(entry, dict):
-                    continue
-                name = entry.get("name")
-                reason = entry.get("reason")
-                where = entry.get("where")
-                if not isinstance(name, str):
-                    continue
-                names.append(name)
-                self._dropped_url_parameters.add((name, str(where), str(reason)))
-            # The drop is a RECORDING-level fact, not a per-action one: a
-            # parameter named after a declared field loses its value in every
-            # URL Flow reports, whatever the value is. `meta.json` carries the
-            # list. Putting it on each event would land it inconsistently,
-            # because the Recorder builds an action's after-state from the
-            # backend's url/title/page-count seam alone.
         # A LATER document builds a fresh closure that never saw the value an
-        # earlier document received. The URL is protected by structure, so it
-        # survives; the title has no structure to exploit, so it is withheld.
+        # earlier document received, and it cannot prove that the URL it loaded
+        # with predates that value. A server that answers a form submit with a
+        # redirect to `/results/<value>` puts the value in the PATH, where no
+        # parameter name identifies it and no value in the new closure matches
+        # it. Structure protects the query channel, not this one, so the whole
+        # URL and the title are withheld.
+        #
+        # This does NOT cost the single-page-application evidence: an SPA route
+        # change is a SAME-document `history.pushState`, so the document that
+        # held the value is the document being sampled, and its URL is still
+        # reported exactly. This rule bites only on a real navigation, which is
+        # exactly where the redirect leak lives.
         if self._secret_document_left(doc_id):
             self._note_withheld_structural_text("secret-value-left-its-document")
+            state["url"] = self._origin_only_url()
             state["title"] = ""
+            return state
+        # Record the drop only for a URL that Flow actually reports. Naming a
+        # dropped parameter of a URL that never reached disk would tell the
+        # operator less than nothing.
+        #
+        # The drop is a RECORDING-level fact, not a per-action one: a parameter
+        # named after a declared field loses its value in every URL Flow
+        # reports, whatever the value is. `meta.json` carries the list. Putting
+        # it on each event would land it inconsistently, because the Recorder
+        # builds an action's after-state from the backend's url/title/page-count
+        # seam alone.
+        if not safe_page_state.get("url_withheld"):
+            dropped = safe_page_state.get("dropped")
+            if isinstance(dropped, list):
+                for entry in dropped:
+                    if not isinstance(entry, dict):
+                        continue
+                    name = entry.get("name")
+                    if not isinstance(name, str):
+                        continue
+                    self._dropped_url_parameters.add(
+                        (name, str(entry.get("where")), str(entry.get("reason")))
+                    )
         return state
 
     def _structural_state(self) -> dict[str, Any]:

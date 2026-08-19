@@ -81,13 +81,20 @@ claims:
           remote endpoints, cross-origin selectors and navigation, iframe
           events, invalid viewport evidence, and ambiguous same-origin tabs.
       - path: tests/test_browser_attach.py
-        node: test_launched_recording_drops_a_declared_url_parameter_after_a_get_submit
+        node: test_launched_recording_withholds_a_later_document_url_after_a_get_submit
         proves: >-
-          A live Chromium recording submits a same-origin GET form that carries
-          a declared secret under the field's own parameter name. Flow reduces
-          the URL by structure: the parameter keeps its name and loses its
-          value, the origin and the path stay exact, the drop and its reason
-          reach meta.json, and the recorded surface is stamped before publish.
+          A live Chromium recording submits a same-origin GET form. The
+          document that submit reaches is a fresh closure that holds no value
+          to match against, so Flow withholds its URL and its title and says
+          so, and the recorded surface is stamped before publish.
+      - path: tests/test_browser_attach.py
+        node: test_launched_recording_withholds_a_redirect_that_puts_the_value_in_a_path
+        proves: >-
+          A server that answers a GET submit with a 302 to `/results/<value>`
+          puts a declared secret in a path segment, where no parameter name
+          identifies it. Flow withholds the whole URL for every document after
+          the one that first held the value, so the literal never reaches
+          events.jsonl.
       - path: tests/test_browser_attach.py
         node: test_page_closure_keeps_url_and_identity_evidence_for_a_lowercase_secret
         proves: >-
@@ -120,13 +127,20 @@ claims:
           against the current value, and keeps the clicked element's identity
           evidence exact.
       - path: tests/test_browser_attach.py
-        node: test_page_closure_reports_a_single_page_app_route_change
+        node: test_page_closure_still_reports_a_same_document_route_after_the_fix
         proves: >-
-          A single-page application that changes its route after a declared
-          secret field held a value keeps its URL evidence: Flow reports the
-          origin and the path exactly. A path is app structure, not operator
-          input, and a whole-URL refusal would cost the URL evidence of an
-          entire session on every well-behaved application.
+          A single-page application route change through history.pushState does
+          not build a new document, so the closure that held the declared value
+          is the one being sampled and its URL is still reported exactly. The
+          cross-document rule that withholds a later document's URL therefore
+          does not cost this evidence.
+      - path: tests/test_browser_attach.py
+        node: test_page_closure_withholds_a_selector_built_from_an_inbound_value
+        proves: >-
+          A DOM selector is identity evidence and uses the same value set as
+          the accessible name and the clicked-row identity. An element id built
+          from a value carried in an inbound declared parameter is withheld with
+          a reason, not emitted verbatim.
       - path: tests/test_browser_attach.py
         node: test_page_closure_drops_only_the_unproven_parameter_value
         proves: >-

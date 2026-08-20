@@ -202,6 +202,10 @@ packages = ["openadapt_flow"]
 # list in lockstep with the sdist target and the archive validator below.
 exclude = [
     "/.hypothesis",
+    "/.openadapt-chrome-profile",
+    "/.openadapt-recording-partial-*",
+    "/**/.openadapt-chrome-profile",
+    "/**/.openadapt-recording-partial-*",
     "/benchmark/**/api-delta-probe-*",
     "/benchmark/**/bundle-live*",
     "/benchmark/**/out",
@@ -255,6 +259,10 @@ exclude = [
 # fake-patient synthetic fixtures, and bounded aggregate evidence remain.
 exclude = [
     "/.hypothesis",
+    "/.openadapt-chrome-profile",
+    "/.openadapt-recording-partial-*",
+    "/**/.openadapt-chrome-profile",
+    "/**/.openadapt-recording-partial-*",
     "/benchmark/**/api-delta-probe-*",
     "/benchmark/**/bundle-live*",
     "/benchmark/**/out",

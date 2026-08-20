@@ -13,15 +13,24 @@ authorized person or a configured model can propose a repair, which must pass
 the workflow's identity, result, and policy gates. It runs entirely on your
 machine; nothing egresses unless you opt in.
 
-**Lifecycle: Beta.** See the
-[capability and qualification matrix](docs/PRODUCT_STATUS.md) for workflow- and
-environment-specific evidence. This is the flagship engine of the
+**Lifecycle role: stable open-source engine.**
+
+**Active Production default:** derived from the signed central admission
+ledger; this repository does not self-admit. Current state: **Not actively
+admitted.**
+
+**Workflow admission:** Standard and Regulated actuation require a valid active
+admission for the exact sealed workflow. A release admission alone does not
+authorize a workflow. See the
+[capability and qualification matrix](docs/PRODUCT_STATUS.md) for the evidence
+behind each workflow and environment. This is the flagship engine of the
 [OpenAdapt](https://github.com/OpenAdaptAI/openadapt) project; the full docs live
 at [docs.openadapt.ai](https://docs.openadapt.ai).
 
 The engine supports browser pages, native Windows, macOS, and Linux
 applications, and remote-display sessions through RDP, Citrix, or VDI. Each
-target application and environment is qualified separately.
+workflow admission binds one exact sealed bundle, application, environment,
+runtime, policy, identity contract, and result contract.
 
 ![One demonstration, two UIs, same compiled workflow. The right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 
@@ -424,36 +433,35 @@ bundle armed 4-7 of 12), so an **unarmed click has no identity check at all**.
 The per-step coverage is auditable in `workflow.json` and reported in every run;
 see [what it doesn't do yet](docs/LIMITS.md).
 
-## Substrates (all first-class)
+## Execution surfaces
 
-Every substrate runs on the same small `Backend` protocol and the same governed
-runtime; none is a second-class add-on.
+Every surface runs on the same small `Backend` protocol and the same governed
+runtime. The deployment boundary and evidence source differ by surface:
 
-Substrate maturity, stated the same way across the OpenAdapt repositories:
-
-| Substrate | Maturity |
-| --- | --- |
-| Browser (web) | Beta; available in production today through the managed browser product |
-| Native desktop (Windows, macOS, Linux) | Available for customer-controlled execution; qualification evidence is task- and environment-specific |
-| Remote display (RDP) | Available for customer-controlled execution; qualification evidence is task- and environment-specific |
-| Citrix / VDI | Available for customer-controlled execution; real-environment ICA/HDX qualification is deployment-specific |
+| Surface | Execution boundary | Required workflow evidence |
+| --- | --- | --- |
+| Browser (web) | Local, customer-controlled, or the managed browser runner | Exact browser, application, environment, identity, result, and policy contracts |
+| Native desktop (Windows, macOS, Linux) | Local or customer-controlled | Exact host and application identity plus native accessibility and result evidence |
+| Remote display (RDP) | Local or customer-controlled | Exact client window or network session plus remote-display identity and result evidence |
+| Citrix / VDI | Local or customer-controlled | Exact Workspace, server, application, display, identity, and result evidence, including counted ICA/HDX trials |
 
 Per-substrate engineering evidence is reported honestly per the
 [capability and qualification matrix](docs/PRODUCT_STATUS.md):
 
-| Substrate | Selector | Status | Evidence |
-|---|---|---|---|
-| Web / browser | `--backend web` | Validated | Full lifecycle on every CI build, plus third-party OpenEMR evidence |
-| Native macOS (AX) | `--backend macos` | Validated | 3/3 fixed TextEdit trials with exact file-byte effects; refused a two-window ambiguity without changing either file |
-| Native Windows (UIA) | `--backend windows` | Available | 3/3 fixed WinForms trials with independently confirmed SQLite effects; 3/3 refusal for both stale and ambiguous targets |
-| Native Linux (AT-SPI) | `--backend linux` | Available | Required CI drives a real GTK3 workflow through an isolated X11 / session-D-Bus environment: three verified effects, plus three ambiguous-target and three stale-target refusals |
-| RDP (remote display) | `--backend rdp` | Available | Real-network Aardwolf RDP into Windows 11 passed 3/3 fixed remote-input trials with independent guest-tools file verification; a separate real-FreeRDP batch covers record → compile → governed replay and refusal |
-| Citrix / VDI (pixel ladder) | `--backend citrix` | Code-qualified | Dedicated exact-Workspace-window driver, readiness gate, durable resume, and 3 healthy + 3 drift-halt no-DOM trials; the retained artifact records `ica_hdx_accepted=false` until a counted ICA/HDX run is attached |
+| Surface | Selector | Counted engineering evidence |
+|---|---|---|
+| Web / browser | `--backend web` | Full lifecycle on every CI build, plus third-party OpenEMR evidence |
+| Native macOS (AX) | `--backend macos` | 3/3 fixed TextEdit trials with exact file-byte effects; refused a two-window ambiguity without changing either file |
+| Native Windows (UIA) | `--backend windows` | 3/3 fixed WinForms trials with independently confirmed SQLite effects; 3/3 refusal for both stale and ambiguous targets |
+| Native Linux (AT-SPI) | `--backend linux` | Required CI drives a real GTK3 workflow through an isolated X11 / session-D-Bus environment: three verified effects, plus three ambiguous-target and three stale-target refusals |
+| RDP (remote display) | `--backend rdp` | Real-network Aardwolf RDP into Windows 11 passed 3/3 fixed remote-input trials with independent guest-tools file verification; a separate real-FreeRDP batch covers record → compile → governed replay and refusal |
+| Citrix / VDI (pixel ladder) | `--backend citrix` | Dedicated exact-Workspace-window driver, readiness gate, durable resume, and 3 healthy + 3 drift-halt no-DOM trials; the retained artifact records `ica_hdx_accepted=false` until a counted ICA/HDX run is attached |
 
-Every row is bounded to its stated evidence. Accepted application workflows are
-qualified against their own controls, session/display policy, identity evidence,
-and effect oracle; code-qualified Citrix deployments additionally attach the
-counted ICA/HDX record for their exact Workspace/server/application matrix.
+Every row is bounded to its stated evidence. A workflow admission does not
+inherit these rows. It binds the exact controls, session or display policy,
+identity evidence, effect oracle, and fault trials for the sealed workflow.
+Citrix admissions also bind the counted ICA/HDX record for their exact
+Workspace, server, and application matrix.
 Details:
 [`docs/backends/RDP.md`](docs/backends/RDP.md),
 [`docs/desktop/LINUX_NATIVE.md`](docs/desktop/LINUX_NATIVE.md),

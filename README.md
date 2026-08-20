@@ -15,9 +15,9 @@ machine; nothing egresses unless you opt in.
 
 **Lifecycle role: stable open-source engine.**
 
-**Active Production default:** derived from the signed central admission
-ledger; this repository does not self-admit. Current state: **Not actively
-admitted.**
+**Release admission:** the current state is derived at read time from the signed
+central admission record; this repository does not self-admit. Read the
+[current admission-derived record](https://docs.openadapt.ai/production-lifecycle.json).
 
 **Workflow admission:** Standard and Regulated actuation require a valid active
 admission for the exact sealed workflow. A release admission alone does not

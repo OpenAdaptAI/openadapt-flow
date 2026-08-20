@@ -84,10 +84,11 @@ application never calls that path, so the screen cannot influence it. The run en
 lies: the server rejects the write *after* the application has painted its
 success banner, so every on-screen check passes while nothing lands. The
 independent read of the system of record refutes the mined `record_written`
-contract and the engine **HALTS** at the consequential step instead of
-believing the screen. The caught fault's evidence is a clearly-labeled local
-`run-broken/REPORT.md`; no shareable receipt is emitted for it, because only
-`VERIFIED` runs may use the success rail.
+contract. Because delivery reached the consequential step, the runtime returns
+`RECONCILIATION_REQUIRED` and makes no blind retry or replay dispatch. The
+caught fault's evidence is a clearly-labeled local `run-broken/REPORT.md`; no
+shareable receipt is emitted for it, because only `VERIFIED` runs may use the
+success rail.
 
 For a live walkthrough, perform the demonstration yourself and then watch the
 compiled replay at a visible pace:

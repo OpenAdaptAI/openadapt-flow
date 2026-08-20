@@ -17,7 +17,8 @@ machine; nothing egresses unless you opt in.
 
 **Release admission:** the current state is derived at read time from the signed
 central admission record; this repository does not self-admit. Read the
-[current admission-derived record](https://docs.openadapt.ai/production-lifecycle.json).
+[current no-store admission-derived status](https://openadapt.ai/status.json)
+and the [Production admission contract](https://docs.openadapt.ai/reference/production-lifecycle/).
 
 **Workflow admission:** Standard and Regulated actuation require a valid active
 admission for the exact sealed workflow. A release admission alone does not

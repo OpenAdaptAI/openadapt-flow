@@ -1184,32 +1184,32 @@ class Replayer:
         ):
             from openadapt_flow.runtime.durable.authority import DurableAuthority
 
+            managed_durable_run = durable_run
+
             class _ManagedInitialDeliveryGuard:
                 def __init__(self_nonlocal) -> None:
                     self_nonlocal.authority = DurableAuthority(
-                        run_dir, durable_run.store
+                        run_dir, managed_durable_run.store
                     )
                     self_nonlocal.pending_remote_permit: Any = None
 
                 def before_delivery(self_nonlocal) -> None:
-                    assert durable_run is not None
                     if self_nonlocal.pending_remote_permit is not None:
                         raise RuntimeError(
                             "a prior production delivery lacks an acknowledgment receipt"
                         )
                     self_nonlocal.pending_remote_permit = (
                         self_nonlocal.authority.before_initial_delivery(
-                            durable_run._manifest  # noqa: SLF001 - exact retained manifest
+                            managed_durable_run._manifest  # noqa: SLF001 - exact retained manifest
                         )
                     )
 
                 def acknowledge_delivery(self_nonlocal) -> None:
-                    assert durable_run is not None
                     pending = self_nonlocal.pending_remote_permit
                     if pending is None:
                         return
                     self_nonlocal.authority.acknowledge_remote_delivery(
-                        durable_run._manifest,  # noqa: SLF001
+                        managed_durable_run._manifest,  # noqa: SLF001
                         pending,
                     )
                     self_nonlocal.pending_remote_permit = None

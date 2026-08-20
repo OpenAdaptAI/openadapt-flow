@@ -5,13 +5,13 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**openadapt-flow is the OpenAdapt engine: a governed demonstration compiler.**
-Record a task once, compile it to a deterministic program, and replay that
-program deterministically with zero model calls on the healthy path. Instead of
-silently doing the wrong thing when an interface drifts, it re-resolves from the
-evidence the demonstration retained, or it **halts** for a human or an AI, gated
-by an identity check and independent effect verification. It runs entirely on
-your machine; nothing egresses unless you opt in.
+**openadapt-flow is the compiler and governed runtime behind OpenAdapt.**
+It turns a demonstrated task into an inspectable, deterministic program. A
+healthy replay makes zero model calls. When the interface changes, the runtime
+re-resolves the target from retained evidence or halts with a report. An
+authorized person or a configured model can propose a repair, which must pass
+the workflow's identity, result, and policy gates. It runs entirely on your
+machine; nothing egresses unless you opt in.
 
 **Lifecycle: Beta.** See the
 [capability and qualification matrix](docs/PRODUCT_STATUS.md) for workflow- and
@@ -19,12 +19,9 @@ environment-specific evidence. This is the flagship engine of the
 [OpenAdapt](https://github.com/OpenAdaptAI/openadapt) project; the full docs live
 at [docs.openadapt.ai](https://docs.openadapt.ai).
 
-OpenAdapt is built for repeated workflows across every interface an operator
-touches: browser pages, native Windows / macOS / Linux desktops, and
-remote-display sessions (RDP, Citrix / VDI). Each target application and
-environment is qualified separately. Healthy runs make no model calls. When
-interfaces drift, OpenAdapt re-resolves from retained evidence or proposes a
-governed repair, and halts when verification fails.
+The engine supports browser pages, native Windows, macOS, and Linux
+applications, and remote-display sessions through RDP, Citrix, or VDI. Each
+target application and environment is qualified separately.
 
 ![One demonstration, two UIs, same compiled workflow. The right side self-heals under a theme it has never seen](docs/showcase/demo.gif)
 
@@ -33,9 +30,8 @@ Left: the UI the demo was recorded on. Right: a theme it had never seen, where
 each step re-resolves through OCR or geometry, and each fix is written back to
 the script as a reviewable diff. Zero model calls on either side.*
 
-**Verified execution.** It halts instead of guessing, and qualification reports
-measure silent incorrect success, over-halt, effect confirmation, latency, and
-model calls. Read the technical [limits](docs/LIMITS.md) and
+Qualification reports measure silent incorrect success, over-halt, effect
+confirmation, latency, and model calls. Read the technical [limits](docs/LIMITS.md) and
 [validation method](docs/validation/VALIDATION.md), including five adversarial
 rounds against the wrong-target check.
 
@@ -69,8 +65,8 @@ fixture) served through its real transactional backend: it records a
 demonstration while observing the system of record, mines the effect contract from the record delta
 it observed, certifies the bundle against the shipped `clinical-write` policy,
 admits the run through the fail-closed gate under the **Standard** profile, and
-verifies the write by reading the system of record out of band — a path the
-application itself never calls, so the screen cannot influence it. It ends
+verifies the write through an out-of-band read of the system of record. The
+application never calls that path, so the screen cannot influence it. The run ends
 `VERIFIED` with zero model calls, and writes a shareable `receipt.png` /
 `receipt.json` beside the run.
 
@@ -97,8 +93,8 @@ replays what you demonstrated. If you prefer a fully automatic presentation, use
 only to this bundled tutorial. The ordinary `tutorial`, `replay`, and `run`
 paths keep their normal execution speed.
 
-That receipt is generated from a closed allow-list — outcomes, counts, digests,
-and validated package versions — so it can carry no screenshot, OCR text,
+That receipt is generated from a closed allow-list of outcomes, counts, digests,
+and validated package versions. It can carry no screenshot, OCR text,
 typed value, parameter, URL, hostname, coordinate, operator text, or free-form
 halt reason. It carries the bundle digest, so anyone can run the same public
 tutorial and compare.
@@ -135,8 +131,8 @@ certified for clinical writes**. `lint` exits nonzero because its irreversible
 final click is unarmed, and `clinical-write` refuses additional identity,
 system-effect, and idempotency gaps. That is the safety boundary working, not a
 setup failure. The permissive policy is only a smoke gate, and `replay` runs the
-**Demo** profile, whose contract asks for no effect evidence — so a Demo
-completion is `COMPLETED_UNVERIFIED` and is never billable and never a success.
+**Demo** profile, whose contract asks for no effect evidence. A Demo completion
+is `COMPLETED_UNVERIFIED` and is never billable and never a success.
 `tutorial` differs precisely by supplying that missing evidence: a real
 persistence boundary, a mined effect contract, and an independent verifier.
 Nothing in the Demo profile was relaxed to get there.
@@ -290,13 +286,13 @@ unverified run still emits nothing.
 The receipt is **generated from a closed allow-list, never redacted from the
 run report**. Subtractive redaction of a run report is unwinnable: burned-in
 pixels, OCR text captured precisely because it identifies a record, and
-free-form halt reasons all leak, and one missed field is a breach. So the
-receipt declares its complete field set — outcome, profile, and transaction
+free-form halt reasons all leak, and one missed field is a breach. The receipt
+declares its complete field set: outcome, profile, and transaction
 class (closed enums), exact authorization/identity/postcondition/effect
 coverage, step/heal/model-call counts, the zero over-halt counter, duration,
 the resolution-rung histogram, evidence classes, substrate, a validated package
 version, the bundle and receipt digests, explicit provenance, and an
-hour-truncated timestamp — and refuses any key outside it. There is no
+hour-truncated timestamp. It refuses any key outside that set. There is no
 screenshot, OCR text, typed value, parameter, URL, hostname, coordinate,
 workflow name, operator label, or free text.
 
@@ -327,23 +323,23 @@ export OPENADAPT_FLOW_SECRET_PASSWORD='…'                 # supplied at replay
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
-Evidence splits in two. **Identity evidence** — the DOM selector, the control
-role, the accessible name, the clicked row's identity characters, and the
-receiving field's name — is exact or withheld with a stated reason, because
+Evidence splits in two. **Identity evidence** includes the DOM selector, the
+control role, the accessible name, the clicked row's identity characters, and
+the receiving field's name. It is exact or withheld with a stated reason because
 replay compares it against the live page and a rewritten copy would compare
-against text the page never showed. **Reflected evidence** — the page URL and
-the title — is sampled from Python once the page has settled, never inside the
+against text the page never showed. **Reflected evidence** includes the page URL and
+the title. Python samples it after the page settles, never inside the
 capture-phase listener, which runs before the page's own handlers and so reads
 the previous action's text.
 
 Within a document, a URL is reduced by **structure**: Flow reports the origin
 and the path, keeps every parameter name, and drops the value of any parameter
-named after a declared secret field — deterministically, whatever the value is.
+named after a declared secret field. This rule is deterministic for every value.
 A dropped value becomes empty; Flow removes characters from a URL and never
 adds characters the page did not show. A single-page application that routes
 with `history.pushState` therefore keeps its URL evidence. If the URL Flow is
 about to report still holds a value Flow can see, it withholds the whole URL
-and warns you that the application put a secret in its own URL — a defect that
+and warns you that the application put a secret in its own URL. That defect
 exposes it through browser history, logs, proxies and `Referer` headers with or
 without Flow.
 
@@ -514,7 +510,7 @@ at replaying one. These capabilities layer onto the same $0, model-free runtime:
   (`openadapt-flow visualize bundle -o graph.html`).
 - **Multi-trace induction that refuses when it isn't sure.** `induce_program`
   aligns several demonstrations of the same task to recover the shared
-  parameters, loops, and branches, deterministic and model-free at its core.
+  parameters, loops, and branches. The process is deterministic and model-free.
   When a branch condition or a value stays underdetermined it *quarantines* the
   program (`certified` is `False`) instead of guessing, and `disambiguate`
   surfaces the ambiguity as concrete multiple-choice questions rather than
@@ -703,7 +699,7 @@ evidence rather than a matched comparison or publication result. See the
 [aggregate agent-arm report](benchmark/agent_arm_verticals/README.md).
 
 The silent-wrong-effect result is also packaged as a standalone, versioned,
-independently runnable benchmark — **EffectBench** — that a third party can
+independently runnable benchmark, **EffectBench**, that a third party can
 `pip install` and run against their own agent with pydantic as the only
 dependency (no OpenAdapt codebase). It defines the Silent Wrong-Effect Rate
 (SWER) metric, the fault taxonomy, the oracle contract, and a leaderboard /

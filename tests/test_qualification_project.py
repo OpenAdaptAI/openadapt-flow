@@ -2149,9 +2149,7 @@ def test_qualification_authorization_cannot_omit_project_identity_scope(
         qualification_campaign_permit_sha256="1" * 64,
         qualification_campaign_signer_registry_sha256="2" * 64,
         qualification_campaign_signer_registry_revision=1,
-        qualification_campaign_signer_registry_expires_at=(
-            "2099-01-01T00:00:00Z"
-        ),
+        qualification_campaign_signer_registry_expires_at=("2099-01-01T00:00:00Z"),
         qualification_campaign_authority_sha256="3" * 64,
     )
 

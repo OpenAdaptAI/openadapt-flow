@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -29,7 +29,9 @@ from openadapt_flow.qualification_campaign_permit import (
 )
 from openadapt_flow.runtime.authorization import GovernedRunAuthorization
 
-AUTHORITY_SCHEMA = "openadapt.qualification-campaign-authority/v1"
+AUTHORITY_SCHEMA: Final[Literal["openadapt.qualification-campaign-authority/v1"]] = (
+    "openadapt.qualification-campaign-authority/v1"
+)
 
 
 class QualificationCampaignAuthorityError(ValueError):

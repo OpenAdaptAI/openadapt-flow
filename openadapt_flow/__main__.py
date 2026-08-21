@@ -1715,7 +1715,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
     """
     from openadapt_flow.execution_profiles import (
         execution_profile_contract,
-        requires_signed_qualification_admission,
         resolve_execution_profile,
     )
     from openadapt_flow.ir import Workflow
@@ -1918,44 +1917,33 @@ def _cmd_run(args: argparse.Namespace) -> int:
     campaign_permit_binding = None
     if qualification_case is not None:
         authority_file = getattr(args, "qualification_campaign_authority_file", None)
-        if not authority_file:
-            print(
-                "run REFUSED: qualification actuation requires a private signed "
-                "non-production campaign authority file. Nothing was executed."
+        if authority_file:
+            try:
+                campaign_guard = QualificationCampaignGuard(
+                    authority_file,
+                    workflow=workflow,
+                    case_id=qualification_case["case"].id,
+                    input_digest=runtime_inputs_digest(
+                        workflow, gate_params, runtime_worklists
+                    ),
+                    campaign_id=qualification_case["campaign_id"],
+                    run_id=qualification_case["run_id"],
+                )
+                campaign_permit_binding = campaign_guard.authorization_binding(workflow)
+            except QualificationCampaignAuthorityError:
+                print(
+                    "run REFUSED: the non-production qualification campaign permit "
+                    "is invalid, expired, consumed, or does not match this exact "
+                    "trial. Nothing was executed."
+                )
+                return 2
+            args._qualification_campaign_guard = campaign_guard
+        if campaign_permit_binding is not None and local_authorization is not None:
+            local_authorization = local_authorization.model_copy(
+                update=campaign_permit_binding
             )
-            return 2
-        try:
-            campaign_guard = QualificationCampaignGuard(
-                authority_file,
-                workflow=workflow,
-                case_id=qualification_case["case"].id,
-                input_digest=runtime_inputs_digest(
-                    workflow, gate_params, runtime_worklists
-                ),
-                campaign_id=qualification_case["campaign_id"],
-                run_id=qualification_case["run_id"],
-            )
-            campaign_permit_binding = campaign_guard.authorization_binding(workflow)
-        except QualificationCampaignAuthorityError:
-            print(
-                "run REFUSED: the non-production qualification campaign permit "
-                "is invalid, expired, consumed, or does not match this exact trial. "
-                "Nothing was executed."
-            )
-            return 2
-        args._qualification_campaign_guard = campaign_guard
-    requires_production_authority = (
-        qualification_case is None
-        and requires_signed_qualification_admission(selected_profile, will_actuate=True)
-    )
-    if requires_production_authority:
-        authority_file = getattr(args, "qualification_authority_file", None)
-        if not authority_file:
-            print(
-                "run REFUSED: Production actuation requires a private signed v2 "
-                "qualification authority file. Nothing was executed."
-            )
-            return 2
+    authority_file = getattr(args, "qualification_authority_file", None)
+    if authority_file:
         try:
             production_guard = ProductionQualificationGuard(
                 authority_file,

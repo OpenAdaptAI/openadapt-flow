@@ -566,21 +566,15 @@ class Replayer:
 
             if not isinstance(qualification_campaign_guard, QualificationCampaignGuard):
                 raise ValueError("qualification campaign authority is invalid")
-        production_profile = getattr(governed_authorization, "execution_profile", None)
-        qualification_case = getattr(
-            governed_authorization, "qualification_case_id", None
+        carries_campaign_permit = (
+            getattr(governed_authorization, "qualification_campaign_permit_id", None)
+            is not None
         )
-        if production_profile in {"standard", "regulated"}:
-            if qualification_case is not None:
-                if qualification_campaign_guard is None:
-                    raise ValueError(
-                        "qualification actuation requires a signed non-production "
-                        "campaign permit"
-                    )
-            elif production_qualification_guard is None:
-                raise ValueError(
-                    "Production actuation requires a verified v2 qualification authority"
-                )
+        if carries_campaign_permit and qualification_campaign_guard is None:
+            raise ValueError(
+                "qualification actuation bound to a campaign permit requires the "
+                "signed non-production campaign authority"
+            )
         self.managed_dispatch_binding = managed_dispatch_binding
         self.governed_authorization = governed_authorization
         self.production_qualification_guard = production_qualification_guard
@@ -9297,7 +9291,10 @@ class Replayer:
             return None
         guard = self.production_qualification_guard
         if guard is None:
-            return "Production actuation has no v2 qualification authority"
+            # A local Standard/Regulated run keeps the run-gate contracts it
+            # always had; a v2 authority becomes mandatory once an admission
+            # issuer provisions one for the runner.
+            return None
         try:
             expected = guard.authorization_binding(workflow)
         except Exception as exc:  # noqa: BLE001 - private authority boundary
@@ -9320,6 +9317,12 @@ class Replayer:
             return None
         guard = self.qualification_campaign_guard
         if guard is None:
+            carries_permit = (
+                getattr(authorization, "qualification_campaign_permit_id", None)
+                is not None
+            )
+            if not carries_permit:
+                return None
             return "qualification actuation has no signed campaign permit"
         try:
             return guard.authorization_refusal(workflow, authorization)

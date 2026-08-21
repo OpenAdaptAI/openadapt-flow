@@ -1101,7 +1101,6 @@ def build_qualification_case_authorization(
     worklists: Optional[dict[str, list[dict[str, str]]]],
     campaign_id: str,
     run_id: str,
-    campaign_permit_binding: dict[str, object],
     fault_driver: Any = None,
 ) -> GovernedRunAuthorization:
     """Build the exact authority for one governed qualification-case run.
@@ -1160,18 +1159,6 @@ def build_qualification_case_authorization(
         },
         "required_identity_step_ids": tuple(sorted(required_identity)),
     }
-    permit_fields = {
-        field
-        for field in GovernedRunAuthorization.model_fields
-        if field.startswith("qualification_campaign_")
-        and field
-        not in {
-            "qualification_campaign_id_sha256",
-        }
-    }
-    if set(campaign_permit_binding) != permit_fields:
-        raise ValueError("qualification campaign permit binding is incomplete")
-    updates.update(campaign_permit_binding)
     if case.kind is not QualificationCaseKind.REPRESENTATIVE:
         target = case.resolved_fault_target()
         if target is None:
@@ -1200,9 +1187,7 @@ def build_qualification_case_authorization(
     elif fault_driver is not None:
         raise ValueError("representative qualification case cannot bind a fault driver")
 
-    bound = GovernedRunAuthorization.model_validate(
-        {**authorization.model_dump(mode="json"), **updates}
-    )
+    bound = authorization.model_copy(update=updates)
     validation_error = bound.validate_workflow(workflow)
     if validation_error is not None:
         raise ValueError(

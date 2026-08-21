@@ -23,7 +23,7 @@ import json
 import os
 import stat
 from pathlib import Path
-from typing import Literal
+from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -46,7 +46,9 @@ from openadapt_flow.qualification_admission_v2 import (
 )
 
 MAX_AUTHORITY_BYTES = 512 * 1024
-AUTHORITY_SCHEMA = "openadapt.production-qualification-authority/v1"
+AUTHORITY_SCHEMA: Final[Literal["openadapt.production-qualification-authority/v1"]] = (
+    "openadapt.production-qualification-authority/v1"
+)
 
 
 class ProductionQualificationAuthorityError(ValueError):

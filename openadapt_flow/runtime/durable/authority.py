@@ -832,9 +832,7 @@ class DurableAuthority:
                 "permit_artifact_sha256",
                 "permit_artifact_bytes",
             }
-            legacy_pending_columns = expected_pending_columns - {
-                "authority_origin"
-            }
+            legacy_pending_columns = expected_pending_columns - {"authority_origin"}
             if pending_columns == legacy_pending_columns:
                 pending_count = int(
                     connection.execute(

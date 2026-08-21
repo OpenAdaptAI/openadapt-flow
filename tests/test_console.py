@@ -9,8 +9,8 @@ Behavior under test (import-light -- no browser, no OCR):
    (identity armed / effect contracts on irreversible steps) and degrade to
    None -- never a fabricated 100% -- when a bundle has no consequential step.
 3. Mutating endpoints are FAIL-CLOSED: read-only servers refuse with 403 and
-   the exact CLI command; non-executable verbs (teach) are never executed;
-   artifact serving refuses path traversal.
+   the exact CLI command; Teach executes only for an opaque, admitted local
+   correction demonstration; artifact serving refuses path traversal.
 4. With actions enabled, ``approve`` shells out to the real CLI verb and
    ``promote``/``rollback`` go through the same ``SkillLibrary`` entry points
    the teach pipeline uses.

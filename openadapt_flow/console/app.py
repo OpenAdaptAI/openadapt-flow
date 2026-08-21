@@ -35,7 +35,15 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from openadapt_flow import __version__
 from openadapt_flow.console import actions as actions_mod
 from openadapt_flow.console import attention as attention_mod
-from openadapt_flow.console import data, human_decisions, json_artifacts
+from openadapt_flow.console import (
+    data,
+    human_decisions,
+    json_artifacts,
+    resolution_metrics,
+)
+from openadapt_flow.console import (
+    teach as teach_mod,
+)
 from openadapt_flow.runtime.durable.approval import ResumeRefused
 from openadapt_flow.runtime.durable.attended import (
     AttendedActionRefused,
@@ -194,18 +202,19 @@ def _refuse_or_none(allow_actions: bool, command: str) -> None:
 
 def _execution_response(result: actions_mod.ExecutionResult) -> JSONResponse:
     """Return outcome metadata only; CLI output can echo protected values."""
-    return JSONResponse(
-        {
-            "action_id": result.action_id,
-            "returncode": result.returncode,
-            "stdout": "action completed" if result.returncode == 0 else "",
-            "stderr": (
-                "action failed; run the displayed command locally for details"
-                if result.returncode != 0
-                else ""
-            ),
-        }
-    )
+    body: dict[str, Any] = {
+        "action_id": result.action_id,
+        "returncode": result.returncode,
+        "stdout": "action completed" if result.returncode == 0 else "",
+        "stderr": (
+            "action failed; run the displayed command locally for details"
+            if result.returncode != 0
+            else ""
+        ),
+    }
+    if result.details:
+        body["details"] = result.details
+    return JSONResponse(body)
 
 
 def _public_action_spec(spec: actions_mod.ActionSpec) -> dict[str, Any]:
@@ -494,7 +503,19 @@ def create_app(
                 paused=summary.paused,
                 bundle_dir=bundle,
                 operator_identity=operator,
+                teach_demonstrations=[
+                    {"value": demonstration.id, "label": demonstration.label}
+                    for demonstration in teach_mod.list_teach_demonstrations(run_dir)
+                ],
             )
+        ]
+
+    @app.get("/api/runs/{run_id:path}/teach-demonstrations")
+    def run_teach_demonstrations(run_id: str) -> list[dict[str, Any]]:
+        run_dir = _resolve_run(runs, run_id)
+        return [
+            demonstration.model_dump()
+            for demonstration in teach_mod.list_teach_demonstrations(run_dir)
         ]
 
     @app.get("/api/runs/{run_id:path}")
@@ -573,6 +594,10 @@ def create_app(
             attention_mod.list_attention(runs)
         ).model_dump()
 
+    @app.get("/api/attention/metrics")
+    def attention_metrics() -> dict[str, Any]:
+        return resolution_metrics.resolution_metric_summary(runs).model_dump()
+
     @app.get("/api/attention/{run_id:path}")
     def attention_detail(run_id: str) -> dict[str, Any]:
         run_dir = _resolve_run(runs, run_id)
@@ -600,6 +625,9 @@ def create_app(
                 detail="action path and capability request do not match",
             )
         run_dir = _resolve_run(runs, run_id)
+        pending_before = data._read_json_opt(
+            run_dir / "pending_escalation.json", root=run_dir
+        )
         try:
             item = attention_mod.attention_item(runs, run_dir)
             if item is None:
@@ -649,6 +677,23 @@ def create_app(
                     mode="json"
                 ),
             )
+        try:
+            resolution_metrics.emit_decision_metric(
+                run_dir,
+                category=item.category,
+                pause_created_at=(
+                    pending_before.get("created_at")
+                    if pending_before is not None
+                    and isinstance(pending_before.get("created_at"), str)
+                    else None
+                ),
+                decision=decision,
+            )
+        except (OSError, ValueError):
+            # Metric persistence has no execution authority. The attended
+            # decision is already durable in its engine audit journal, so a
+            # metric failure cannot change or relabel that outcome.
+            pass
         # The durable audit keeps operator, message, request, capability, and
         # transition bindings. Only the closed, PHI-free receipt crosses this
         # presentation boundary; protected content is unrepresentable in it
@@ -683,6 +728,10 @@ def create_app(
                 paused=summary.paused,
                 bundle_dir=bundle,
                 operator_identity=operator,
+                teach_demonstrations=[
+                    {"value": demonstration.id, "label": demonstration.label}
+                    for demonstration in teach_mod.list_teach_demonstrations(run_dir)
+                ],
             )
         }
         spec = specs.get(action_id)
@@ -702,17 +751,53 @@ def create_app(
             )
         _refuse_or_none(allow_actions, _public_action_command(spec))
         kwargs = actions_mod.collect_execution_kwargs(payload or {})
+        correction = None
+        if action_id == "teach":
+            correction = teach_mod.resolve_teach_demonstration(
+                run_dir, kwargs.get("fix_id", "")
+            )
+            if correction is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="the selected local correction is unavailable",
+                )
+        requested_policy = kwargs.get("policy") or "clinical-write"
+        if action_id == "teach" and requested_policy not in data.builtin_policy_names():
+            raise HTTPException(
+                status_code=400,
+                detail="the console Teach action uses built-in policies only",
+            )
         try:
             result = actions_mod.execute_run_action(
                 action_id,
                 run_dir,
                 operator_identity=operator,
                 resolution=kwargs.get("resolution"),
+                correction=correction,
+                bundle_dir=Path(bundle) if bundle is not None else None,
+                bundles_root=bundles,
+                policy=requested_policy,
             )
         except ValueError as e:
             raise HTTPException(
                 status_code=400, detail="action input was refused"
             ) from e
+        if action_id == "teach" and result.details:
+            try:
+                from openadapt_flow.repair.teach import TeachRepairResult
+
+                metric_item = attention_mod.attention_item(runs, run_dir)
+                resolution_metrics.emit_teach_metric(
+                    run_dir,
+                    category=(
+                        metric_item.category
+                        if metric_item is not None
+                        else "operator_review"
+                    ),
+                    result=TeachRepairResult.model_validate(result.details),
+                )
+            except (OSError, ValueError):
+                pass
         return _execution_response(result)
 
     @app.post("/api/workflows/{bundle_id:path}/actions/{action_id}")

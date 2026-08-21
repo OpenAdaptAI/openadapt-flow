@@ -38,11 +38,23 @@ step's semantics:
   Otherwise the decision remains a recorded non-success disposition.
 - **Teach the fix:** enter the existing governed teach/revision path. Regression
   and identity/effect/risk gates report accepted, banked progress, or refused;
-  identity-evidence changes are never silently promoted.
+  identity-evidence changes are never silently promoted. A local correction
+  recording or reviewed correction spec goes in the halted run's
+  `teach-demonstrations/` directory. The console addresses it by an opaque
+  content ID, creates a detached repair candidate, evaluates the configured
+  policy and qualification, and stops. It never reviews, approves, stages,
+  canaries, or activates that candidate.
 - **Needs more time:** record an escalation while preserving the durable pause.
 
 Normal console and CLI capabilities remain available. Attended mode is an
 additional operator workflow, not a reduced product mode.
+
+The local console also writes immutable `openadapt.resolution-metric/v1`
+events. These events contain only closed categories, booleans, bounded
+durations, digests, and timestamps. The Needs Attention summary computes the
+median resolution time and the Teach candidate rate from these events. A
+metric never contains an operator name, workflow name, path, screenshot, OCR
+text, parameter, or free-form reason.
 
 ## Remote AAL2 decisions
 

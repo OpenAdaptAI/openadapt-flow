@@ -72,6 +72,12 @@ from openadapt_flow.repair.registration import (  # noqa: F401
     detached_candidate_path,
     register_bundle_candidate,
 )
+from openadapt_flow.repair.teach import (  # noqa: F401
+    TeachRepairError,
+    TeachRepairResult,
+    correction_digest,
+    create_teach_repair_candidate,
+)
 
 __all__ = [
     # candidate
@@ -111,4 +117,9 @@ __all__ = [
     "register_bundle_candidate",
     "detached_candidate_path",
     "DETACHED_CANDIDATE_RELPATH",
+    # Teach -> candidate seam
+    "TeachRepairError",
+    "TeachRepairResult",
+    "correction_digest",
+    "create_teach_repair_candidate",
 ]

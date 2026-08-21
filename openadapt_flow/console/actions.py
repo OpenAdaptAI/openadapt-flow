@@ -1,4 +1,4 @@
-"""Governance actions for the console: EXISTING verbs only, shown-then-run.
+"""Governance actions for the console: existing governed entry points.
 
 Every action here is one of the engine's existing entry points -- the
 ``openadapt-flow`` CLI verbs (``approve`` / ``resume`` / ``certify`` /
@@ -8,9 +8,10 @@ new engine semantics: it renders the exact command an action will run, and --
 only when the server was started with ``--allow-actions`` -- executes that
 same command (a CLI subprocess, or the same library call the CLI path uses).
 
-``teach`` is deliberately RENDER-ONLY: it needs a fix demonstration the
-operator must record, so the console shows the exact command to copy instead
-of faking an execution path that cannot exist.
+``teach`` becomes executable only after the console discovers a correction
+demonstration inside the selected run's local, dedicated Teach directory.  The
+browser receives an opaque content id, never a path.  Execution creates a
+repair-lifecycle candidate and does not approve, stage, or activate it.
 """
 
 from __future__ import annotations
@@ -28,9 +29,16 @@ from pydantic import BaseModel, Field
 EXECUTE_TIMEOUT_S = 600
 
 
+class ActionInput(BaseModel):
+    """One closed browser input. Values are opaque ids, never local paths."""
+
+    id: str
+    label: str
+    choices: list[dict[str, str]] = Field(default_factory=list)
+
+
 class ActionSpec(BaseModel):
-    """One operator action: what it is, exactly what it runs, and whether the
-    console itself can execute it (vs. copy-to-terminal only)."""
+    """One operator action: its command and exact execution availability."""
 
     id: str
     verb: str
@@ -49,6 +57,7 @@ class ActionSpec(BaseModel):
         default_factory=list,
         description="<angle-bracket> arguments the operator must fill in",
     )
+    inputs: list[ActionInput] = Field(default_factory=list)
 
 
 def _cli(*args: str) -> str:
@@ -67,22 +76,24 @@ def actions_for_run(
     paused: bool,
     bundle_dir: Optional[str] = None,
     operator_identity: Optional[str] = None,
+    teach_demonstrations: Optional[list[dict[str, str]]] = None,
 ) -> list[ActionSpec]:
     run = str(run_dir)
     out: list[ActionSpec] = []
     if halted:
         bundle = bundle_dir or "<bundle-dir>"
+        demonstrations = list(teach_demonstrations or [])
         out.append(
             ActionSpec(
                 id="teach",
                 verb="teach",
                 title="Teach a fix (halt -> learn)",
                 description=(
-                    "Resolve this halted run from a fix demonstration: record "
-                    "ONLY the corrective actions (or write a .json correction "
-                    "spec), then run the command. The correction is induced as "
-                    "a guarded exception branch, gated and validated; an "
-                    "updated bundle is written ONLY if it passes."
+                    "Resolve this halted run from a local correction "
+                    "demonstration. The correction is induced as a guarded "
+                    "exception branch, checked by the regression and "
+                    "qualification gates, and recorded only as a repair "
+                    "candidate. It is never activated by this action."
                 ),
                 command=_cli(
                     "teach",
@@ -95,10 +106,20 @@ def actions_for_run(
                     "<updated-bundle-dir>",
                 ),
                 mutating=True,
-                executable=False,  # needs a fix demonstration the console
-                # cannot record for the operator
+                executable=bool(bundle_dir and demonstrations),
                 placeholders=["<fix-recording-or-spec.json>", "<updated-bundle-dir>"]
                 + ([] if bundle_dir else ["<bundle-dir>"]),
+                inputs=(
+                    [
+                        ActionInput(
+                            id="fix_id",
+                            label="Local correction demonstration",
+                            choices=demonstrations,
+                        )
+                    ]
+                    if demonstrations
+                    else []
+                ),
             )
         )
     if paused:
@@ -255,6 +276,7 @@ class ExecutionResult(BaseModel):
     returncode: int
     stdout: str = ""
     stderr: str = ""
+    details: dict[str, Any] = Field(default_factory=dict)
 
 
 def _run_cli(args: list[str]) -> tuple[int, str, str]:
@@ -275,9 +297,49 @@ def execute_run_action(
     *,
     operator_identity: str,
     resolution: Optional[str] = None,
+    correction: Optional[Path] = None,
+    bundle_dir: Optional[Path] = None,
+    bundles_root: Optional[Path] = None,
+    policy: Optional[str] = None,
 ) -> ExecutionResult:
-    """Execute an executable run-scoped verb (``approve`` / ``resume``) via
-    the CLI. Anything else raises ``ValueError`` (the API returns 400)."""
+    """Execute one admitted run action through its governed entry point.
+
+    ``teach`` creates an inert repair candidate in process. ``approve`` and
+    ``resume`` use their existing CLI verbs. Anything else raises
+    ``ValueError`` (the API returns 400).
+    """
+    if action_id == "teach":
+        if correction is None or bundle_dir is None or bundles_root is None:
+            raise ValueError("Teach requires a bound correction and prior bundle")
+        from openadapt_flow.console.teach import create_candidate_from_demonstration
+
+        result = create_candidate_from_demonstration(
+            run_dir,
+            correction,
+            bundle_dir,
+            bundles_root=bundles_root,
+            policy_name=policy or "clinical-write",
+        )
+        return ExecutionResult(
+            action_id=action_id,
+            command=_cli(
+                "teach",
+                str(run_dir),
+                "--fix",
+                "<selected-local-demonstration>",
+                "--bundle",
+                str(bundle_dir),
+                "--out",
+                "<repair-candidate>",
+            ),
+            returncode=0 if result.outcome == "candidate" else 1,
+            stdout=(
+                "repair candidate created; review and qualification remain required"
+                if result.outcome == "candidate"
+                else "correction retained; no repair candidate was activated"
+            ),
+            details=result.model_dump(mode="json"),
+        )
     if action_id == "approve":
         if not operator_identity.strip():
             raise ValueError("local operator identity is unavailable")
@@ -364,7 +426,7 @@ def collect_execution_kwargs(payload: dict[str, Any]) -> dict[str, str]:
     out: dict[str, str] = {}
     # Approver identity is deliberately absent: the server derives it from the
     # local OS account and a remote/browser caller cannot override attribution.
-    for key in ("resolution", "reason", "policy"):
+    for key in ("resolution", "reason", "policy", "fix_id"):
         val = payload.get(key)
         if isinstance(val, str) and val.strip():
             out[key] = val.strip()

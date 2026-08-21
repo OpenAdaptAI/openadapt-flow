@@ -299,15 +299,32 @@ async function viewRuns() {
 }
 
 async function viewAttention() {
-  const items = await api("/api/attention");
+  const [items, metrics] = await Promise.all([
+    api("/api/attention"),
+    api("/api/attention/metrics"),
+  ]);
+  const metricCards = `<div class="cards">
+    <div class="card"><div class="lbl">Median time to resolve</div>
+      <div class="big">${metrics.median_time_to_resolve_s == null
+        ? "—"
+        : `${safeNumber(metrics.median_time_to_resolve_s, "0")}s`}</div>
+      <div class="lbl">${safeNumber(metrics.resolved_count, "0")} resolved</div></div>
+    <div class="card"><div class="lbl">Teach acceptance</div>
+      <div class="big">${metrics.teach_acceptance_rate == null
+        ? "—"
+        : `${safeNumber((Number(metrics.teach_acceptance_rate) * 100).toFixed(0), "0")}%`}</div>
+      <div class="lbl">${safeNumber(metrics.teach_candidate_count, "0")}/${safeNumber(metrics.teach_attempt_count, "0")} became candidates</div></div>
+  </div>`;
   if (!items.length) {
     return `<h2>Needs Attention</h2>
+      ${metricCards}
       <div class="attention-empty">
         <span class="chip ok">clear</span>
         <p>No halted workflow is waiting for local review.</p>
       </div>`;
   }
   return `<h2>Needs Attention <span class="chip warn">${safeNumber(items.length, "0")}</span></h2>
+    ${metricCards}
     <p class="muted">Protected values and paths stay in the local run artifacts.
       Only the person at this computer should complete CAPTCHA, MFA, or sign-in
       in the live application. ${HEALTH.read_only
@@ -517,6 +534,10 @@ async function attendedAction(button) {
       return;
     }
     window.sessionStorage.removeItem(slot);
+    if (result.reason_code === "demonstration_requested") {
+      window.location.hash = `#/runs/${enc(runId)}`;
+      return;
+    }
     if (state === "completed" || state === "halted") {
       window.location.hash = "#/attention";
       return;
@@ -914,6 +935,20 @@ function confirmAction(index) {
   $("#modal-cmd").textContent = action.command;
   const inputs = $("#modal-inputs");
   inputs.replaceChildren();
+  (action.inputs || []).forEach((input) => {
+    const label = document.createElement("label");
+    label.textContent = input.label;
+    const select = document.createElement("select");
+    select.id = `in-${input.id}`;
+    (input.choices || []).forEach((choice) => {
+      const option = document.createElement("option");
+      option.value = choice.value;
+      option.textContent = choice.label;
+      select.appendChild(option);
+    });
+    label.appendChild(select);
+    inputs.append(label);
+  });
   if (action.id === "approve") {
     const resolutionLabel = document.createElement("label");
     resolutionLabel.textContent = "Resolution";
@@ -925,6 +960,9 @@ function confirmAction(index) {
   }
   pendingExec = async () => {
     const payload = {};
+    (action.inputs || []).forEach((input) => {
+      payload[input.id] = ($(`#in-${input.id}`) || {}).value || "";
+    });
     if (action.id === "approve") {
       payload.resolution = ($("#in-resolution") || {}).value || "";
     }

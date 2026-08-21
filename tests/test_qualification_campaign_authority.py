@@ -195,7 +195,9 @@ def test_forged_case_id_cannot_bypass_production_admission():
         ProductionQualificationGuard
     )
 
-    with pytest.raises(ValueError, match="requires the signed non-production campaign authority"):
+    with pytest.raises(
+        ValueError, match="requires the signed non-production campaign authority"
+    ):
         Replayer(
             FakeBackend(),
             vision=FakeVision(),

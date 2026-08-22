@@ -368,12 +368,6 @@ class GovernedRunAuthorization(BaseModel):
             value is not None for value in campaign_permit
         ):
             raise ValueError("qualification campaign permit binding is incomplete")
-        if self.qualification_case_id is not None and not all(
-            value is not None for value in campaign_permit
-        ):
-            raise ValueError(
-                "qualification cases require a signed campaign permit binding"
-            )
         if (
             self.qualification_case_kind is not None
             and self.qualification_case_id is None

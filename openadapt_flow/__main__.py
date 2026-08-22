@@ -2113,8 +2113,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     retained_authorization = manifest.governed_authorization
     if (
         retained_authorization is not None
-        and retained_authorization.execution_profile in {"standard", "regulated"}
-        and retained_authorization.qualification_case_id is None
+        and retained_authorization.production_qualification_admission_id is not None
     ):
         from openadapt_flow.production_qualification import (
             ProductionQualificationAuthorityError,
@@ -2128,10 +2127,35 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                 "qualification authority again. Nothing was executed."
             )
             return 3
+        try:
+            production_guard = ProductionQualificationGuard(
+                authority_file,
+                remote_permit_revalidation=(
+                    manifest.delivery_authority_kind == "cloud_runner"
+                ),
+            )
+            production_binding = production_guard.authorization_binding(workflow)
+        except ProductionQualificationAuthorityError:
+            print(
+                "Resume REFUSED: the Production qualification authority is invalid, "
+                "expired, revoked, or does not match this exact run. Nothing was "
+                "executed."
+            )
+            return 3
+        if any(
+            getattr(retained_authorization, field, None) != value
+            for field, value in production_binding.items()
+        ):
+            print(
+                "Resume REFUSED: the Production qualification authority differs "
+                "from the retained run. Nothing was executed."
+            )
+            return 3
+        args._production_qualification_guard = production_guard
 
     if (
         retained_authorization is not None
-        and retained_authorization.qualification_case_id is not None
+        and retained_authorization.qualification_campaign_permit_id is not None
     ):
         from openadapt_flow.qualification_campaign_authority import (
             QualificationCampaignAuthorityError,
@@ -2165,30 +2189,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                 "retained run. Nothing was executed."
             )
             return 3
-        try:
-            production_guard = ProductionQualificationGuard(
-                authority_file,
-                remote_permit_revalidation=(
-                    manifest.delivery_authority_kind == "cloud_runner"
-                ),
-            )
-            production_binding = production_guard.authorization_binding(workflow)
-        except ProductionQualificationAuthorityError:
-            print(
-                "Resume REFUSED: the Production qualification authority is invalid, "
-                "expired, revoked, or does not match this exact run. Nothing was "
-                "executed."
-            )
-            return 3
-        if any(
-            getattr(retained_authorization, field, None) != value
-            for field, value in production_binding.items()
-        ):
-            print(
-                "Resume REFUSED: the Production qualification authority differs "
-                "from the retained run. Nothing was executed."
-            )
-            return 3
+        args._qualification_campaign_guard = campaign_guard
 
     # A GUI automation cannot be resumed without a LIVE backend/vision, so build
     # a fresh Replayer here (deployment wiring from --config) and hand it to the
@@ -5323,8 +5324,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Private owner-only v2 Production qualification authority. Required "
-            "for Standard or Regulated actuation; not required for --dry-run"
+            "Private owner-only v2 Production qualification authority; when "
+            "supplied it is verified and re-read at every input edge"
         ),
     )
     p.add_argument(
@@ -5861,10 +5862,11 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--run-id", required=True, help="One local case-attempt identity")
     q.add_argument(
         "--qualification-campaign-authority-file",
-        required=True,
+        default=None,
         metavar="PATH",
         help=(
-            "Private owner-only signed non-production authority for this exact trial"
+            "Private owner-only signed non-production authority for this exact "
+            "trial; required once the run actuates under a campaign permit"
         ),
     )
     q.add_argument(

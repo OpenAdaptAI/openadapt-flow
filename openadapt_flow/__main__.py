@@ -1992,7 +1992,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
     if qualification_case is not None:
         runtime_worklists = qualification_case["worklists"]
-        assert campaign_permit_binding is not None
         try:
             authorization = build_qualification_case_authorization(
                 workflow,

@@ -1,11 +1,11 @@
-# claims.yaml — the machine-readable maturity-claim registry.
+# claims.yaml — the machine-readable capability-evidence registry.
 #
 # WHY THIS FILE EXISTS
 # --------------------
-# Every public maturity claim about openadapt-flow ("web is supported today",
-# "Windows has scoped acceptance") must be a FUNCTION of automated
-# evidence, not a hand-written adjective that quietly rots. This registry maps
-# each claim -> a maturity `tier` -> the specific backing test(s)/benchmark(s)
+# Every public capability claim about openadapt-flow must be a FUNCTION of
+# automated evidence, not a hand-written adjective that quietly rots. This
+# registry maps
+# each claim -> an evidence `tier` -> the specific backing test(s)/benchmark(s)
 # that prove it. `scripts/validate_claims.py` enforces the tier<->evidence
 # contract in CI and regenerates `docs/VERIFICATION.md` from it.
 #
@@ -47,8 +47,8 @@ claims:
   # ------------------------------------------------------------------ web
   - id: web-supported
     claim: >-
-      Web (browser) workflows are supported today: record a GUI workflow once,
-      then replay it deterministically and locally.
+      The Browser recorder, compiler, and deterministic replay contracts are
+      bound to required CI evidence.
     surfaces: [README.md, website, docs]
     tier: supported
     evidence:
@@ -199,17 +199,18 @@ claims:
           reflected evidence from Python at the settled boundary instead.
     caveats:
       - >-
-        "Supported" is scoped to the reference headless-browser backend in this
-        registry. Desktop and remote-display workflows use the separately scoped
-        acceptance and code-qualified claims below.
+        `supported` is an evidence tier scoped to the required CI browser
+        fixture. It is not a product lifecycle state. Governed execution still
+        requires active admissions for the exact release set and workflow.
       - >-
         The full record->compile->replay browser suite runs in the required
         e2e-browser PR gate and repeats in the weekly compatibility matrix.
       - >-
         Existing-session attachment is Chromium-only and loopback-only. It
         requires a dedicated browser process started with remote debugging.
-        It does not claim support for the Capture Chrome extension prototype
-        or direct extension replay.
+        The Capture repository's Chrome extension code is non-shipping
+        development code. It is not the Playwright-native browser recorder or
+        governed replay path.
 
   # -------------------------------------------------- deterministic $0 replay
   - id: deterministic-zero-model-replay

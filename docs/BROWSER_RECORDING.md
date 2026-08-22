@@ -10,10 +10,12 @@ result is the same compile-ready recording for both browser entry modes:
   binds one open tab. This mode keeps a browser session that already completed
   sign-in, SSO, or 2FA.
 
-Both modes are part of the Browser / Playwright Beta surface. Attach mode uses
+Both modes use the same Playwright-native recording contract. Attach mode uses
 Chromium DevTools Protocol only as the local connection transport. The
 recorder, schema, compiler, secret handling, and governed replay path do not
-change.
+change. Flow does not derive a static Browser maturity state. The exact Flow
+release and the exact workflow must pass their separate active admissions for
+governed execution.
 
 ## Launch a new recording browser
 

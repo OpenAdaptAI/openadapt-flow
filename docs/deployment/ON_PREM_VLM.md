@@ -4,10 +4,9 @@ A single GPU appliance serves the identity-veto, grounding, and state-verificati
 VLM tiers to a fleet of **GPU-less** automation runners over the LAN. The runtime
 stays GPU-free and **patient data never leaves the building**.
 
-> Status: appliance + fail-safe clients. Runtime wiring into the identity ladder
-> and the resolution ladder's grounder slot lands separately (after the
-> identity-ladder PR #33 merges). This document is the contract those integrations
-> target.
+> Implementation boundary: appliance + fail-safe clients. Runtime wiring into
+> the identity ladder and the resolution ladder's grounder slot lands
+> separately. This document is the contract those integrations target.
 
 ## Topology
 

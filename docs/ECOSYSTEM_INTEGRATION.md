@@ -1,8 +1,8 @@
 # OpenAdapt ecosystem integration
 
-**Status: current implementation map.** This file replaces the pre-integration
-architecture memo that once described `openadapt-capture` as unimplemented and
-experimental. That statement is obsolete.
+**Current implementation map.** This file replaces the old pre-integration
+architecture memo. `openadapt-capture` is the canonical native capture
+component.
 
 ## Product boundary
 
@@ -13,9 +13,9 @@ evidence-rich workflow model.
 
 | Component | Current Flow integration | Lifecycle boundary |
 | --- | --- | --- |
-| `openadapt-capture` | Supported native capture input through `openadapt-flow[capture]` and `openadapt_flow.adapters.capture` | Capture is Beta. Each native or remote workflow still needs application-specific qualification. |
-| `openadapt-types` | Optional interop boundary through `openadapt-flow[interop]` | The shared schema does not replace Flow's compiled IR or safety contracts. |
-| `openadapt-privacy` | Optional source and artifact privacy controls through `openadapt-flow[privacy]` | A recording never becomes safe to upload only because it compiled. |
+| `openadapt-capture` | Canonical native capture input through `openadapt-flow[capture]` and `openadapt_flow.adapters.capture` | Capture is one of the seven product targets. Its exact release and each exact native or remote workflow require their separate active admissions. |
+| `openadapt-types` | Current interop boundary through `openadapt-flow[interop]` | Its lifecycle is Support. The shared schema does not replace Flow's compiled IR or safety contracts. |
+| `openadapt-privacy` | Current source and artifact privacy controls through `openadapt-flow[privacy]` | Its lifecycle is Support. A recording never becomes safe to upload only because it compiled. |
 | `openadapt-grounding` | Optional grounding rung | It cannot authorize an action or prove an effect. |
 | `openadapt-verifier` | No runtime integration | It is an unrelated research package and is not required by the product. |
 

@@ -10,30 +10,32 @@ deciding whether a workflow is suitable for evaluation or deployment. It is
 not a compliance certification, a safety case for a specific workflow, an SLA,
 or evidence that OpenAdapt is appropriate for unsupervised clinical use.
 
-For the current evidence behind each maturity claim, see
-[`VERIFICATION.md`](VERIFICATION.md). For the package-wide maturity map, see
-[`PRODUCT_STATUS.md`](PRODUCT_STATUS.md).
+For the current evidence behind each capability claim, see
+[`VERIFICATION.md`](VERIFICATION.md). For the package-wide admission and
+evidence map, see [`PRODUCT_STATUS.md`](PRODUCT_STATUS.md).
 
 ## Product boundary
 
-| Capability | Maturity | What the claim means | What it does not mean |
+| Capability | Evidence basis | What the claim means | What it does not mean |
 | --- | --- | --- | --- |
-| Browser record, compile, and replay | **Beta** | The launched-browser path runs end to end in automated and clean-environment tests. The attached-browser path reuses the same recorder and passes 3 real Chromium record-and-compile trials with secret exclusion and external-browser survival checks. A live resize case also compiles actions from two viewport and device-scale baselines. | It is not evidence for every site, browser extension, authentication flow, or long-running production workload. Attach mode requires a loopback CDP endpoint and one same-origin Chromium tab. An action that overlaps a resize is refused because its pre-action coordinate evidence is not exact. The custom Capture extension remains a prototype and is not a direct replay path. |
-| Healthy replay with zero model calls | **Beta** | A run that resolves from retained evidence can execute without a language or vision model; the run report counts model calls. | Zero model calls does not mean zero network traffic. The target application, hosted control plane, remote backend, or effect verifier may still use the network. |
-| Deterministic re-resolution | **Beta** | Bounded visual or structural drift can be resolved through non-model evidence and recorded as a reviewable change. | It is not general adaptation to a redesigned workflow, changed business rules, or missing evidence. |
-| AI-assisted repair | **Experimental** | An explicitly enabled model can propose a target or interpret a changed screen. Existing runtime checks still apply. | A model proposal is not authorization, proof of identity, or proof that a business transaction succeeded. |
-| Human teaching and resume | **Experimental** | A halt can produce evidence for an operator correction, guarded promotion, and durable resume. | Field recovery time, broad authoring UX, enterprise identity integration, and non-repudiation are not established. |
-| Windows UI Automation | **Scoped acceptance** | The native UIA backend completed 3/3 exact WinForms effects and 3/3 refusals for both stale and ambiguous targets. | Acceptance is bound to the tested workflow and Windows environment; each application retains its own identity, effect, and version qualification. |
-| Native macOS automation | **Scoped acceptance** | The AX/AppKit backend completed 3/3 exact TextEdit file effects and refused an ambiguous two-window target; structural record/locate/refuse behavior is covered separately. | Acceptance is bound to the tested host and application. Accessibility exposure and supported native actions vary by application. |
-| Native Linux automation | **Scoped acceptance** | Required current-main CI exercises AT-SPI against GTK3 with 3 exact effects, 3 ambiguity refusals, and 3 stale-target refusals. | The built-in path is X11. Wayland needs an operator-approved portal session, and each application retains its own qualification. |
-| RDP automation | **Scoped acceptance** | A real-network Aardwolf/Windows batch passed 3/3 with an independent guest-tools oracle; a separate real-FreeRDP batch covers record, compile, governed replay, and drift refusal. | The two records do not by themselves cover arbitrary applications, WAN conditions, display policy, or Citrix ICA/HDX. |
-| Citrix / VDI pixel-window automation | **Code-qualified** | The dedicated exact-Workspace-window backend, readiness gate, governed run, and durable resume passed 3 healthy effect-confirmed no-DOM trials plus 3 drift safe-halts. | The retained record explicitly has `ica_hdx_accepted=false`; live ICA/HDX acceptance stays bound to the exact deployment instead of being inferred from a stand-in or RDP. |
-| Managed browser execution | **Beta** | The hosted lane admits attested browser bundles; production mode requires a configured real runner and refuses silent mock fallback. | It does not extend the supported claim to Windows, RDP, Citrix, PHI-bearing shared-cloud execution, an SLA, or a regulated certification. |
-| On-premises / customer-managed deployment | **Experimental** | Deployment configuration, local run gates, egress checks, and audit primitives are supplied. | OpenAdapt does not configure the customer's firewall, KMS, storage, identity provider, backups, retention, incident response, or legal compliance program. |
+| Browser record, compile, and replay | Required CI and counted attach trials | The launched-browser path runs end to end in automated and clean-environment tests. The attached-browser path reuses the same recorder and passes 3 real Chromium record-and-compile trials with secret exclusion and external-browser survival checks. A live resize case also compiles actions from two viewport and device-scale epochs. | It is not evidence for every site, authentication flow, or long-running workload. Attach mode requires a loopback CDP endpoint and one same-origin Chromium tab. A stable resize or monitor-scale change between actions starts a new exact geometry epoch. Only an action that overlaps the transition is refused. The Capture Chrome extension code is non-shipping development code; it is not the supported browser recorder or governed replay path. |
+| Healthy replay with zero model calls | Required CI | A run that resolves from retained evidence can execute without a language or vision model; the run report counts model calls. | Zero model calls does not mean zero network traffic. The target application, hosted control plane, remote backend, or effect verifier may still use the network. |
+| Deterministic re-resolution | Required CI | Bounded visual or structural drift can be resolved through non-model evidence and recorded as a reviewable change. | It is not general adaptation to a redesigned workflow, changed business rules, or missing evidence. |
+| AI-assisted repair | Required CI contract; deployment evidence required | An explicitly enabled model can propose a target or interpret a changed screen. Existing runtime checks still apply. | A model proposal is not authorization, proof of identity, or proof that a business transaction succeeded. |
+| Human teaching and resume | Required CI contract; field evidence required | A halt can produce evidence for an operator correction, guarded promotion, and durable resume. | Field recovery time, broad authoring UX, enterprise identity integration, and non-repudiation require deployment evidence. |
+| Windows UI Automation | Counted task acceptance | The native UIA backend completed 3/3 exact WinForms effects and 3/3 refusals for both stale and ambiguous targets. | Acceptance is bound to the tested workflow and Windows environment; each application retains its own identity, effect, and version qualification. |
+| Native macOS automation | Counted task acceptance | The AX/AppKit backend completed 3/3 exact TextEdit file effects and refused an ambiguous two-window target; structural record/locate/refuse behavior is covered separately. | Acceptance is bound to the tested host and application. Accessibility exposure and supported native actions vary by application. |
+| Native Linux automation | Counted task acceptance plus required CI | Required current-main CI exercises AT-SPI against GTK3 with 3 exact effects, 3 ambiguity refusals, and 3 stale-target refusals. | The built-in path is X11. Wayland needs an operator-approved portal session, and each application retains its own qualification. |
+| RDP automation | Counted task acceptance plus required CI | A real-network Aardwolf/Windows batch passed 3/3 with an independent guest-tools oracle; a separate real-FreeRDP batch covers record, compile, governed replay, and drift refusal. | The two records do not by themselves cover arbitrary applications, WAN conditions, display policy, or Citrix ICA/HDX. |
+| Citrix / VDI pixel-window automation | Required CI plus counted no-DOM stand-in | The dedicated exact-Workspace-window backend, readiness gate, governed run, and durable resume passed 3 healthy effect-confirmed no-DOM trials plus 3 drift safe-halts. | The retained record explicitly has `ica_hdx_accepted=false`; live ICA/HDX acceptance stays bound to the exact deployment instead of being inferred from a stand-in or RDP. |
+| Managed execution | Separate product target and workflow admissions | Configured hosted execution admits exact attested bundles, requires a real runner, authenticates callbacks, and refuses silent mock fallback. | The exact release set and workflow must pass their separate active admissions. The workflow admission binds the execution substrate and data boundary. |
+| On-premises / customer-managed deployment | Release evidence plus site acceptance | Deployment configuration, local run gates, egress checks, audit primitives, signed update, and rollback are supplied. | OpenAdapt does not configure the customer's firewall, KMS, storage, identity provider, backups, retention, incident response, or legal compliance program. |
 
-These labels describe product evidence, not risk acceptance. A Beta engine can
-still produce an unsafe workflow if the demonstration, inferred checks, policy,
-or deployment configuration is inadequate.
+These entries describe bounded evidence, not risk acceptance or product state.
+Only the active release admissions can produce **Production for qualified
+workflows**. Only an exact active workflow admission can authorize its sealed
+workflow version. A demonstrated workflow can still be unsafe if its identity,
+effect, policy, evidence, or deployment contracts are inadequate.
 
 ## What "deterministic" means
 
@@ -313,12 +315,12 @@ halt does not prove earlier actions were harmless.
 
 ## Interaction and environment limits
 
-The reference path is strongest when the target remains inside one captured
-browser surface and the demonstration exposes observable outcomes.
+Qualification is strongest when the demonstration retains exact observations
+and exposes independently verifiable outcomes.
 
 | Condition | Current boundary |
 | --- | --- |
-| Zoom, DPI, font, layout, or viewport changes | Structural evidence can survive some reflow and visual rungs can survive some movement, but support is workflow-specific. Large rescale or reflow can halt. |
+| Zoom, DPI, font, layout, viewport, or monitor changes | Browser recording accepts a stable viewport or DPR change between actions and starts a new exact geometry epoch. Native and remote capture must bind each event to its exact window, display, scale, and frame geometry. An action that overlaps a transition is refused because it has no exact pre-action coordinate space. A disconnect, invalid geometry event, or incomplete topology transition leaves the recording incomplete, and compilation refuses it. |
 | Native select menus, file choosers, permission prompts, and secure desktops | OS or browser chrome may not appear in the captured surface and may be unrecordable or undrivable. Prefer an application-level or keyboard/API path. |
 | New tabs and windows | Opening a tab can be observed structurally where the backend supports it; interaction inside additional windows and multi-window coordination are not a general supported path. |
 | Drag and drop or gesture-heavy controls | Not a general supported primitive. Use a structured/API alternative or validate a purpose-built workflow. |

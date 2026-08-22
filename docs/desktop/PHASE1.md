@@ -153,15 +153,17 @@ is authoritative, not the stored ratio.
 space, so the adapter applies **no** scaling (rescaling would double-scale
 every click), screens each mouse action against the recorded bounds-timeline
 window events (out-of-window input refuses conversion — it targeted a
-different window), refuses sessions where the target window was resized
-(capture video and Flow recordings currently use one fixed viewport), verifies
-extracted frames have that exact viewport, and stamps the output `meta.json`
-with `window_capture` provenance. The `record --backend rdp|citrix`
-orchestration adds `backend_hints` (`rdp_window` / `rdp_window_title`) naming
-the recorded target window for remote replay. Native Windows and macOS window
-recordings do not receive remote hints.
+different window), binds each action and extracted frame to its exact geometry
+epoch, and stamps the output `meta.json` with `window_capture` provenance. A
+window move, resize, monitor crossing, or DPI change between actions starts a
+new epoch. An action that overlaps a transition, an invalid geometry event, or
+an incomplete terminal transition refuses conversion. The
+`record --backend rdp|citrix` orchestration adds `backend_hints` (`rdp_window` /
+`rdp_window_title`) naming the recorded target window for remote replay. Native
+Windows and macOS window recordings do not receive remote hints.
 
-**Frame selection.** For an event at wall-clock `T`: *before* = last video
+**Frame selection.** Within one exact geometry epoch, for an event at wall-clock
+`T`: *before* = last video
 frame at/before `T`; *after* = frame at `T + settle_s` (default 1.0 s),
 clamped to just before the next event. This approximates the live
 Recorder's perceptual-hash settle wait offline; if it proves too coarse on

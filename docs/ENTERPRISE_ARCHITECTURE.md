@@ -6,12 +6,12 @@ certification, legal advice, a BAA, or an SLA.
 
 ## Deployment lanes
 
-| Lane | Execution location | Network posture | Current status |
+| Lane | Execution location | Network posture | Admission requirement |
 | --- | --- | --- | --- |
-| Local evaluation | Operator workstation; bundled browser app or an explicitly supplied URL | No model or telemetry egress by default. The target URL is still network traffic when it is remote. | **Beta** on the reference browser path. |
-| On-prem / air-gapped | Customer-controlled host and optional LAN VLM appliance | Site firewall is the primary boundary; systemd/Docker denial and `verify-airgap.sh` add defence in depth. | **Beta deployment foundation** with signed offline update and atomic rollback; see [`ON_PREM.md`](ON_PREM.md). |
-| Hosted control-plane connection | Execution remains local; `login`, governed `push`, and `report-break` make explicit HTTPS requests | Opt-in only. Artifact egress requires a verified derivative and trusted destination. | **Live beta; operated outside this repository.** |
-| Hosted execution | Runner/control-plane implementation is outside this engine repository | Engine installation alone does not move execution. | Consult the deployed service status and substrate matrix. |
+| Local execution | Operator workstation; bundled browser app or an explicitly supplied URL | No model or telemetry egress by default. The target URL is still network traffic when it is remote. | The exact current seven-target release set and the exact workflow version must have active admissions. |
+| On-prem / air-gapped | Customer-controlled host and optional LAN VLM appliance | Site firewall is the primary boundary; systemd/Docker denial and `verify-airgap.sh` add defence in depth. | The release admission binds the exact release set. The workflow admission binds the exact site, application, environment, identity, effect, and policy contracts. See [`ON_PREM.md`](ON_PREM.md). |
+| Hosted control-plane connection | Execution remains local; `login`, governed `push`, and `report-break` make explicit HTTPS requests | Opt-in only. Artifact egress requires a verified derivative and trusted destination. | Cloud is a separate product target. Its exact deployment must have an active admission. Upload admission does not authorize workflow execution. |
+| Hosted execution | Runner/control-plane implementation is outside this engine repository | Engine installation alone does not move execution. | The exact Cloud deployment, complete current seven-target release set, and exact workflow version must pass their separate active admissions. |
 
 ## Components and data flows
 

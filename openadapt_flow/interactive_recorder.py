@@ -1744,7 +1744,12 @@ _INIT_JS = r"""
       // The ORIGIN is structural, not evidence text: Flow already declared it,
       // and a secret never becomes part of it. It cannot go stale inside a
       // document, because leaving the declared origin stops the recording.
-      o.__oaflow_origin = location.origin;
+      // window.origin, not location.origin: they are identical for an
+      // ordinary http(s) document, but a same-origin srcdoc/about:blank frame
+      // reports its ACTUAL (inherited) origin only through window.origin --
+      // location.origin serializes as "null" there. A sandboxed frame without
+      // allow-same-origin stays "null" through both and is refused.
+      o.__oaflow_origin = String(window.origin || location.origin);
       o.__oaflow_doc = DOC_ID;
       o.__oaflow_doc_holds_secret = (
         opaqueSecretActive || documentHeldSecretValue

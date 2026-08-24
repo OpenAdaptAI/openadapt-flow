@@ -2609,20 +2609,33 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert not (cleanup_frame_recording / "meta.json").exists()
         assert process.poll() is None
 
-        iframe_recording = tmp_path / "recording-iframe-refusal"
+        iframe_recording = tmp_path / "recording-iframe-click"
 
         def click_inside_existing_iframe(page, pump):
             page.frame_locator("#child").locator("#inside").click()
             pump()
+            pump()
 
-        with pytest.raises(BrowserAttachError, match="iframe"):
-            record_interactive(
-                attach_app_url,
-                iframe_recording,
-                cdp_endpoint=endpoint,
-                script=click_inside_existing_iframe,
-            )
-        assert not (iframe_recording / "meta.json").exists()
+        iframe_out = record_interactive(
+            attach_app_url,
+            iframe_recording,
+            cdp_endpoint=endpoint,
+            script=click_inside_existing_iframe,
+        )
+        iframe_events = [
+            json.loads(line)
+            for line in (iframe_out / "events.jsonl").read_text().splitlines()
+            if line.strip()
+        ]
+        assert [event["kind"] for event in iframe_events] == ["click"]
+        # The same-origin frame's click is composed into page space and names
+        # the frame chain replay re-enters.
+        assert iframe_events[0]["structural"]["frame_path"] == ["#child"]
+        # The frame document's own pre-filled secret never persists.
+        frame_blob = (iframe_out / "events.jsonl").read_text() + (
+            iframe_out / "meta.json"
+        ).read_text()
+        assert "FRAME-SECRET-NEVER-PERSIST" not in frame_blob
         assert process.poll() is None
 
         origin_bounce_recording = tmp_path / "recording-origin-bounce-refusal"

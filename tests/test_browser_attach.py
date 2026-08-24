@@ -610,7 +610,11 @@ def test_attached_recorder_refuses_a_new_context_page(tmp_path: Path) -> None:
     assert session.done is True
 
 
-def test_attached_recorder_refuses_iframe_events(tmp_path: Path) -> None:
+def test_attached_recorder_refuses_uncomposed_iframe_events(tmp_path: Path) -> None:
+    """A subframe event is accepted ONLY with the page-space composition
+    marker the in-page closure sets after proving the frame chain. Anything
+    else -- no marker, or a declared secret inside a frame -- refuses."""
+
     session = InteractiveRecorder(
         "https://app.example.test/",
         tmp_path / "recording",
@@ -628,7 +632,7 @@ def test_attached_recorder_refuses_iframe_events(tmp_path: Path) -> None:
     assert session.done is True
     assert session._pyq == []
     assert session._listener_error is not None
-    assert "iframe" in str(session._listener_error)
+    assert "page-space contract" in str(session._listener_error)
 
     session.done = False
     session._listener_error = None
@@ -646,7 +650,70 @@ def test_attached_recorder_refuses_iframe_events(tmp_path: Path) -> None:
     )
     assert session.done is True
     assert session._listener_error is not None
-    assert "iframe" in str(session._listener_error)
+    assert "page-space contract" in str(session._listener_error)
+
+    session.done = False
+    session._listener_error = None
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": False,
+            "__oaflow_frame_composed": True,
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1,
+            "__oaflow_origin": "https://app.example.test",
+            "kind": "click",
+            "x": 310,
+            "y": 320,
+        },
+        source={"page": session.page, "frame": object()},
+    )
+    assert session._listener_error is None
+    assert len(session._pyq) == 1
+    assert session._pyq[0]["x"] == 310
+
+    session._pyq.clear()
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "__oaflow_top_level": False,
+            "__oaflow_frame_composed": True,
+            "__oaflow_secret_mask_bound": True,
+            "__oaflow_input_session": f"{session._session_id}:input:1",
+            "__oaflow_viewport": [1280, 800],
+            "__oaflow_dpr": 1,
+            "__oaflow_origin": "https://app.example.test",
+            "kind": "input",
+            "secret": True,
+            "field": "password",
+        },
+        source={"page": session.page, "frame": object()},
+    )
+    assert session.done is True
+    assert session._pyq == []
+    assert session._listener_error is not None
+    assert "secret field inside an iframe" in str(session._listener_error)
+
+
+def test_cross_origin_frame_refusal_event_stops_recording(tmp_path: Path) -> None:
+    """The in-page closure emits `frame_refusal` when it cannot prove a
+    frame's page-space position (cross-origin or too-deep chain)."""
+
+    session = InteractiveRecorder(
+        "https://app.example.test/",
+        tmp_path / "recording",
+        cdp_endpoint="http://127.0.0.1:9222",
+    )
+    session._enqueue_browser_event(
+        {
+            "__oaflow_session": session._session_id,
+            "kind": "frame_refusal",
+        }
+    )
+    assert session.done is True
+    assert session._pyq == []
+    assert session._listener_error is not None
+    assert "cross-origin or too-deep" in str(session._listener_error)
 
 
 def test_attached_recorder_refuses_invalid_viewport_evidence(tmp_path: Path) -> None:

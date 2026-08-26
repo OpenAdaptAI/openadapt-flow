@@ -49,6 +49,10 @@ from openadapt_flow.runner.protocol import (
     DispatchParamsValues,
     RunnerDispatchPayload,
 )
+from openadapt_flow.runtime.authorization import (
+    RuntimeParamScalar,
+    runtime_param_text,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from pathlib import Path
@@ -119,7 +123,7 @@ class VerifiedDispatch:
     payload: RunnerDispatchPayload
     bundle: TrustedBundle
     profile_path: "Path"
-    params: dict[str, str]
+    params: dict[str, RuntimeParamScalar]
     workflow: "Workflow"
     #: Whole-workflow coverage counts for the terminal run_summary (computed
     #: from the sealed bundle, not from the cloud's claims).
@@ -143,7 +147,7 @@ def verify_dispatch(
     *,
     now: Optional[datetime] = None,
     active_workflow_ids: Optional[set[str]] = None,
-    resolved_params: Optional[dict[str, str]] = None,
+    resolved_params: Optional[dict[str, RuntimeParamScalar]] = None,
 ) -> VerifiedDispatch | Refusal:
     """Independently verify ``payload`` against local trust. Never executes.
 
@@ -245,7 +249,7 @@ def verify_dispatch(
                     RefusalCode.PARAM_DOMAIN_REFUSED,
                     f"param {key!r} has no operator-pinned domain pattern",
                 )
-            if re.fullmatch(pattern, params[key]) is None:
+            if re.fullmatch(pattern, runtime_param_text(params[key])) is None:
                 return Refusal(
                     RefusalCode.PARAM_DOMAIN_REFUSED,
                     f"param {key!r} does not match its pinned domain pattern",

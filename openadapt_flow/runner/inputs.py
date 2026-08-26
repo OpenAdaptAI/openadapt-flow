@@ -6,20 +6,28 @@ import math
 from datetime import date
 
 from openadapt_flow.ir import ParamKind, ParamSpec, Workflow
-from openadapt_flow.runtime.authorization import effective_runtime_params
+from openadapt_flow.runtime.authorization import (
+    RuntimeParamScalar,
+    effective_runtime_params,
+    is_runtime_param_scalar,
+)
 
 
 class AdmittedInputError(ValueError):
     """Hosted inputs do not fit the exact schema sealed into the workflow."""
 
 
-def _validate_value(spec: ParamSpec, value: str) -> None:
+def _validate_value(spec: ParamSpec, value: RuntimeParamScalar) -> None:
     if spec.type is ParamKind.ENUM:
-        if not spec.choices or value not in spec.choices:
+        if not isinstance(value, str) or not spec.choices or value not in spec.choices:
             raise AdmittedInputError(
                 f"parameter {spec.name!r} is outside its admitted enum"
             )
     elif spec.type is ParamKind.DATE:
+        if not isinstance(value, str):
+            raise AdmittedInputError(
+                f"parameter {spec.name!r} is not an ISO date string"
+            )
         try:
             parsed = date.fromisoformat(value)
         except ValueError as exc:
@@ -31,22 +39,24 @@ def _validate_value(spec: ParamSpec, value: str) -> None:
                 f"parameter {spec.name!r} is not a canonical ISO date"
             )
     elif spec.type is ParamKind.NUMBER:
-        try:
-            number = float(value)
-        except ValueError as exc:
-            raise AdmittedInputError(
-                f"parameter {spec.name!r} is not a number"
-            ) from exc
+        if type(value) not in {int, float}:
+            raise AdmittedInputError(f"parameter {spec.name!r} is not a number")
+        number = float(value)
         if not math.isfinite(number):
             raise AdmittedInputError(f"parameter {spec.name!r} must be a finite number")
+    elif spec.type is ParamKind.BOOLEAN:
+        if type(value) is not bool:
+            raise AdmittedInputError(f"parameter {spec.name!r} is not a Boolean")
+    elif not isinstance(value, str):
+        raise AdmittedInputError(f"parameter {spec.name!r} is not a string")
 
 
 def resolve_admitted_params(
     workflow: Workflow,
-    supplied: dict[str, str],
+    supplied: dict[str, RuntimeParamScalar],
     *,
     inline: bool,
-) -> dict[str, str]:
+) -> dict[str, RuntimeParamScalar]:
     """Resolve exact hosted params without inventing or widening the schema.
 
     Hosted execution requires the sealed typed schema. Inline input can never
@@ -89,7 +99,9 @@ def resolve_admitted_params(
             if spec.required:
                 raise AdmittedInputError(f"required parameter {name!r} is missing")
             continue
-        if not isinstance(value, str):
-            raise AdmittedInputError(f"parameter {name!r} is not a string value")
+        if not is_runtime_param_scalar(value):
+            raise AdmittedInputError(
+                f"parameter {name!r} is not a finite JSON scalar value"
+            )
         _validate_value(spec, value)
     return resolved

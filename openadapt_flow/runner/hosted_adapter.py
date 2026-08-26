@@ -39,6 +39,7 @@ from openadapt_flow.qualification_admission_v2 import (
     QualificationAdmissionEnvelope,
     QualificationAdmissionExpected,
     QualificationSignerRegistry,
+    canonical_json,
     contract_sha256,
     verify_qualification_admission,
 )
@@ -53,16 +54,31 @@ from openadapt_flow.runner.product_release import (
     load_product_release_signer_trust,
     verify_product_release_admission,
 )
-from openadapt_flow.runner.protocol import DispatchParamsValues, RunnerDispatchPayload
+from openadapt_flow.runner.protocol import (
+    DispatchParamsValues,
+    RunnerDispatchPayload,
+    validate_runtime_param_name,
+)
+from openadapt_flow.runner.protocol import (
+    dispatch_binding_sha256 as governed_dispatch_binding_sha256,
+)
 from openadapt_flow.runner.verify import Refusal, RefusalCode, verify_dispatch
+from openadapt_flow.runtime.authorization import RuntimeParamScalar
 from openadapt_flow.runtime.durable.authority import (
     REMOTE_AUTHORITY_TOKEN_ENV,
     REMOTE_AUTHORITY_URL_ENV,
     REMOTE_DISPATCH_SESSION_ID_ENV,
+    DurableAuthority,
 )
+from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 from openadapt_flow.terminal_verification_v2 import (
+    ProductionTerminalVerificationContext,
     ProductionTerminalVerificationEnvelope,
+    ProductionTerminalVerificationExpected,
+    build_production_terminal_verification,
     evidence_runner_signer_sha256,
+    prepare_production_terminal_evidence,
+    verify_production_terminal_verification_from_report,
 )
 from openadapt_flow.transaction import (
     DuplicateActuation,
@@ -79,6 +95,21 @@ _RUNNER_TOKEN = r"^oar_[a-f0-9]{64}$"
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,199}$"
 _UTC_SECONDS = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+
+# The current runner credential is never part of a request model. Desktop may
+# project it into this header only for POST /api/runners/register on the exact
+# protected runner origin.
+RUNNER_RENEWAL_HEADER = "x-openadapt-runner-renewal-token"
+
+
+def registration_renewal_headers(current_runner_token: str | None) -> dict[str, str]:
+    """Return the one register-only renewal header without retaining it."""
+
+    if current_runner_token is None or current_runner_token == "":
+        return {}
+    if re.fullmatch(_RUNNER_TOKEN, current_runner_token) is None:
+        raise ValueError("current runner renewal credential is invalid")
+    return {RUNNER_RENEWAL_HEADER: current_runner_token}
 
 
 def _utc_seconds(value: str, *, label: str) -> datetime:
@@ -283,6 +314,31 @@ class HostedTerminalEvent(_Closed):
             raise ValueError("VERIFIED requires exact terminal verification")
         if self.outcome != "VERIFIED" and has_proof:
             raise ValueError("non-VERIFIED callback cannot carry a success proof")
+        if has_proof:
+            assert self.terminal_verification_artifact_bytes_base64 is not None
+            assert self.terminal_verification_artifact_sha256 is not None
+            try:
+                raw = b64decode(
+                    self.terminal_verification_artifact_bytes_base64,
+                    validate=True,
+                )
+                proof = ProductionTerminalVerificationEnvelope.model_validate_json(raw)
+            except (ValueError, TypeError) as exc:
+                raise ValueError("terminal verification artifact is invalid") from exc
+            if (
+                len(raw) > _MAX_ARTIFACT_BYTES
+                or b64encode(raw).decode("ascii")
+                != self.terminal_verification_artifact_bytes_base64
+                or canonical_json(proof) != raw
+                or proof.artifact_sha256() != self.terminal_verification_artifact_sha256
+            ):
+                raise ValueError("terminal verification artifact binding is invalid")
+            if (
+                proof.payload.run_id != self.run_id
+                or proof.payload.run_report_sha256 != self.report_sha256
+                or proof.payload.run_report_object_sha256 != self.report_sha256
+            ):
+                raise ValueError("terminal verification names a different run report")
         return self
 
 
@@ -308,6 +364,14 @@ class HostedRunResult(_Closed):
             TransactionOutcome.VERIFIED,
         }:
             raise ValueError("uncertain delivery has an invalid terminal outcome")
+        if self.terminal_verification is not None and (
+            self.terminal_verification.payload.run_id != self.run_id
+            or self.terminal_verification.payload.run_report_sha256
+            != self.report_sha256
+            or self.terminal_verification.payload.run_report_object_sha256
+            != self.report_sha256
+        ):
+            raise ValueError("terminal verification names a different run report")
         return self
 
 
@@ -411,13 +475,7 @@ def _subprocess_runner(
     )
     report_path = run_dir / "report.json"
     report_bytes = report_path.read_bytes() if report_path.is_file() else None
-    proof_path = run_dir / "production-terminal-verification.json"
-    proof = None
-    if proof_path.is_file():
-        proof = ProductionTerminalVerificationEnvelope.model_validate_json(
-            proof_path.read_bytes()
-        )
-    return ManagedExecution(process.returncode, report_bytes, proof)
+    return ManagedExecution(process.returncode, report_bytes)
 
 
 class HostedRunnerAdapter:
@@ -462,6 +520,13 @@ class HostedRunnerAdapter:
         ):
             raise ValueError("protected runner host is not one canonical HTTPS origin")
         return canonical
+
+    def protected_runner_origin(self, runner_config: Path) -> str:
+        """Return the origin from one protected, strictly parsed runner config."""
+
+        return self._protected_runner_origin(
+            load_runner_config(runner_config, protected=True)
+        )
 
     def registration_request(
         self,
@@ -891,7 +956,7 @@ class HostedRunnerAdapter:
         self,
         dispatch: HostedDispatch,
         config: RunnerConfig,
-    ) -> dict[str, str]:
+    ) -> dict[str, RuntimeParamScalar]:
         trusted = config.bundles.get(dispatch.payload.bundle.content_digest)
         if trusted is None:
             raise ValueError("hosted bundle is not locally trusted")
@@ -955,16 +1020,17 @@ class HostedRunnerAdapter:
                 supplied = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError) as exc:
                 raise ValueError("parameter reference is not valid JSON") from exc
-            if not isinstance(supplied, dict) or any(
-                not isinstance(key, str) or not isinstance(value, str)
-                for key, value in supplied.items()
-            ):
+            if not isinstance(supplied, dict):
                 raise ValueError("parameter reference has an invalid exact shape")
             inline = False
+        for name in supplied:
+            if not isinstance(name, str):
+                raise ValueError("runtime parameter name is invalid")
+            validate_runtime_param_name(name)
         return resolve_admitted_params(workflow, supplied, inline=inline)
 
     @staticmethod
-    def _write_params(path: Path, params: dict[str, str]) -> Path | None:
+    def _write_params(path: Path, params: dict[str, RuntimeParamScalar]) -> Path | None:
         if not params:
             return None
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -972,24 +1038,319 @@ class HostedRunnerAdapter:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags, 0o600)
         try:
-            raw = json.dumps(params, sort_keys=True, separators=(",", ":")).encode()
+            raw = json.dumps(
+                params,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode()
             os.write(descriptor, raw)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
         return path
 
-    @staticmethod
-    def _validate_terminal(
+    def _produce_terminal_verification(
+        self,
+        *,
         dispatch: HostedDispatch,
-        report_bytes: bytes,
-        proof: ProductionTerminalVerificationEnvelope,
-    ) -> None:
-        del dispatch, report_bytes, proof
-        raise ValueError(
-            "hosted production success requires a locally produced proof from "
-            "independent expected state and retained delivery receipts"
+        report: RunReport,
+        run_dir: Path,
+        qualification: ProductionQualificationAuthority,
+        private_key: Ed25519PrivateKey,
+        verified_params: dict[str, RuntimeParamScalar],
+        dispatch_binding_sha256: str,
+    ) -> tuple[ProductionTerminalVerificationEnvelope, str]:
+        """Build, retain, reread, and verify one exact terminal-v2 proof."""
+
+        store = CheckpointStore(run_dir)
+        manifest = store.read_manifest()
+        if (
+            manifest is None
+            or manifest.delivery_authority_kind != "cloud_runner"
+            or manifest.remote_delivery_run_id != dispatch.run_id
+            or manifest.managed_dispatch_binding_sha256 != dispatch_binding_sha256
+            or manifest.params != verified_params
+        ):
+            raise ValueError("retained managed run manifest differs from the dispatch")
+        authorization = manifest.governed_authorization
+        admission = qualification.qualification_admission
+        evidence_identity = admission.payload.evidence_identity
+        expected_production_binding = {
+            "production_qualification_admission_id": admission.payload.admission_id,
+            "production_qualification_admission_sha256": (
+                qualification.qualification_admission_sha256
+            ),
+            "production_qualification_evidence_identity_sha256": (
+                evidence_identity.artifact_sha256()
+            ),
+            "production_qualification_runtime_validation_id": (
+                qualification.expected.runtime_validation_id
+            ),
+            "production_qualification_signer_registry_sha256": (
+                qualification.qualification_signer_registry_sha256
+            ),
+            "production_qualification_signer_registry_revision": (
+                qualification.qualification_signer_registry.revision
+            ),
+            "production_qualification_signer_registry_expires_at": (
+                qualification.qualification_signer_registry.expires_at
+            ),
+            "production_qualification_authority_sha256": (
+                qualification.immutable_binding_sha256()
+            ),
+        }
+        if authorization is None or any(
+            getattr(authorization, field) != value
+            for field, value in expected_production_binding.items()
+        ):
+            raise ValueError("retained production authority differs from admission")
+        if (
+            dispatch_binding_sha256 != dispatch.payload.dispatch_binding_sha256
+            or governed_dispatch_binding_sha256(dispatch.run_id, authorization)
+            != dispatch.payload.dispatch_binding_sha256
+        ):
+            raise ValueError("retained governed authorization differs from dispatch")
+        qualification_case_id_sha256 = (
+            None
+            if authorization.qualification_case_id is None
+            else hashlib.sha256(
+                authorization.qualification_case_id.encode("utf-8")
+            ).hexdigest()
         )
+        authorized_effect_contracts = {
+            approval.step_id: list(approval.effect_contract_hashes)
+            for approval in authorization.unverified_write_approvals
+        }
+        if (
+            report.params != verified_params
+            or report.governed_authorization_id != authorization.authorization_id
+            or report.governed_authorization_created_at != authorization.created_at
+            or report.governed_runtime_inputs_digest
+            != authorization.runtime_inputs_digest
+            or report.governed_policy_name != authorization.admitted_policy_name
+            or report.governed_policy_contract_sha256
+            != authorization.admitted_policy_contract_sha256
+            or report.governed_minimum_effect_tier != authorization.minimum_effect_tier
+            or report.governed_approval_source != authorization.approval_source
+            or report.execution_profile != authorization.execution_profile
+            or tuple(report.governed_qualified_effect_requirements)
+            != authorization.qualified_effect_requirements
+            or tuple(report.required_identity_step_ids)
+            != authorization.required_identity_step_ids
+            or report.approved_unverified_effect_step_ids
+            != [item.step_id for item in authorization.unverified_write_approvals]
+            or report.governed_authorized_effect_contracts
+            != authorized_effect_contracts
+            or report.governed_qualification_project_id
+            != authorization.qualification_project_id
+            or report.governed_qualification_project_revision
+            != authorization.qualification_project_revision
+            or report.governed_qualification_project_contract_sha256
+            != authorization.qualification_project_contract_sha256
+            or report.governed_qualification_campaign_id_sha256
+            != authorization.qualification_campaign_id_sha256
+            or report.governed_qualification_case_id_sha256
+            != qualification_case_id_sha256
+            or report.governed_qualification_case_input_sha256
+            != authorization.qualification_case_input_sha256
+            or report.governed_qualification_run_id_sha256
+            != authorization.qualification_run_id_sha256
+            or report.governed_qualification_case_kind
+            != authorization.qualification_case_kind
+            or report.governed_qualification_case_action_paths
+            != authorization.qualification_case_action_paths
+            or report.governed_qualification_fault_driver_id
+            != authorization.qualification_fault_driver_id
+            or report.governed_qualification_fault_driver_contract_sha256
+            != authorization.qualification_fault_driver_contract_sha256
+            or report.governed_qualification_fault_driver_key_id
+            != authorization.qualification_fault_driver_key_id
+            or report.governed_qualification_fault_step_id_sha256
+            != authorization.qualification_fault_step_id_sha256
+        ):
+            raise ValueError("run report differs from retained governed inputs")
+
+        chain = DurableAuthority(run_dir, store).production_delivery_permit_chain()
+        first = chain.entries[0]
+        expected = qualification.expected
+        runtime = expected.runtime_build_identity
+        flow_run_id_sha256 = hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest()
+        runner_id_sha256 = hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest()
+        runner_session_id_sha256 = hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest()
+        if (
+            first.run_id != dispatch.run_id
+            or first.flow_run_id_sha256 != flow_run_id_sha256
+            or first.admission_artifact_sha256
+            != qualification.qualification_admission_sha256
+            or first.evidence_identity_sha256
+            != admission.payload.evidence_identity.artifact_sha256()
+            or first.environment_digest != expected.environment_digest
+            or first.qualification_signer_registry_sha256
+            != qualification.qualification_signer_registry_sha256
+            or first.qualification_signer_registry_revision
+            != qualification.qualification_signer_registry.revision
+            or first.authenticated_runner_id_sha256 != runner_id_sha256
+            or first.authenticated_session_id_sha256 != runner_session_id_sha256
+        ):
+            raise ValueError("retained delivery chain differs from admitted live state")
+
+        prepared = prepare_production_terminal_evidence(report)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_text = now.isoformat().replace("+00:00", "Z")
+        context = ProductionTerminalVerificationContext(
+            run_id=dispatch.run_id,
+            tenant_id=dispatch.tenant_id,
+            workflow_id=dispatch.workflow_id,
+            workflow_version_id=dispatch.workflow_version_id,
+            bundle_version_id=dispatch.workflow_version_id,
+            bundle_artifact_sha256=expected.bundle_artifact_sha256,
+            environment_digest=expected.environment_digest,
+            environment_contract_sha256=expected.environment_contract_sha256,
+            runtime_environment_sha256=expected.runtime_environment_sha256,
+            identity_contract_sha256=expected.identity_contract_sha256,
+            effect_contract_sha256=expected.effect_contract_sha256,
+            runtime_validation_id=expected.runtime_validation_id,
+            runtime_substrate=runtime.substrate,
+            admission_id=admission.payload.admission_id,
+            admission_artifact_sha256=(qualification.qualification_admission_sha256),
+            admission_policy_sha256=evidence_identity.admission_policy_sha256,
+            evidence_identity_sha256=evidence_identity.artifact_sha256(),
+            admitted_runtime_build_sha256=runtime.artifact_sha256(),
+            evidence_runner_signer_sha256=expected.evidence_runner_signer_sha256,
+            qualification_signer_registry_sha256=(
+                qualification.qualification_signer_registry_sha256
+            ),
+            qualification_signer_registry_revision=(
+                qualification.qualification_signer_registry.revision
+            ),
+            execution_authority_id=first.execution_authority_id,
+            execution_authority_sha256=first.execution_authority_sha256,
+            execution_authority_signer_sha256=first.authority_signer_sha256,
+            permit_chain=chain,
+            run_report_object_version="sha256:" + prepared.report_sha256,
+            verified_at=now_text,
+            issued_at=now_text,
+        )
+        built = build_production_terminal_verification(
+            report,
+            context=context,
+            private_key=private_key,
+        )
+        if (
+            built.report_bytes != prepared.report_bytes
+            or built.report_sha256 != prepared.report_sha256
+        ):
+            raise ValueError("terminal report changed during proof production")
+        envelope_bytes = canonical_json(built.envelope)
+        payload = built.envelope.payload
+        final = chain.entries[-1]
+        live_expected = ProductionTerminalVerificationExpected(
+            run_id=dispatch.run_id,
+            flow_run_id_sha256=flow_run_id_sha256,
+            tenant_id=dispatch.tenant_id,
+            workflow_id=dispatch.workflow_id,
+            workflow_version_id=dispatch.workflow_version_id,
+            bundle_version_id=dispatch.workflow_version_id,
+            bundle_artifact_sha256=expected.bundle_artifact_sha256,
+            bundle_content_digest=expected.bundle_content_digest,
+            environment_digest=expected.environment_digest,
+            environment_contract_sha256=expected.environment_contract_sha256,
+            runtime_environment_sha256=expected.runtime_environment_sha256,
+            identity_contract_sha256=expected.identity_contract_sha256,
+            effect_contract_sha256=expected.effect_contract_sha256,
+            runtime_validation_id=expected.runtime_validation_id,
+            runtime_substrate=runtime.substrate,
+            admission_id=admission.payload.admission_id,
+            admission_artifact_sha256=(qualification.qualification_admission_sha256),
+            admission_policy_sha256=evidence_identity.admission_policy_sha256,
+            evidence_identity_sha256=evidence_identity.artifact_sha256(),
+            admitted_runtime_build_sha256=runtime.artifact_sha256(),
+            evidence_runner_signer_sha256=expected.evidence_runner_signer_sha256,
+            qualification_signer_registry_sha256=(
+                qualification.qualification_signer_registry_sha256
+            ),
+            qualification_signer_registry_revision=(
+                qualification.qualification_signer_registry.revision
+            ),
+            execution_authority_id=first.execution_authority_id,
+            execution_authority_sha256=first.execution_authority_sha256,
+            execution_authority_signer_sha256=first.authority_signer_sha256,
+            permit_chain_sha256=chain.permit_chain_sha256,
+            permit_count=len(chain.entries),
+            final_authority_sequence=final.authority_sequence,
+            final_runtime_delivery_sequence=final.runtime_delivery_sequence,
+            authenticated_runner_id_sha256=runner_id_sha256,
+            authenticated_session_id_sha256=runner_session_id_sha256,
+            acknowledged_one_use_claim_ids=tuple(
+                item.one_use_claim_id for item in chain.entries
+            ),
+            workflow_contract_sha256=payload.workflow_contract_sha256,
+            execution_outcome_sha256=payload.execution_outcome_sha256,
+            run_receipt_sha256=payload.run_receipt_sha256,
+            run_report_sha256=built.report_sha256,
+            run_report_object_version=context.run_report_object_version,
+            run_report_object_sha256=built.report_sha256,
+            evidence_manifests=payload.evidence_manifests,
+        )
+        artifact_sha256 = verify_production_terminal_verification_from_report(
+            built.envelope,
+            report_bytes=built.report_bytes,
+            expected=live_expected,
+            now=now,
+        )
+        if artifact_sha256 != hashlib.sha256(envelope_bytes).hexdigest():
+            raise ValueError("terminal verification artifact digest changed")
+
+        # Final-named evidence exists only after the complete in-memory proof
+        # passes. If storage or the required reread fails, remove only files
+        # created by this call so no failed terminalization leaves success
+        # artifacts behind.
+        report_path = run_dir / "production-terminal-report.json"
+        envelope_path = run_dir / "production-terminal-verification.json"
+        written: list[Path] = []
+        try:
+            self._write_private_bytes(report_path, built.report_bytes)
+            written.append(report_path)
+            self._write_private_bytes(envelope_path, envelope_bytes)
+            written.append(envelope_path)
+            stored_report = self._read_private_bytes(
+                report_path,
+                maximum_bytes=_MAX_ARTIFACT_BYTES,
+                label="production terminal report",
+            )
+            stored_envelope = self._read_private_bytes(
+                envelope_path,
+                maximum_bytes=_MAX_ARTIFACT_BYTES,
+                label="production terminal verification",
+            )
+            if stored_report != built.report_bytes or stored_envelope != envelope_bytes:
+                raise ValueError("stored terminal evidence changed after write")
+            reread = ProductionTerminalVerificationEnvelope.model_validate_json(
+                stored_envelope
+            )
+            if canonical_json(reread) != stored_envelope:
+                raise ValueError("stored terminal verification is not canonical")
+            reread_sha256 = verify_production_terminal_verification_from_report(
+                reread,
+                report_bytes=stored_report,
+                expected=live_expected,
+                now=now,
+            )
+            if reread_sha256 != artifact_sha256:
+                raise ValueError("stored terminal verification digest changed")
+        except Exception:
+            for path in reversed(written):
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            raise
+        return reread, built.report_sha256
 
     @staticmethod
     def _refusal(
@@ -1256,23 +1617,47 @@ class HostedRunnerAdapter:
                 report_sha256="0" * 64,
             )
         report: RunReport | None = None
+        report_digest = hashlib.sha256(execution.report_bytes).hexdigest()
         try:
             report = RunReport.model_validate_json(execution.report_bytes)
             outcome = classify_transaction_outcome(report)
-            proof = execution.terminal_verification
+            proof: ProductionTerminalVerificationEnvelope | None = None
+            if execution.terminal_verification is not None:
+                raise ValueError("managed child supplied an untrusted terminal proof")
             if outcome is TransactionOutcome.VERIFIED:
-                if proof is None:
-                    outcome = TransactionOutcome.RECONCILIATION_REQUIRED
-                else:
-                    self._validate_terminal(parsed, execution.report_bytes, proof)
-            elif proof is not None:
-                raise ValueError("non-VERIFIED execution supplied a success proof")
-        except ValueError:
+                if execution.returncode != 0:
+                    raise ValueError("managed child exited unsuccessfully")
+                terminal_config = load_runner_config(runner_config, protected=True)
+                if self._protected_runner_origin(terminal_config) != configured_origin:
+                    raise ValueError("protected runner origin changed during execution")
+                self._verify_product_release(parsed, terminal_config)
+                terminal_key = self._load_evidence_private_key(terminal_config)
+                terminal_qualification, terminal_deployment = (
+                    self._verify_workflow_admission(
+                        parsed,
+                        terminal_config,
+                        evidence_private_key=terminal_key,
+                    )
+                )
+                if (
+                    terminal_qualification != qualification
+                    or terminal_deployment != deployment_bytes
+                ):
+                    raise ValueError("production admission changed during execution")
+                proof, report_digest = self._produce_terminal_verification(
+                    dispatch=parsed,
+                    report=report,
+                    run_dir=run_dir,
+                    qualification=qualification,
+                    private_key=terminal_key,
+                    verified_params=params,
+                    dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                )
+        except Exception:  # noqa: BLE001 - post-delivery terminalization fails closed
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             proof = None
         if outcome is not TransactionOutcome.VERIFIED:
             proof = None
-        report_digest = hashlib.sha256(execution.report_bytes).hexdigest()
         self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
         if report is None:
             events = tuple(
@@ -1313,24 +1698,33 @@ class HostedRunnerAdapter:
 
     def callback_request(
         self,
-        dispatch: HostedDispatch,
+        dispatch: HostedDispatch | HostedRecoveryBinding | Mapping[str, object],
         result: HostedRunResult | HostedDispatchRefusal,
     ) -> CallbackRequest:
-        if (
-            result.dispatch_id != dispatch.dispatch_id
-            or result.run_id != dispatch.run_id
-        ):
+        if isinstance(dispatch, HostedDispatch):
+            binding: HostedDispatch | HostedRecoveryBinding = dispatch
+        elif isinstance(dispatch, HostedRecoveryBinding):
+            binding = dispatch
+        else:
+            schema = dispatch.get("schema_version")
+            if schema == "openadapt.hosted-runner-recovery/v1":
+                binding = HostedRecoveryBinding.model_validate(dispatch)
+            else:
+                binding = HostedDispatch.model_validate(dispatch)
+        if result.dispatch_id != binding.dispatch_id or result.run_id != binding.run_id:
             raise ValueError("hosted result does not bind the callback lease")
         events = list(result.evidence_batch)
-        proof_bytes = None
+        proof_base64 = None
         proof_digest = None
         if isinstance(result, HostedRunResult):
             if result.terminal_verification is not None:
-                raise ValueError(
-                    "the full local v2 proof cannot cross the hosted callback boundary"
-                )
+                proof_bytes = canonical_json(result.terminal_verification)
+                proof_digest = result.terminal_verification.artifact_sha256()
+                if hashlib.sha256(proof_bytes).hexdigest() != proof_digest:
+                    raise ValueError("terminal proof digest differs from exact bytes")
+                proof_base64 = b64encode(proof_bytes).decode("ascii")
         terminal = HostedTerminalEvent(
-            run_id=dispatch.run_id,
+            run_id=binding.run_id,
             outcome=(
                 result.outcome.value
                 if isinstance(result.outcome, TransactionOutcome)
@@ -1339,18 +1733,24 @@ class HostedRunnerAdapter:
             report_sha256=result.report_sha256,
             started=result.started,
             uncertain_delivery=result.uncertain_delivery,
-            terminal_verification_artifact_bytes_base64=proof_bytes,
+            terminal_verification_artifact_bytes_base64=proof_base64,
             terminal_verification_artifact_sha256=proof_digest,
         )
         events.append(terminal.model_dump(mode="json"))
         return CallbackRequest(
-            dispatch_id=dispatch.dispatch_id,
-            runner_session_id=dispatch.runner_session_id,
-            idempotency_key=dispatch.idempotency_key,
-            lease_token=dispatch.lease_token,
+            dispatch_id=binding.dispatch_id,
+            runner_session_id=binding.runner_session_id,
+            idempotency_key=binding.idempotency_key,
+            lease_token=binding.lease_token,
             product_release_admission_sha256=(
-                dispatch.product_release_admission.artifact_sha256
+                binding.product_release_admission.artifact_sha256
+                if isinstance(binding, HostedDispatch)
+                else binding.product_release_admission_sha256
             ),
-            workflow_admission_sha256=dispatch.workflow_admission.artifact_sha256,
+            workflow_admission_sha256=(
+                binding.workflow_admission.artifact_sha256
+                if isinstance(binding, HostedDispatch)
+                else binding.workflow_admission_sha256
+            ),
             events=tuple(events),
         )

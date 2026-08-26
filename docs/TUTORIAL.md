@@ -6,8 +6,6 @@ practice-management fixture served through its real transactional backend.
 
 ```bash
 openadapt-flow tutorial                                  # the whole loop, VERIFIED
-openadapt-flow tutorial --break-it                       # then watch it catch a lie
-openadapt-flow tutorial --guided                         # perform the demo yourself
 ```
 
 ## What `tutorial` does
@@ -20,27 +18,22 @@ record out of band — a path the application itself never calls, so the screen
 cannot influence it. It ends `VERIFIED` with zero model calls, and writes a
 shareable `receipt.png` / `receipt.json` beside the run.
 
-## What `--break-it` does
-
-`--break-it` reruns the **same certified bundle** against a backend that lies:
-the server rejects the write *after* the application has painted its success
-banner, so every on-screen check passes while nothing lands. The independent
-read of the system of record refutes the mined `record_written` contract and the
-engine **HALTS** at the consequential step instead of believing the screen. The
-caught fault's evidence is a clearly-labeled local `run-broken/REPORT.md`; no
-shareable receipt is emitted for it, because only `VERIFIED` runs may use the
-success rail.
-
 ## What `--guided` does
 
 For a live walkthrough, perform the demonstration yourself and then watch the
 compiled replay at a visible pace. The recording browser closes after OpenAdapt
 observes the saved record through the separate read-only interface. OpenAdapt
 then compiles, certifies, and replays what you demonstrated. If you prefer a
-fully automatic presentation, use
-`openadapt-flow tutorial --headed --presentation-delay 1`. The delay applies
-only to this bundled tutorial. The ordinary `tutorial`, `replay`, and `run`
-paths keep their normal execution speed.
+fully automatic presentation, use:
+
+```bash
+openadapt-flow tutorial --guided
+openadapt-flow tutorial --headed --presentation-delay 1
+```
+
+The delay in the second command applies only to this bundled tutorial. The
+ordinary `tutorial`, `replay`, and `run` paths keep their normal execution
+speed.
 
 The receipt the tutorial emits is generated from a closed allow-list — outcomes,
 counts, digests, and validated package versions — so it can carry no screenshot,

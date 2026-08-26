@@ -2292,6 +2292,13 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             getattr(args, "param", None), getattr(args, "params_file", None)
         ),
     )
+    if manifest.delivery_authority_kind == "cloud_runner" and allow_egress:
+        print(
+            "Resume REFUSED: this managed runner doesn't permit model grounding "
+            "because its evidence contract requires "
+            "screenshots_may_leave_box=false. Nothing was executed."
+        )
+        return 3
 
     # Route the resumed run through the SAME backend factory as replay/run
     # (--backend / --agent-url / --rdp-host over --config), so a resume drives

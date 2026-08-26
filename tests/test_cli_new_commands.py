@@ -548,6 +548,62 @@ def test_resume_web_default_builds_playwright_backend(
     assert captured["ctor"]  # Replayer was constructed for the web path
 
 
+def test_resume_wires_all_configured_appliance_tiers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Resume uses the shared deployment constructor, including VLM handles."""
+    run = _paused_run(tmp_path)
+    main(["approve", str(run)])
+    config = tmp_path / "deployment.yaml"
+    config.write_text("runtime:\n  allow_model_grounding: true\n")
+
+    captured: dict = {}
+    _install_fake_browser(monkeypatch, captured)
+
+    class _Appliance:
+        grounder = object()
+        identity_vlm = object()
+        state_verifier = object()
+
+    appliance = _Appliance()
+
+    import openadapt_flow.runtime.durable as durable_mod
+    import openadapt_flow.runtime.grounder as grounder_mod
+    import openadapt_flow.runtime.remote_vlm as remote_mod
+
+    def _grounder(*, fallback=None):
+        captured["fallback"] = fallback
+        return fallback
+
+    monkeypatch.setattr(remote_mod, "appliance_from_env", lambda: appliance)
+    monkeypatch.setattr(grounder_mod, "build_grounder", _grounder)
+    monkeypatch.setattr(
+        durable_mod,
+        "resume",
+        lambda run_dir, replayer, key=None, execution_target_kind=None: _FakeReport(),
+    )
+
+    rc = main(
+        [
+            "resume",
+            str(run),
+            "--require-approval",
+            "--url",
+            "http://app.example",
+            "--config",
+            str(config),
+        ]
+    )
+
+    assert rc == 0
+    assert captured["fallback"] is appliance.grounder
+    assert captured["ctor"]["grounder"] is appliance.grounder
+    assert captured["ctor"]["identity_vlm"] is appliance.identity_vlm
+    assert captured["ctor"]["state_verifier"] is appliance.state_verifier
+    assert captured["ctor"]["allow_model_grounding"] is True
+    assert captured["ctor"]["durable"] is True
+
+
 def test_resume_windows_config_builds_windows_backend(
     tmp_path: Path, monkeypatch
 ) -> None:

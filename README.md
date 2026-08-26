@@ -85,7 +85,7 @@ policy, and verifies the write by reading the system of record out of band — a
 path the app never calls, so the screen cannot influence it. It ends `VERIFIED`
 with zero model calls.
 
-Next, [record one small workflow in your own app](#record-your-own-app-on-any-substrate).
+Next, [record one small read-only workflow in your own app](#record-your-own-app-on-any-substrate).
 
 Full walkthrough, including `--guided` and the hand-driven
 `demo-record` / `compile` / `lint` / `certify` / `replay` stages:
@@ -162,6 +162,9 @@ Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) and
 
 ## Record your own app, on any substrate
 
+Start with one small read-only task. Record it, compile it, inspect and lint the
+bundle, then replay it with the browser visible:
+
 Six substrates run on the same `Backend` protocol and the same governed runtime,
 selected with `--backend web | windows | macos | linux | rdp | citrix` on
 `record`, `replay`, and `run`. The browser is one surface among six, not a
@@ -172,8 +175,15 @@ compiled bundle is bound to the exact surface it was recorded on.
 ```bash
 openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
-openadapt-flow replay bundle --backend web --url https://your.app
+openadapt-flow visualize bundle -o graph.html
+openadapt-flow lint bundle
+openadapt-flow replay bundle --backend web --url https://your.app --headed
 ```
+
+Qualify the exact app and environment before unattended use. If an action is
+state-changing, unknown, consequential, or irreversible, qualify its identity,
+effect, and policy evidence before Flow first actuates it:
+[openadapt.ai/qualify](https://openadapt.ai/qualify).
 
 - Install matrix, exact commands for all six substrates, the counted evidence
   behind each, and the two remote execution modes:

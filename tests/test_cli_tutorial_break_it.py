@@ -145,11 +145,13 @@ def test_plain_tutorial_points_at_a_real_first_workflow(
     out = capsys.readouterr().out
     assert "REPORT.md" in out
     assert "receipt.json" in out
+    assert "one small read-only task" in out
     assert "openadapt-flow record --backend web" in out
     assert "openadapt-flow compile recording" in out
     assert "openadapt-flow visualize bundle" in out
     assert "openadapt-flow lint bundle" in out
     assert "openadapt-flow replay bundle" in out
+    assert "before Flow first actuates it" in out
     assert "--simulate-rejected-write" not in out
     assert "--break-it" not in out
 

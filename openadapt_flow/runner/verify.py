@@ -143,6 +143,7 @@ def verify_dispatch(
     *,
     now: Optional[datetime] = None,
     active_workflow_ids: Optional[set[str]] = None,
+    resolved_params: Optional[dict[str, str]] = None,
 ) -> VerifiedDispatch | Refusal:
     """Independently verify ``payload`` against local trust. Never executes.
 
@@ -194,18 +195,47 @@ def verify_dispatch(
             "this runner never downloads bundles",
         )
 
-    if not isinstance(payload.params, DispatchParamsValues):
+    from openadapt_flow.ir import Workflow
+
+    try:
+        workflow = Workflow.load(trusted.path)
+    except Exception as exc:  # noqa: BLE001 - crypto/integrity/shape: refuse
         return Refusal(
-            RefusalCode.PARAMS_REF_UNSUPPORTED,
-            "params-by-reference (regulated lane) has no local resolver in v1",
+            RefusalCode.BUNDLE_LOAD_FAILED,
+            f"trusted bundle failed to load: {type(exc).__name__}",
         )
-    if trusted.params_ref_required:
-        return Refusal(
-            RefusalCode.PARAMS_VALUES_REFUSED,
-            "this bundle requires params-by-reference; inline params.values "
-            "dispatches are refused on this machine",
-        )
-    params = dict(payload.params.values)
+
+    if isinstance(payload.params, DispatchParamsValues):
+        if trusted.params_ref_required:
+            return Refusal(
+                RefusalCode.PARAMS_VALUES_REFUSED,
+                "this bundle requires params-by-reference; inline params.values "
+                "dispatches are refused on this machine",
+            )
+        params = dict(payload.params.values)
+        if resolved_params is not None and resolved_params != params:
+            return Refusal(
+                RefusalCode.RUNTIME_INPUTS_MISMATCH,
+                "locally resolved params differ from inline dispatch values",
+            )
+    else:
+        if resolved_params is None:
+            return Refusal(
+                RefusalCode.PARAMS_REF_UNSUPPORTED,
+                "params-by-reference requires an explicit local resolver",
+            )
+        params = dict(resolved_params)
+        from openadapt_flow.runtime.authorization import runtime_inputs_digest
+
+        resolved_digest = runtime_inputs_digest(workflow, params, None)
+        if (
+            resolved_digest != payload.params.expected_digest
+            or resolved_digest != payload.authorization.runtime_inputs_digest
+        ):
+            return Refusal(
+                RefusalCode.RUNTIME_INPUTS_MISMATCH,
+                "locally resolved parameter values do not match the admitted digest",
+            )
 
     if trusted.param_patterns:
         for key in sorted(params):
@@ -244,16 +274,6 @@ def verify_dispatch(
             RefusalCode.EGRESS_PROFILE_REFUSED,
             "profile enables model-grounding egress; the runner evidence "
             "contract requires screenshots_may_leave_box=false",
-        )
-
-    from openadapt_flow.ir import Workflow
-
-    try:
-        workflow = Workflow.load(trusted.path)
-    except Exception as exc:  # noqa: BLE001 - crypto/integrity/shape: refuse
-        return Refusal(
-            RefusalCode.BUNDLE_LOAD_FAILED,
-            f"trusted bundle failed to load: {type(exc).__name__}",
         )
 
     fit_refusal = payload.authorization.validate_workflow(workflow)

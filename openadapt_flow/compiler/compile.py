@@ -1775,6 +1775,11 @@ def compile_recording(
     # in pass 2, once every click target's label is known — target labels
     # are mutable evidence (rename drift) and must not be asserted.
     pending: list[tuple[Step, Optional[bytes], Optional[bytes], dict]] = []
+    has_native_source_geometry = any(
+        event.get("source_geometry") is not None for event in events
+    )
+    source_sequence_identity: Optional[tuple[str, str, str, str]] = None
+    previous_source_action_ordinal = 0
     for event in events:
         i = int(event["i"])
         kind = event["kind"]
@@ -1790,6 +1795,10 @@ def compile_recording(
         after_png = _read_png(after_path)
         source_geometry_raw = event.get("source_geometry")
         source_geometry: Optional[NativeSourceGeometry] = None
+        if has_native_source_geometry and source_geometry_raw is None:
+            raise ValueError(
+                "native source geometry must cover every executable recording event"
+            )
         if source_geometry_raw is not None:
             if not isinstance(source_geometry_raw, dict):
                 raise ValueError(f"event {i} source_geometry must be a closed object")
@@ -1810,6 +1819,26 @@ def compile_recording(
                 raise ValueError(
                     f"event {i} native source geometry names a different before frame"
                 )
+            sequence_identity = (
+                source_geometry.source_surface,
+                source_geometry.source_capture_session_sha256,
+                source_geometry.source_capture_terminal_sha256,
+                source_geometry.source_artifact_manifest_sha256,
+            )
+            if source_sequence_identity is None:
+                source_sequence_identity = sequence_identity
+            elif sequence_identity != source_sequence_identity:
+                raise ValueError(
+                    "native source geometry mixes capture or terminal identities"
+                )
+            if (
+                source_geometry.source_action_ordinal
+                <= previous_source_action_ordinal
+            ):
+                raise ValueError(
+                    "native source action ordinals must be unique and strictly increasing"
+                )
+            previous_source_action_ordinal = source_geometry.source_action_ordinal
         before_viewport = _validated_event_viewport(
             event,
             key="viewport_before",

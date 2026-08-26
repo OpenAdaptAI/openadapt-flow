@@ -16,6 +16,11 @@ from PIL import Image, ImageDraw
 
 from openadapt_flow.adapters.capture import convert_capture
 from openadapt_flow.compiler.compile import compile_recording
+from openadapt_flow.source_geometry import (
+    NATIVE_SOURCE_GEOMETRY_BINDING_FIELDS,
+    NativeSourceGeometry,
+    native_source_geometry_sha256,
+)
 
 T0 = 100_000.0
 FRAME_SIZE = (320, 200)
@@ -85,7 +90,7 @@ def _make_capture(tmp_path: Path, *, sealed: bool = True) -> Path:
             timestamp=T0,
             monitor_width=FRAME_SIZE[0],
             monitor_height=FRAME_SIZE[1],
-            platform="test",
+            platform="win32",
             task_description="native geometry fixture",
             double_click_interval_seconds=0.5,
             double_click_distance_pixels=5.0,
@@ -174,6 +179,19 @@ def _stamp_surface(recording_dir: Path, surface: str) -> None:
     path.write_text(json.dumps(meta, indent=2))
 
 
+def _append_second_event(recording_dir: Path) -> tuple[dict, dict]:
+    events_path = recording_dir / "events.jsonl"
+    first = json.loads(events_path.read_text().splitlines()[0])
+    second = json.loads(json.dumps(first))
+    second["i"] = 1
+    frames = recording_dir / "frames"
+    for suffix in ("before", "after"):
+        (frames / f"0001_{suffix}.png").write_bytes(
+            (frames / f"0000_{suffix}.png").read_bytes()
+        )
+    return first, second
+
+
 def test_sealed_native_capture_compiles_exact_source_geometry(tmp_path: Path) -> None:
     capture_dir = _make_capture(tmp_path)
     recording_dir = tmp_path / "recording"
@@ -202,6 +220,34 @@ def test_sealed_native_capture_compiles_exact_source_geometry(tmp_path: Path) ->
     assert (
         workflow.steps[0].source_geometry.binding_sha256 == geometry["binding_sha256"]
     )
+
+
+def test_remote_v2_conversion_uses_exact_ordinal_frames_without_native_geometry(
+    tmp_path: Path,
+) -> None:
+    capture_dir = _make_capture(tmp_path)
+    recording_dir = tmp_path / "recording"
+
+    convert_capture(capture_dir, recording_dir, source_surface=None)
+
+    [event] = [
+        json.loads(line)
+        for line in (recording_dir / "events.jsonl").read_text().splitlines()
+    ]
+    assert "source_geometry" not in event
+    with Image.open(recording_dir / "frames" / "0000_after.png") as after_image:
+        assert after_image.getpixel((0, 0)) == (210, 240, 210)
+
+
+def test_native_conversion_rejects_surface_platform_mismatch(tmp_path: Path) -> None:
+    capture_dir = _make_capture(tmp_path)
+
+    with pytest.raises(ValueError, match="differs from the sealed Capture platform"):
+        convert_capture(
+            capture_dir,
+            tmp_path / "recording",
+            source_surface="macos",
+        )
 
 
 def test_v2_capture_refuses_before_unsealed_database_can_be_opened(
@@ -247,6 +293,53 @@ def test_compiler_refuses_tampered_exact_before_frame(tmp_path: Path) -> None:
         compile_recording(recording_dir, tmp_path / "bundle", name="tampered")
 
 
+def test_compiler_requires_native_geometry_on_every_event(tmp_path: Path) -> None:
+    capture_dir = _make_capture(tmp_path)
+    recording_dir = tmp_path / "recording"
+    convert_capture(capture_dir, recording_dir, source_surface="windows")
+    _stamp_surface(recording_dir, "windows")
+    first, second = _append_second_event(recording_dir)
+    second.pop("source_geometry")
+    (recording_dir / "events.jsonl").write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="cover every executable"):
+        compile_recording(recording_dir, tmp_path / "bundle", name="partial")
+
+
+def test_compiler_rejects_mixed_native_capture_identities(tmp_path: Path) -> None:
+    capture_dir = _make_capture(tmp_path)
+    recording_dir = tmp_path / "recording"
+    convert_capture(capture_dir, recording_dir, source_surface="windows")
+    _stamp_surface(recording_dir, "windows")
+    first, second = _append_second_event(recording_dir)
+    geometry = second["source_geometry"]
+    geometry["source_capture_session_sha256"] = "f" * 64
+    geometry["source_action_ordinal"] += 1
+    geometry["binding_sha256"] = native_source_geometry_sha256(geometry)
+    (recording_dir / "events.jsonl").write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="mixes capture or terminal"):
+        compile_recording(recording_dir, tmp_path / "bundle", name="mixed")
+
+
+def test_compiler_rejects_duplicate_native_action_ordinals(tmp_path: Path) -> None:
+    capture_dir = _make_capture(tmp_path)
+    recording_dir = tmp_path / "recording"
+    convert_capture(capture_dir, recording_dir, source_surface="windows")
+    _stamp_surface(recording_dir, "windows")
+    first, second = _append_second_event(recording_dir)
+    (recording_dir / "events.jsonl").write_text(
+        json.dumps(first) + "\n" + json.dumps(second) + "\n"
+    )
+
+    with pytest.raises(ValueError, match="unique and strictly increasing"):
+        compile_recording(recording_dir, tmp_path / "bundle", name="duplicate")
+
+
 def test_legacy_step_json_omits_absent_source_geometry() -> None:
     from openadapt_flow.ir import ActionKind, Step
 
@@ -254,3 +347,23 @@ def test_legacy_step_json_omits_absent_source_geometry() -> None:
         id="step_000", intent="press Enter", action=ActionKind.KEY, key="Enter"
     )
     assert "source_geometry" not in dumped.model_dump(mode="json")
+    assert json.dumps(
+        dumped.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ) == (
+        '{"action":"key","anchor":null,"api_binding":null,"drag_end_anchor":null,'
+        '"effects":[],"expect":[],"field_label":null,"guard":null,"id":"step_000",'
+        '"identifier_crop_missing_reason":null,"identity_armed":null,'
+        '"identity_unarmed_reason":null,"intent":"press Enter","key":"Enter",'
+        '"modifiers":[],"param":null,"risk":"reversible","risk_explanation":null,'
+        '"risk_review_required":false,"scroll_dx":null,"scroll_dy":null,"secret":false,'
+        '"selection_commit_key":null,"selection_region":null,"text":null,'
+        '"timeout_s":10.0,"wait_until":null}'
+    )
+
+
+def test_native_source_geometry_digest_covers_every_model_field() -> None:
+    assert set(NATIVE_SOURCE_GEOMETRY_BINDING_FIELDS) == (
+        set(NativeSourceGeometry.model_fields) - {"binding_sha256"}
+    )

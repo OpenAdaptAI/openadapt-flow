@@ -127,6 +127,7 @@ def record_desktop_capture(
     params: Optional[dict[str, str]] = None,
     identifier_region: Optional[tuple[int, int, int, int]] = None,
     window: Optional[dict[str, Optional[str]]] = None,
+    source_surface: Optional[str] = None,
     backend_kind: Optional[str] = None,
     replay_window: Optional[str] = None,
     replay_window_title: Optional[str] = None,
@@ -169,6 +170,9 @@ def record_desktop_capture(
             surfaced into ``meta.json`` by the capture adapter. Refused up front
             on hosts where capture has no per-window primitive
             (see :data:`WINDOW_CAPTURE_PLATFORMS`).
+        source_surface: Native source identity (``windows``, ``macos``, or
+            ``linux``). Current v2 window captures use it to retain a sealed
+            per-action geometry binding. Remote surfaces leave it unset.
         backend_kind: Optional replay substrate identity (``rdp`` or
             ``citrix``) to seal into the compiled bundle's local execution
             hints. Other backends do not use the ``rdp_*`` target contract.
@@ -206,6 +210,8 @@ def record_desktop_capture(
         raise ValueError(
             "backend_kind execution hints are supported only for rdp or citrix"
         )
+    if source_surface not in (None, "windows", "macos", "linux"):
+        raise ValueError("source_surface must be windows, macos, linux, or null")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -221,13 +227,15 @@ def record_desktop_capture(
     if convert is None:
         from openadapt_flow.adapters.capture import convert_capture
 
-        convert = functools.partial(
-            convert_capture,
+        converter_options: dict[str, object] = {
             # A native Windows window remains a native UIA surface. Only an
             # explicitly remote target suppresses the local client-window UIA
             # observation, which cannot see controls inside RDP/Citrix.
-            include_structural=backend_kind not in ("rdp", "citrix"),
-        )
+            "include_structural": backend_kind not in ("rdp", "citrix"),
+        }
+        if source_surface is not None:
+            converter_options["source_surface"] = source_surface
+        convert = functools.partial(convert_capture, **converter_options)
 
     if announce:
         scope_line = ""

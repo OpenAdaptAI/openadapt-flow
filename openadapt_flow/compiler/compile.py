@@ -35,6 +35,7 @@ from openadapt_flow.ir import (
     ExecutionMode,
     ExecutionTargetKind,
     Landmark,
+    NativeSourceGeometry,
     ParamKind,
     ParamSpec,
     Point,
@@ -1787,6 +1788,28 @@ def compile_recording(
             )
         before_png = _read_png(before_path)
         after_png = _read_png(after_path)
+        source_geometry_raw = event.get("source_geometry")
+        source_geometry: Optional[NativeSourceGeometry] = None
+        if source_geometry_raw is not None:
+            if not isinstance(source_geometry_raw, dict):
+                raise ValueError(f"event {i} source_geometry must be a closed object")
+            source_geometry = NativeSourceGeometry.model_validate(source_geometry_raw)
+            if surface not in ("windows", "macos", "linux"):
+                raise ValueError(
+                    "native source geometry is valid only for an in-session "
+                    f"native surface, not {surface!r}"
+                )
+            if source_geometry.source_surface != surface:
+                raise ValueError(
+                    "native source geometry surface differs from the compiled "
+                    "recording surface"
+                )
+            if before_png is None or hashlib.sha256(before_png).hexdigest() != (
+                source_geometry.frame_sha256
+            ):
+                raise ValueError(
+                    f"event {i} native source geometry names a different before frame"
+                )
         before_viewport = _validated_event_viewport(
             event,
             key="viewport_before",
@@ -2064,6 +2087,7 @@ def compile_recording(
                             "right_click": ActionKind.RIGHT_CLICK,
                             "drag": ActionKind.DRAG,
                         }[kind],
+                        source_geometry=source_geometry,
                         anchor=anchor,
                         drag_end_anchor=drag_end_anchor,
                         identity_armed=identity_armed,
@@ -2122,6 +2146,7 @@ def compile_recording(
                         id=step_id,
                         intent=intent,
                         action=ActionKind.TYPE,
+                        source_geometry=source_geometry,
                         text=text,
                         param=param,
                         secret=secret,
@@ -2140,6 +2165,7 @@ def compile_recording(
                         id=step_id,
                         intent=f"press {key}",
                         action=ActionKind.KEY,
+                        source_geometry=source_geometry,
                         key=key,
                     ),
                     before_png,
@@ -2156,6 +2182,7 @@ def compile_recording(
                         id=step_id,
                         intent=f"press {'+'.join([*modifiers, key])}",
                         action=ActionKind.HOTKEY,
+                        source_geometry=source_geometry,
                         key=key,
                         modifiers=modifiers,
                     ),
@@ -2181,6 +2208,7 @@ def compile_recording(
                         id=step_id,
                         intent=f"scroll by ({dx}, {dy})",
                         action=ActionKind.SCROLL,
+                        source_geometry=source_geometry,
                         scroll_dx=dx,
                         scroll_dy=dy,
                     ),

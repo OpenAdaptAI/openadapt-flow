@@ -82,6 +82,29 @@ can describe only the remote-client window or canvas, not controls inside the
 remote session. Those remote recordings instead use the external black-box
 visual, relational, identity, and fresh-frame contracts.
 
+### Native source geometry
+
+A current window-scoped Capture session stores every frame with one exact
+window-geometry row and source ordinal. Each action names the earlier pair that
+supplied its coordinates. The pair binds the process start identity, display
+topology, bounds, scale, fixed viewport, normalization rectangle, and geometry
+generation. Recorder shutdown also retains one frame after input has stopped.
+
+For `windows`, `macos`, and `linux`, the adapter first verifies Capture's
+artifact manifest and completion terminal. It reads a private immutable
+snapshot, selects the action's exact bound frame, and selects the first retained
+frame whose source ordinal is later than the action. It does not use a nearest
+timestamp for this evidence. The emitted `source_geometry` object binds those
+source identities to the exact PNG written into the Flow recording. The
+compiler checks the PNG digest and carries the closed object on the compiled
+step.
+
+This contract does not promote local native geometry into an external
+RDP/Citrix workflow. The CLI leaves `source_surface` unset for `rdp` and
+`citrix`, and the compiler refuses a native source binding on `rdp`, `citrix`,
+or `web`. Those surfaces keep their existing pixel, OCR, identity-region, and
+fresh-frame contracts.
+
 ### Secret handling
 
 The browser recorder blacks out a secret field's pixels using the field's DOM

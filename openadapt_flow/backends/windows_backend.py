@@ -36,16 +36,34 @@ base64-encoded to PowerShell ``Set-Clipboard`` and is pasted with Ctrl+V.
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import re
 import struct
+import threading
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, NoReturn, Optional
 from urllib.parse import urlparse
 
 import requests
 
-from openadapt_flow.backend import ActionDeliveryUncertain, StructuralResolutionRefused
+from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
+    DisplayGeometry,
+    DisplayTopologyChanged,
+    FrameObservation,
+    FreshActuationRequired,
+    StructuralResolutionRefused,
+    display_topology_sha256,
+    session_identity_sha256,
+    window_identity_sha256,
+)
+from openadapt_flow.backends.win_agent.server import (
+    FrameGeometry,
+    decode_frame_geometry_header,
+    frame_binding_sha256,
+)
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
     StructuralHandle,
@@ -70,6 +88,8 @@ SCREENSHOT_RETRY_DELAY_S = 2.0
 SCROLL_PIXELS_PER_NOTCH = 100
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_FRAME_GEOMETRY_HEADER = "X-OpenAdapt-Frame-Geometry"
+_FRAME_BINDING_HEADER = "X-OpenAdapt-Frame-Binding-SHA256"
 _CONTEXT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SESSION_ID_RE = re.compile(r"^[a-f0-9]{64}$")
 
@@ -82,8 +102,25 @@ class _TypedResponse:
     payload: Optional[dict]
 
 
+@dataclass(frozen=True)
+class _FrameBinding:
+    """The geometry that arrived with one exact screenshot response."""
+
+    frame_sha256: str
+    geometry: FrameGeometry
+    png: bytes
+
+
 class _TypedRouteUnavailable(RuntimeError):
     """An explicitly legacy-enabled dev agent lacks the typed endpoint."""
+
+
+class _WindowsInputChanged(RuntimeError):
+    """The typed agent proved that no edge crossed on a stale input lease."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # Playwright-style modifier names (as recorded / emitted by the replayer,
@@ -229,11 +266,16 @@ class WindowsBackend:
         self._auth_token = auth_token or None
         self._pin_fingerprint = pin_fingerprint or None
         self._allow_legacy_exec = bool(allow_legacy_exec)
+        self._observation_lock = threading.RLock()
+        self._frame_binding: Optional[_FrameBinding] = None
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._actuation_observation: Optional[FrameObservation] = None
+        self._bound_input_observation: Optional[FrameObservation] = None
         self._guarded_coordinate: Optional[
-            tuple[tuple[int, int], dict[str, Optional[str]]]
+            tuple[tuple[int, int], dict[str, Optional[str]], _FrameBinding]
         ] = None
         self._guarded_keyboard: Optional[
-            tuple[tuple[int, int], dict[str, Optional[str]]]
+            tuple[tuple[int, int], dict[str, Optional[str]], _FrameBinding]
         ] = None
 
         scheme = urlparse(self.server_url).scheme.lower()
@@ -302,10 +344,83 @@ class WindowsBackend:
 
     @property
     def viewport(self) -> tuple[int, int]:
-        """(width, height) of the VM screen, derived from a screenshot."""
+        """Current captured virtual-desktop size in physical frame pixels."""
         if self._viewport is None:
-            self._viewport = _png_size(self.screenshot())
+            self.screenshot()
+        assert self._viewport is not None
         return self._viewport
+
+    @staticmethod
+    def _legacy_frame_geometry(png: bytes) -> FrameGeometry:
+        width, height = _png_size(png)
+        return FrameGeometry.from_payload(
+            {
+                "version": 1,
+                "coordinate_space": "physical_virtual_desktop",
+                "dpi_awareness": "per_monitor_v2",
+                "origin_x": 0,
+                "origin_y": 0,
+                "width": width,
+                "height": height,
+                "monitors": [
+                    {
+                        "device": "DISPLAY1",
+                        "left": 0,
+                        "top": 0,
+                        "width": width,
+                        "height": height,
+                        "dpi_x": 96,
+                        "dpi_y": 96,
+                        "primary": True,
+                    }
+                ],
+            }
+        )
+
+    def _bind_screenshot(self, response: requests.Response, png: bytes) -> None:
+        size = _png_size(png)
+        headers = getattr(response, "headers", {})
+        encoded_geometry = headers.get(_FRAME_GEOMETRY_HEADER)
+        expected_binding = headers.get(_FRAME_BINDING_HEADER)
+        if encoded_geometry is None and expected_binding is None:
+            if not self._allow_legacy_exec:
+                raise RuntimeError(
+                    "screenshot omitted its virtual-desktop frame geometry"
+                )
+            geometry = self._legacy_frame_geometry(png)
+        else:
+            if encoded_geometry is None or expected_binding is None:
+                raise RuntimeError("screenshot frame binding is incomplete")
+            geometry = decode_frame_geometry_header(encoded_geometry)
+            if (
+                not isinstance(expected_binding, str)
+                or len(expected_binding) != 64
+                or not hmac.compare_digest(
+                    expected_binding, frame_binding_sha256(png, geometry)
+                )
+            ):
+                raise RuntimeError("screenshot frame/geometry binding is invalid")
+        if size != (geometry.width, geometry.height):
+            raise RuntimeError(
+                "screenshot dimensions do not match its virtual-desktop geometry"
+            )
+        self._viewport = size
+        self._frame_binding = _FrameBinding(
+            frame_sha256=hashlib.sha256(png).hexdigest(),
+            geometry=geometry,
+            png=bytes(png),
+        )
+
+    def _require_frame_binding(self) -> _FrameBinding:
+        if self._frame_binding is None:
+            try:
+                self.screenshot()
+            except Exception as exc:
+                raise StructuralResolutionRefused(
+                    "Windows input has no bound virtual-desktop frame geometry"
+                ) from exc
+        assert self._frame_binding is not None
+        return self._frame_binding
 
     def screenshot(self) -> bytes:
         """Return the current frame as PNG bytes (with retries).
@@ -330,7 +445,7 @@ class WindowsBackend:
                         f"screenshot HTTP {resp.status_code}: {resp.text[:200]}"
                     )
                 png = resp.content
-                _png_size(png)  # validates signature and header
+                self._bind_screenshot(resp, png)
                 return png
             except Exception as e:  # noqa: BLE001 - retried, then re-raised
                 last_error = e
@@ -339,6 +454,218 @@ class WindowsBackend:
         raise RuntimeError(
             f"screenshot failed after {self._screenshot_max_retries} attempts"
         ) from last_error
+
+    @staticmethod
+    def _display_geometries(geometry: FrameGeometry) -> tuple[DisplayGeometry, ...]:
+        return tuple(
+            DisplayGeometry(
+                display_id=monitor.device,
+                bounds=(
+                    float(monitor.left),
+                    float(monitor.top),
+                    float(monitor.width),
+                    float(monitor.height),
+                ),
+                scale=(monitor.dpi_x / 96.0, monitor.dpi_y / 96.0),
+            )
+            for monitor in geometry.monitors
+        )
+
+    def _frame_identity_context(self) -> dict:
+        def legacy_context() -> dict:
+            return {
+                "application": "windows-legacy-agent",
+                "session": hashlib.sha256(
+                    f"windows-legacy-session\0{self.server_url}".encode("utf-8")
+                ).hexdigest(),
+                "workflow_state": None,
+                "window": {
+                    "window_id": "windows-virtual-desktop",
+                    "pid": 0,
+                    "process_start_time": None,
+                    "owner": "windows-legacy-agent",
+                },
+            }
+
+        payload = self._execution_context()
+        if payload is None:
+            if not self._allow_legacy_exec:
+                raise StructuralResolutionRefused(
+                    "Windows frame observation has no live execution identity"
+                )
+            return legacy_context()
+        session = payload.get("session")
+        window = payload.get("window")
+        if not isinstance(session, str) or not _SESSION_ID_RE.fullmatch(session):
+            if self._allow_legacy_exec:
+                return legacy_context()
+            raise StructuralResolutionRefused(
+                "Windows frame observation has no exact logon-session identity"
+            )
+        if not isinstance(window, dict) or set(window) != {
+            "window_id",
+            "pid",
+            "process_start_time",
+            "owner",
+        }:
+            if self._allow_legacy_exec:
+                return legacy_context()
+            raise StructuralResolutionRefused(
+                "Windows frame observation has no exact foreground-window identity"
+            )
+        window_id = window.get("window_id")
+        pid = window.get("pid")
+        process_start_time = window.get("process_start_time")
+        owner = window.get("owner")
+        if (
+            not isinstance(window_id, str)
+            or not window_id
+            or len(window_id) > 128
+            or isinstance(pid, bool)
+            or not isinstance(pid, int)
+            or pid <= 0
+            or not isinstance(process_start_time, str)
+            or not process_start_time
+            or len(process_start_time) > 128
+            or not isinstance(owner, str)
+            or not _CONTEXT_ID_RE.fullmatch(owner)
+            or payload.get("application") != owner
+        ):
+            if self._allow_legacy_exec:
+                return legacy_context()
+            raise StructuralResolutionRefused(
+                "Windows foreground-window identity is invalid"
+            )
+        return {
+            "application": owner,
+            "session": session,
+            "workflow_state": payload.get("workflow_state"),
+            "window": {
+                "window_id": window_id,
+                "pid": pid,
+                "process_start_time": process_start_time,
+                "owner": owner,
+            },
+        }
+
+    def _observation_from_binding(
+        self,
+        binding: _FrameBinding,
+        context: dict,
+    ) -> FrameObservation:
+        geometry = binding.geometry
+        displays = self._display_geometries(geometry)
+        window = context["window"]
+        return FrameObservation.create(
+            binding.png,
+            origin=(float(geometry.origin_x), float(geometry.origin_y)),
+            scale=(1.0, 1.0),
+            device_pixel_ratio=1.0,
+            display_id="windows-virtual-desktop",
+            display_bounds=(
+                float(geometry.origin_x),
+                float(geometry.origin_y),
+                float(geometry.width),
+                float(geometry.height),
+            ),
+            display_scale=(1.0, 1.0),
+            topology_sha256=display_topology_sha256(
+                displays,
+                coordinate_space=(
+                    "windows-physical-virtual-desktop-per-monitor-v2"
+                ),
+            ),
+            window_identity_sha256=window_identity_sha256(
+                window_id=window["window_id"],
+                pid=window["pid"],
+                process_start_time=window["process_start_time"],
+                owner=window["owner"],
+            ),
+            session_identity_sha256=session_identity_sha256(
+                authority="windows-native-session-digest-v1",
+                session_id=context["session"],
+                session_start_time=None,
+                principal_identity_sha256=None,
+            ),
+        )
+
+    def observe_frame(self) -> FrameObservation:
+        """Capture one frame between two equal exact OS identity samples."""
+
+        with self._observation_lock:
+            last_error: Optional[BaseException] = None
+            for _attempt in range(self._screenshot_max_retries):
+                try:
+                    before = self._frame_identity_context()
+                    self.screenshot()
+                    binding = self._require_frame_binding()
+                    after = self._frame_identity_context()
+                    if before != after:
+                        last_error = StructuralResolutionRefused(
+                            "Windows foreground window or session changed during "
+                            "desktop capture"
+                        )
+                        continue
+                    observation = self._observation_from_binding(binding, before)
+                    self._last_frame_observation = observation
+                    return observation
+                except StructuralResolutionRefused as exc:
+                    last_error = exc
+            raise StructuralResolutionRefused(
+                "Windows could not retain a stable atomic frame observation"
+            ) from last_error
+
+    @property
+    def last_frame_observation(self) -> Optional[FrameObservation]:
+        return self._last_frame_observation
+
+    def acquire_actuation_observation(self) -> FrameObservation:
+        observation = self.observe_frame()
+        self._actuation_observation = observation
+        self._bound_input_observation = None
+        return observation
+
+    def bind_input_observation(self, observation: FrameObservation) -> None:
+        acquired = self._actuation_observation
+        binding = self._require_frame_binding()
+        if (
+            acquired is None
+            or acquired.frame_sha256 != observation.frame_sha256
+            or acquired.geometry_epoch != observation.geometry_epoch
+            or binding.frame_sha256 != observation.frame_sha256
+        ):
+            self._bound_input_observation = None
+            raise StructuralResolutionRefused(
+                "Windows input observation does not match its exact frame lease"
+            )
+        self._bound_input_observation = observation
+
+    def reset_fresh_actuation_state(self) -> None:
+        self._actuation_observation = None
+        self._bound_input_observation = None
+        self.cancel_guarded_coordinate()
+        self.cancel_guarded_keyboard()
+
+    def _raise_fresh_input_required(
+        self,
+        *,
+        expected: FrameObservation,
+        operation: str,
+    ) -> NoReturn:
+        observed = self.observe_frame()
+        if observed.topology_sha256 != expected.topology_sha256:
+            raise DisplayTopologyChanged(
+                expected_observation=expected,
+                observed_observation=observed,
+            )
+        raise FreshActuationRequired(
+            operation=operation,
+            changed_pixel_count=observed.viewport[0] * observed.viewport[1],
+            changed_bbox=(0, 0, observed.viewport[0], observed.viewport[1]),
+            frame_size=observed.viewport,
+            expected_observation=expected,
+            observed_observation=observed,
+        )
 
     def _post_typed_read(self, path: str, payload: dict) -> _TypedResponse:
         """POST a typed observation without turning absence into an action.
@@ -441,10 +768,19 @@ class WindowsBackend:
                     f"UIA actuation refused ({code}): {message or 'target changed'}"
                 )
             if (
-                path == "/input/guarded"
+                path in {"/input", "/input/guarded"}
                 and response.status_code == 409
-                and code in {"stale_context", "stale_focus", "stale_frame"}
+                and code
+                in {"stale_context", "stale_focus", "stale_frame", "stale_geometry"}
             ):
+                if path == "/input/guarded" and code in {
+                    "stale_frame",
+                    "stale_geometry",
+                }:
+                    raise _WindowsInputChanged(
+                        code,
+                        message or "the guarded Windows input lease changed",
+                    )
                 raise StructuralResolutionRefused(
                     "guarded Windows input refused "
                     f"({code}): {message or 'identity binding changed'}"
@@ -573,6 +909,23 @@ class WindowsBackend:
 
         return None
 
+    def _geometry_payload(self) -> dict:
+        return self._require_frame_binding().geometry.to_payload()
+
+    def _frame_to_virtual_point(self, x: int, y: int) -> tuple[int, int]:
+        binding = self._require_frame_binding()
+        try:
+            return binding.geometry.frame_to_virtual(int(x), int(y))
+        except ValueError as exc:
+            raise StructuralResolutionRefused(str(exc)) from exc
+
+    def _virtual_to_frame_point(self, x: int, y: int) -> tuple[int, int]:
+        binding = self._require_frame_binding()
+        try:
+            return binding.geometry.virtual_to_frame(int(x), int(y))
+        except ValueError as exc:
+            raise StructuralResolutionRefused(str(exc)) from exc
+
     # -- structured-text identity (openadapt_flow.backend.IdentityBackend) --
 
     def structured_text_at(self, x: int, y: int) -> Optional[str]:
@@ -597,13 +950,21 @@ class WindowsBackend:
         unavailable, or when nothing is under the point (never raises) -- the
         identity ladder then falls back to the OCR tier.
         """
-        typed = self._post_typed_read("/uia/text-at-point", {"x": int(x), "y": int(y)})
+        try:
+            geometry = self._geometry_payload()
+        except Exception:
+            return None
+        typed = self._post_typed_read(
+            "/uia/text-at-point",
+            {"x": int(x), "y": int(y), "frame_geometry": geometry},
+        )
         if typed.available:
             value = typed.payload.get("text") if typed.payload is not None else None
             return str(value) if isinstance(value, str) and value else None
         if not self._allow_legacy_exec:
             return None
 
+        virtual_x, virtual_y = self._frame_to_virtual_point(x, y)
         snippet = (
             "import json\n"
             "def _oaflow_structured_text_at(px, py):\n"
@@ -664,7 +1025,7 @@ class WindowsBackend:
             "    text = ' '.join(parts).split()\n"
             "    return ' '.join(text) if text else None\n"
             "print('<<OAFLOW_STRUCTURED>>' + json.dumps("
-            f"_oaflow_structured_text_at({int(x)}, {int(y)})) "
+            f"_oaflow_structured_text_at({virtual_x}, {virtual_y})) "
             "+ '<<END_OAFLOW_STRUCTURED>>')\n"
         )
         body = self._execute_read(snippet)
@@ -758,7 +1119,14 @@ class WindowsBackend:
         unavailable, or the WAA server does not echo output (never raises) --
         the step then relies on the visual anchor.
         """
-        typed = self._post_typed_read("/uia/locator-at", {"x": int(x), "y": int(y)})
+        try:
+            geometry = self._geometry_payload()
+        except Exception:
+            return None
+        typed = self._post_typed_read(
+            "/uia/locator-at",
+            {"x": int(x), "y": int(y), "frame_geometry": geometry},
+        )
         if typed.available:
             value = typed.payload.get("locator") if typed.payload is not None else None
             if not isinstance(value, dict):
@@ -770,6 +1138,7 @@ class WindowsBackend:
         if not self._allow_legacy_exec:
             return None
 
+        virtual_x, virtual_y = self._frame_to_virtual_point(x, y)
         snippet = (
             "import json\n"
             "def _oaflow_locator_at(px, py):\n"
@@ -824,7 +1193,7 @@ class WindowsBackend:
             "        return None\n"
             "    return {'automation_id': aid, 'role': role, 'name': name}\n"
             "print('<<OAFLOW_STRUCTURED>>' + json.dumps("
-            f"_oaflow_locator_at({int(x)}, {int(y)})) "
+            f"_oaflow_locator_at({virtual_x}, {virtual_y})) "
             "+ '<<END_OAFLOW_STRUCTURED>>')\n"
         )
         value = self._read_structured_json(snippet)
@@ -853,9 +1222,16 @@ class WindowsBackend:
         name = locator.name or ""
         if not aid and not (role and name):
             return None
+        try:
+            geometry = self._geometry_payload()
+        except Exception:
+            return None
         typed = self._post_typed_read(
             "/uia/find",
-            {"locator": locator.model_dump(mode="json", exclude_none=True)},
+            {
+                "locator": locator.model_dump(mode="json", exclude_none=True),
+                "frame_geometry": geometry,
+            },
         )
         if typed.available:
             payload = typed.payload
@@ -976,7 +1352,8 @@ class WindowsBackend:
             or not all(isinstance(v, (int, float)) for v in value)
         ):
             return None
-        return StructuralHandle(point=(int(value[0]), int(value[1])))
+        point = self._virtual_to_frame_point(int(value[0]), int(value[1]))
+        return StructuralHandle(point=point)
 
     def act_structural(
         self,
@@ -1027,12 +1404,13 @@ class WindowsBackend:
 
         self.cancel_guarded_coordinate()
         point = (int(x), int(y))
-        width, height = self.viewport
+        binding = self._require_frame_binding()
+        width, height = binding.geometry.width, binding.geometry.height
         if not (0 <= point[0] < width and 0 <= point[1] < height):
             raise StructuralResolutionRefused(
                 "Windows guarded coordinate is outside the captured viewport"
             )
-        self._guarded_coordinate = (point, self._guard_context())
+        self._guarded_coordinate = (point, self._guard_context(), binding)
 
     def cancel_guarded_coordinate(self) -> None:
         self._guarded_coordinate = None
@@ -1045,12 +1423,13 @@ class WindowsBackend:
 
         self.cancel_guarded_keyboard()
         point = (int(x), int(y))
-        width, height = self.viewport
+        binding = self._require_frame_binding()
+        width, height = binding.geometry.width, binding.geometry.height
         if not (0 <= point[0] < width and 0 <= point[1] < height):
             raise StructuralResolutionRefused(
                 "Windows guarded keyboard point is outside the captured viewport"
             )
-        self._guarded_keyboard = (point, self._guard_context())
+        self._guarded_keyboard = (point, self._guard_context(), binding)
 
     def cancel_guarded_keyboard(self) -> None:
         self._guarded_keyboard = None
@@ -1081,6 +1460,22 @@ class WindowsBackend:
             )
         return receipt
 
+    def _consume_bound_input_observation(
+        self,
+        binding: _FrameBinding,
+    ) -> FrameObservation:
+        observation = self._bound_input_observation
+        self._bound_input_observation = None
+        self._actuation_observation = None
+        if (
+            observation is None
+            or observation.frame_sha256 != binding.frame_sha256
+        ):
+            raise StructuralResolutionRefused(
+                "Windows guarded input has no bound atomic frame observation"
+            )
+        return observation
+
     def act_guarded_coordinate(
         self,
         x: int,
@@ -1096,10 +1491,14 @@ class WindowsBackend:
             raise StructuralResolutionRefused(
                 "Windows coordinate actuation has no pre-identity binding"
             )
-        point, context = pending
+        point, context, binding = pending
         if point != (int(x), int(y)):
             raise StructuralResolutionRefused(
                 "Windows coordinate target changed after identity verification"
+            )
+        if not hmac.compare_digest(binding.frame_sha256, expected_frame_sha256):
+            raise StructuralResolutionRefused(
+                "Windows coordinate frame changed after identity verification"
             )
         if button not in {"left", "right"}:
             raise StructuralResolutionRefused(
@@ -1109,25 +1508,33 @@ class WindowsBackend:
             raise StructuralResolutionRefused(
                 "Windows guarded right-button double click is unsupported"
             )
+        observation = self._consume_bound_input_observation(binding)
         operation = (
             "physical_double_click"
             if double
             else ("physical_right_click" if button == "right" else "physical_click")
         )
-        response = self._post_typed_action(
-            "/input/guarded",
-            {
-                "expected_frame_sha256": expected_frame_sha256,
-                "expected_context": context,
-                "input": {
-                    "action": "click",
-                    "x": point[0],
-                    "y": point[1],
-                    "double": bool(double),
-                    "button": button,
+        try:
+            response = self._post_typed_action(
+                "/input/guarded",
+                {
+                    "expected_frame_sha256": expected_frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
+                    "expected_context": context,
+                    "input": {
+                        "action": "click",
+                        "x": point[0],
+                        "y": point[1],
+                        "double": bool(double),
+                        "button": button,
+                    },
                 },
-            },
-        )
+            )
+        except _WindowsInputChanged:
+            self._raise_fresh_input_required(
+                expected=observation,
+                operation=operation,
+            )
         return self._guarded_receipt(response, operation)
 
     def drag_guarded(
@@ -1145,30 +1552,42 @@ class WindowsBackend:
             raise StructuralResolutionRefused(
                 "Windows drag has no pre-identity source binding"
             )
-        point, context = pending
+        point, context, binding = pending
         if point != (int(x), int(y)):
             raise StructuralResolutionRefused(
                 "Windows drag source changed after identity verification"
             )
-        width, height = self.viewport
+        if not hmac.compare_digest(binding.frame_sha256, expected_frame_sha256):
+            raise StructuralResolutionRefused(
+                "Windows drag frame changed after identity verification"
+            )
+        width, height = binding.geometry.width, binding.geometry.height
         if not (0 <= int(end_x) < width and 0 <= int(end_y) < height):
             raise StructuralResolutionRefused(
                 "Windows drag destination is outside the captured viewport"
             )
-        response = self._post_typed_action(
-            "/input/guarded",
-            {
-                "expected_frame_sha256": expected_frame_sha256,
-                "expected_context": context,
-                "input": {
-                    "action": "drag",
-                    "x": point[0],
-                    "y": point[1],
-                    "end_x": int(end_x),
-                    "end_y": int(end_y),
+        observation = self._consume_bound_input_observation(binding)
+        try:
+            response = self._post_typed_action(
+                "/input/guarded",
+                {
+                    "expected_frame_sha256": expected_frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
+                    "expected_context": context,
+                    "input": {
+                        "action": "drag",
+                        "x": point[0],
+                        "y": point[1],
+                        "end_x": int(end_x),
+                        "end_y": int(end_y),
+                    },
                 },
-            },
-        )
+            )
+        except _WindowsInputChanged:
+            self._raise_fresh_input_required(
+                expected=observation,
+                operation="physical_drag",
+            )
         return self._guarded_receipt(response, "physical_drag")
 
     def type_text_guarded(
@@ -1183,20 +1602,32 @@ class WindowsBackend:
             raise StructuralResolutionRefused(
                 "Windows text actuation has no pre-identity focused binding"
             )
-        point, context = pending
-        response = self._post_typed_action(
-            "/input/guarded",
-            {
-                "expected_frame_sha256": expected_frame_sha256,
-                "expected_context": context,
-                "focus_point": {"x": point[0], "y": point[1]},
-                "input": {
-                    "action": "type_text",
-                    "text": text,
-                    "interval_s": self._type_interval_s,
+        point, context, binding = pending
+        if not hmac.compare_digest(binding.frame_sha256, expected_frame_sha256):
+            raise StructuralResolutionRefused(
+                "Windows keyboard frame changed after identity verification"
+            )
+        observation = self._consume_bound_input_observation(binding)
+        try:
+            response = self._post_typed_action(
+                "/input/guarded",
+                {
+                    "expected_frame_sha256": expected_frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
+                    "expected_context": context,
+                    "focus_point": {"x": point[0], "y": point[1]},
+                    "input": {
+                        "action": "type_text",
+                        "text": text,
+                        "interval_s": self._type_interval_s,
+                    },
                 },
-            },
-        )
+            )
+        except _WindowsInputChanged:
+            self._raise_fresh_input_required(
+                expected=observation,
+                operation="physical_type_text",
+            )
         return self._guarded_receipt(response, "physical_type_text")
 
     def press_guarded(
@@ -1211,20 +1642,33 @@ class WindowsBackend:
             raise StructuralResolutionRefused(
                 "Windows key actuation has no pre-identity focused binding"
             )
-        point, context = pending
-        response = self._post_typed_action(
-            "/input/guarded",
-            {
-                "expected_frame_sha256": expected_frame_sha256,
-                "expected_context": context,
-                "focus_point": {"x": point[0], "y": point[1]},
-                "input": {"action": "press", "keys": normalize_chord(key)},
-            },
-        )
+        point, context, binding = pending
+        if not hmac.compare_digest(binding.frame_sha256, expected_frame_sha256):
+            raise StructuralResolutionRefused(
+                "Windows keyboard frame changed after identity verification"
+            )
+        observation = self._consume_bound_input_observation(binding)
+        try:
+            response = self._post_typed_action(
+                "/input/guarded",
+                {
+                    "expected_frame_sha256": expected_frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
+                    "expected_context": context,
+                    "focus_point": {"x": point[0], "y": point[1]},
+                    "input": {"action": "press", "keys": normalize_chord(key)},
+                },
+            )
+        except _WindowsInputChanged:
+            self._raise_fresh_input_required(
+                expected=observation,
+                operation="physical_press",
+            )
         return self._guarded_receipt(response, "physical_press")
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) through the bounded typed input contract."""
+        binding = self._require_frame_binding()
         try:
             response = self._post_typed_action(
                 "/input",
@@ -1233,21 +1677,23 @@ class WindowsBackend:
                     "x": int(x),
                     "y": int(y),
                     "double": bool(double),
+                    "expected_frame_sha256": binding.frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
                 },
             )
             self._validate_physical_receipt(
                 response, "physical_double_click" if double else "physical_click"
             )
             return
-        except _TypedRouteUnavailable:
-            if not self._allow_legacy_exec:
-                raise
-        fn = "doubleClick" if double else "click"
-        self._execute(f"import pyautogui; pyautogui.{fn}({int(x)}, {int(y)})")
+        except _TypedRouteUnavailable as exc:
+            raise StructuralResolutionRefused(
+                "legacy Windows agents cannot safely map virtual-desktop coordinates"
+            ) from exc
 
     def right_click(self, x: int, y: int) -> None:
         """Right-click through the bounded typed input contract."""
 
+        binding = self._require_frame_binding()
         try:
             response = self._post_typed_action(
                 "/input",
@@ -1257,20 +1703,21 @@ class WindowsBackend:
                     "y": int(y),
                     "double": False,
                     "button": "right",
+                    "expected_frame_sha256": binding.frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
                 },
             )
             self._validate_physical_receipt(response, "physical_right_click")
             return
-        except _TypedRouteUnavailable:
-            if not self._allow_legacy_exec:
-                raise
-        self._execute(
-            f"import pyautogui; pyautogui.click({int(x)}, {int(y)}, button='right')"
-        )
+        except _TypedRouteUnavailable as exc:
+            raise StructuralResolutionRefused(
+                "legacy Windows agents cannot safely map virtual-desktop coordinates"
+            ) from exc
 
     def drag(self, x: int, y: int, end_x: int, end_y: int) -> None:
         """Drag through the bounded typed input contract."""
 
+        binding = self._require_frame_binding()
         try:
             response = self._post_typed_action(
                 "/input",
@@ -1280,20 +1727,16 @@ class WindowsBackend:
                     "y": int(y),
                     "end_x": int(end_x),
                     "end_y": int(end_y),
+                    "expected_frame_sha256": binding.frame_sha256,
+                    "expected_frame_geometry": binding.geometry.to_payload(),
                 },
             )
             self._validate_physical_receipt(response, "physical_drag")
             return
-        except _TypedRouteUnavailable:
-            if not self._allow_legacy_exec:
-                raise
-        self._execute(
-            "import pyautogui; "
-            f"pyautogui.moveTo({int(x)}, {int(y)}); "
-            "pyautogui.mouseDown(button='left'); "
-            f"pyautogui.moveTo({int(end_x)}, {int(end_y)}, duration=0.2); "
-            "pyautogui.mouseUp(button='left')"
-        )
+        except _TypedRouteUnavailable as exc:
+            raise StructuralResolutionRefused(
+                "legacy Windows agents cannot safely map virtual-desktop coordinates"
+            ) from exc
 
     def type_text(self, text: str) -> None:
         """Type text into the currently focused element.

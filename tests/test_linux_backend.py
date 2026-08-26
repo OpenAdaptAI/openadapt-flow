@@ -8,7 +8,9 @@ from PIL import Image
 
 from openadapt_flow.backend import (
     Backend,
+    DisplayGeometry,
     ExecutionContextIdentityBackend,
+    FreshActuationRequired,
     GuardedCoordinateActionBackend,
     GuardedKeyboardActionBackend,
     IdentityBackend,
@@ -69,6 +71,7 @@ class FakeLinuxClient:
         candidates: list[LinuxElement] | None = None,
         active: bool = True,
         truncated: bool = False,
+        displays: tuple[DisplayGeometry, ...] | None = None,
     ) -> None:
         self._session_type = session_type
         self._portal_ready = portal_ready
@@ -85,6 +88,13 @@ class FakeLinuxClient:
         self.native_succeeds = True
         self.replace_succeeds = True
         self.physical_succeeds = True
+        self.displays = displays or (
+            DisplayGeometry(
+                "fake-primary",
+                (-10_000.0, -10_000.0, 20_000.0, 20_000.0),
+                (1.0, 1.0),
+            ),
+        )
 
     @property
     def session_type(self) -> str:
@@ -116,6 +126,9 @@ class FakeLinuxClient:
         output = io.BytesIO()
         image.save(output, format="PNG")
         return output.getvalue(), image.width, image.height
+
+    def display_topology(self):
+        return self.displays
 
     def element_at_point(self, window, x, y):
         self.calls.append(("element-at", window.native_id, x, y))
@@ -192,6 +205,92 @@ def test_guarded_keyboard_refuses_focus_change_before_delivery() -> None:
             expected_frame_sha256=hashlib.sha256(frame).hexdigest(),
         )
 
+    assert not any(call[0] == "replace" for call in client.calls)
+
+
+def test_atomic_observation_refuses_linux_resize_before_first_input_edge() -> None:
+    client = FakeLinuxClient(candidates=[TEXT_ELEMENT])
+    target = backend(client, allow_physical_input=True)
+    observation = target.guarded_keyboard_observation()
+    target.arm_guarded_keyboard(300, 200)
+    target.bind_input_observation(observation)
+    resized = LinuxWindow(
+        TARGET_WINDOW.native_id,
+        TARGET_WINDOW.app_name,
+        TARGET_WINDOW.title,
+        TARGET_WINDOW.pid,
+        (100, 200, 800, 600),
+    )
+    client.windows = [resized]
+
+    with pytest.raises(FreshActuationRequired) as error:
+        target.type_text_guarded(
+            "must not land",
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_geometry_epoch == observation.geometry_epoch
+    assert error.value.observed_geometry_epoch != observation.geometry_epoch
+    assert not any(call[0] == "replace" for call in client.calls)
+
+
+def test_atomic_observation_refuses_cross_monitor_scale_change() -> None:
+    displays = (
+        DisplayGeometry("left", (-1000.0, 0.0, 1000.0, 800.0), (1.0, 1.0)),
+        DisplayGeometry("right", (0.0, 0.0, 1200.0, 900.0), (2.0, 2.0)),
+    )
+    initial = LinuxWindow(
+        TARGET_WINDOW.native_id,
+        TARGET_WINDOW.app_name,
+        TARGET_WINDOW.title,
+        TARGET_WINDOW.pid,
+        (-800, 100, 640, 480),
+    )
+    client = FakeLinuxClient(
+        windows=[initial],
+        candidates=[TEXT_ELEMENT],
+        displays=displays,
+    )
+    client.focused = LinuxElement(
+        TEXT_ELEMENT.native_id,
+        TEXT_ELEMENT.accessible_id,
+        TEXT_ELEMENT.role,
+        TEXT_ELEMENT.name,
+        TEXT_ELEMENT.app_name,
+        TEXT_ELEMENT.window_title,
+        TEXT_ELEMENT.pid,
+        (-700, 200, 580, 380),
+        TEXT_ELEMENT.supported_operations,
+    )
+    target = LinuxBackend(
+        app="gedit",
+        window_title="oa-trial.txt",
+        client=client,
+        allow_physical_input=True,
+    )
+    observation = target.guarded_keyboard_observation()
+    target.arm_guarded_keyboard(300, 200)
+    target.bind_input_observation(observation)
+    moved = LinuxWindow(
+        initial.native_id,
+        initial.app_name,
+        initial.title,
+        initial.pid,
+        (100, 100, 640, 480),
+    )
+    client.windows = [moved]
+
+    with pytest.raises(FreshActuationRequired) as error:
+        target.type_text_guarded(
+            "must not land",
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_observation is observation
+    assert error.value.observed_observation is not None
+    assert error.value.expected_observation.display_id == "left"
+    assert error.value.observed_observation.display_id == "right"
+    assert error.value.observed_observation.display_scale == (2.0, 2.0)
     assert not any(call[0] == "replace" for call in client.calls)
 
 

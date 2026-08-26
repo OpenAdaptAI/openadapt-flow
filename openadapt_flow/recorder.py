@@ -230,7 +230,7 @@ class Recorder:
 
     def _record(self, event: dict[str, Any], act: Callable[[], None]) -> None:
         """Capture before frame, act, wait settle, capture after, log event."""
-        before = self._backend.screenshot()
+        before = self._capture_frame()
         structural_before = self._structural_state()
         # Structured identity of the clicked target (DOM / a11y text), when
         # the backend exposes it: captured on the BEFORE frame, before the
@@ -495,12 +495,12 @@ class Recorder:
             The last PNG frame captured (settled if achieved before timeout).
         """
         deadline = time.monotonic() + self._settle_timeout_s
-        png = self._backend.screenshot()
+        png = self._capture_frame()
         prev = _phash(png)
         consecutive = 1
         while consecutive < self._settle_stable_frames and time.monotonic() < deadline:
             time.sleep(self._settle_interval_s)
-            png = self._backend.screenshot()
+            png = self._capture_frame()
             cur = _phash(png)
             if cur == prev:
                 consecutive += 1
@@ -508,3 +508,11 @@ class Recorder:
                 consecutive = 1
             prev = cur
         return png
+
+    def _capture_frame(self) -> bytes:
+        """Prefer an atomic frame descriptor when the backend provides one."""
+
+        observer = getattr(self._backend, "observe_frame", None)
+        if callable(observer):
+            return observer().png
+        return self._backend.screenshot()

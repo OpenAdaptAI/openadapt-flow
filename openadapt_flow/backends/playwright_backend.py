@@ -1,15 +1,17 @@
 """Playwright-driven reference backend (sync API, chromium, headless-capable).
 
 Implements the `openadapt_flow.backend.Backend` protocol against a Playwright
-`Page`: full-viewport PNG screenshots, mouse clicks at pixel coordinates,
-keyboard typing, and key/chord presses. Viewport is fixed at 1280x800 with
-deviceScaleFactor=1 so CSS pixels equal screenshot pixels.
+`Page`: atomic full-viewport PNG observations, DOM-guarded pointer and keyboard
+input, live viewport/DPR transitions, and exact page/frame identity. Production
+observation uses CSS-scale screenshots, so resolver pixels and browser input
+coordinates stay in one space after a resize or monitor-scale change.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import math
 import re
 import uuid
@@ -18,10 +20,21 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 from urllib.parse import urlsplit
 
+from PIL import Image
+
 if TYPE_CHECKING:  # pragma: no cover
     from playwright.sync_api import Page
 
-from openadapt_flow.backend import ActionDeliveryUncertain, StructuralResolutionRefused
+from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
+    DisplayTopologyChanged,
+    FrameObservation,
+    FreshActuationRequired,
+    StructuralResolutionRefused,
+    frame_observation_identity,
+    session_identity_sha256,
+    window_identity_sha256,
+)
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
     StructuralHandle,
@@ -34,6 +47,12 @@ from openadapt_flow.runtime.resolver import (
 
 VIEWPORT: tuple[int, int] = (1280, 800)
 _MASKED_SCREENSHOT_ATTEMPTS = 3
+_ATOMIC_OBSERVATION_ATTEMPTS = 3
+
+
+class BrowserObservationStabilityError(RuntimeError):
+    """The browser could not produce one stable atomic frame observation."""
+
 
 _MODIFIER_ALIASES = {
     "meta": "Meta",
@@ -139,6 +158,23 @@ class _FramePoint:
     x: float
     y: float
     frame_path: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _BrowserGeometry:
+    """One privacy-safe top-level browser geometry sample."""
+
+    viewport_width: int
+    viewport_height: int
+    device_pixel_ratio: float
+    display_id: str
+    display_bounds: tuple[float, float, float, float]
+    display_scale: tuple[float, float]
+    topology_sha256: str
+    page_identity_sha256: str
+    top_level_frame_identity_sha256: str
+    window_identity_sha256: str
+    session_identity_sha256: str
 
 
 # The descriptor stays inside the page-local guard store. It binds the exact
@@ -746,12 +782,33 @@ class PlaywrightBackend:
         self._structural_state_reader = structural_state_reader
         self._screenshot_guard = screenshot_guard
         self._screenshot_frame_generation = 0
+        self._top_level_frame_generation = 0
         self._screenshot_frame_listener = self._handle_screenshot_frame_lifecycle
+        self._top_level_navigation_listener = self._handle_top_level_navigation
         self._screenshot_frame_tracking = False
-        if self._screenshot_mask_selectors:
+        event_listener = getattr(self.page, "on", None)
+        if callable(event_listener):
             for event in ("frameattached", "framedetached", "framenavigated"):
-                self.page.on(event, self._screenshot_frame_listener)
+                event_listener(event, self._screenshot_frame_listener)
+            event_listener("framenavigated", self._top_level_navigation_listener)
             self._screenshot_frame_tracking = True
+        identity_nonce = uuid.uuid4().hex
+        self._page_identity_sha256 = frame_observation_identity(
+            {
+                "schema": "openadapt.playwright-page-identity.v1",
+                "backend_nonce": identity_nonce,
+                "page_object": id(self.page),
+            }
+        )
+        self._context_identity_sha256 = frame_observation_identity(
+            {
+                "schema": "openadapt.playwright-context-identity.v1",
+                "backend_nonce": identity_nonce,
+                "context_object": id(getattr(self.page, "context", self.page)),
+            }
+        )
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._bound_input_observation: Optional[FrameObservation] = None
         # Opaque per-backend key keeps the WeakMap private from ordinary page
         # code. Python retains only token material keyed by the public
         # SHA-256 fingerprint; target/row text stays page-local and ephemeral.
@@ -1730,6 +1787,9 @@ class PlaywrightBackend:
             # qualification observer can cover context that the target page
             # cannot declare (for example a browser inside a managed remote
             # session), so the DOM guard alone is not sufficient.
+            self._consume_input_observation(
+                operation="dom_double_click" if double else "dom_click"
+            )
             self._assert_qualification_environment_current()
             try:
                 if double:
@@ -1749,6 +1809,8 @@ class PlaywrightBackend:
                     cause_type=type(exc).__name__,
                 ) from exc
         except ActionDeliveryUncertain:
+            raise
+        except (FreshActuationRequired, DisplayTopologyChanged):
             raise
         except StructuralResolutionRefused:
             raise
@@ -1838,6 +1900,7 @@ class PlaywrightBackend:
                 ) from exc
             source = current_token_locator(source_locator, source_guard)
             destination = current_token_locator(destination_locator, destination_guard)
+            self._consume_input_observation(operation="guarded_dom_drag")
             self._assert_qualification_environment_current()
             try:
                 source.drag_to(destination, timeout=1000)
@@ -1849,6 +1912,8 @@ class PlaywrightBackend:
                     cause_type=type(exc).__name__,
                 ) from exc
         except ActionDeliveryUncertain:
+            raise
+        except (FreshActuationRequired, DisplayTopologyChanged):
             raise
         except StructuralResolutionRefused:
             raise
@@ -2046,6 +2111,7 @@ class PlaywrightBackend:
                     "visual target, frame, record, or context changed after the "
                     "pre-dispatch actionability trial"
                 )
+            self._consume_input_observation(operation=operation)
             self._assert_qualification_environment_current()
             try:
                 if double:
@@ -2064,6 +2130,8 @@ class PlaywrightBackend:
                     cause_type=type(exc).__name__,
                 ) from exc
         except ActionDeliveryUncertain:
+            raise
+        except (FreshActuationRequired, DisplayTopologyChanged):
             raise
         except StructuralResolutionRefused:
             raise
@@ -2181,6 +2249,29 @@ class PlaywrightBackend:
         # into a matching frame.
         return previous
 
+    def guarded_keyboard_observation(self) -> FrameObservation:
+        """Bind a caret-stable keyboard frame to exact browser geometry."""
+
+        for _attempt in range(_ATOMIC_OBSERVATION_ATTEMPTS):
+            generation = self._screenshot_frame_generation
+            before = self._read_browser_geometry()
+            png = self.guarded_keyboard_frame()
+            try:
+                self.page.evaluate("() => null")
+            except Exception as exc:
+                raise BrowserObservationStabilityError(
+                    "the browser disconnected after keyboard-frame capture"
+                ) from exc
+            after = self._read_browser_geometry()
+            if generation == self._screenshot_frame_generation and before == after:
+                observation = self._observation_from_geometry(png, before)
+                self._last_frame_observation = observation
+                return observation
+        raise BrowserObservationStabilityError(
+            "the browser geometry or frame identity changed during every "
+            "caret-stable observation attempt"
+        )
+
     def _act_guarded_keyboard(
         self,
         *,
@@ -2210,6 +2301,7 @@ class PlaywrightBackend:
                     "focused keyboard target, frame, record, or context changed "
                     "before delivery"
                 )
+            self._consume_input_observation(operation=operation)
             self._assert_qualification_environment_current()
             try:
                 deliver(token_locator)
@@ -2221,6 +2313,8 @@ class PlaywrightBackend:
                     cause_type=type(exc).__name__,
                 ) from exc
         except ActionDeliveryUncertain:
+            raise
+        except (FreshActuationRequired, DisplayTopologyChanged):
             raise
         except StructuralResolutionRefused:
             raise
@@ -2272,6 +2366,16 @@ class PlaywrightBackend:
 
         self._screenshot_frame_generation += 1
 
+    def _handle_top_level_navigation(self, frame: Any) -> None:
+        """Give each new top-level document an exact frame identity."""
+
+        try:
+            if frame is self.page.main_frame:
+                self._top_level_frame_generation += 1
+        except Exception:
+            # A disconnected page cannot produce another accepted observation.
+            self._top_level_frame_generation += 1
+
     def stop_screenshot_mask_tracking(self) -> None:
         """Remove recording-only frame listeners from an external page."""
 
@@ -2282,6 +2386,12 @@ class PlaywrightBackend:
                 self.page.remove_listener(event, self._screenshot_frame_listener)
             except Exception:
                 pass
+        try:
+            self.page.remove_listener(
+                "framenavigated", self._top_level_navigation_listener
+            )
+        except Exception:
+            pass
         self._screenshot_frame_tracking = False
 
     @staticmethod
@@ -2290,7 +2400,7 @@ class PlaywrightBackend:
             before is after for before, after in zip(left, right)
         )
 
-    def screenshot(self) -> bytes:
+    def _capture_screenshot_bytes(self) -> bytes:
         """Return a stable current full-viewport frame as PNG bytes."""
         if self._screenshot_guard is not None:
             self._screenshot_guard()
@@ -2332,6 +2442,253 @@ class PlaywrightBackend:
             "the browser frame tree changed during every secret-masked "
             "screenshot attempt; recording was refused"
         )
+
+    def _read_browser_geometry(self) -> _BrowserGeometry:
+        """Read one top-level viewport, DPR, display, page, and frame sample."""
+
+        try:
+            closed_probe = getattr(self.page, "is_closed", None)
+            if callable(closed_probe) and closed_probe():
+                raise BrowserObservationStabilityError("the browser page is closed")
+            raw = self.page.evaluate(
+                """() => ({
+                  viewportWidth: window.innerWidth,
+                  viewportHeight: window.innerHeight,
+                  devicePixelRatio: window.devicePixelRatio || 1,
+                  screenWidth: window.screen.width,
+                  screenHeight: window.screen.height,
+                  availLeft: Number.isFinite(window.screen.availLeft)
+                    ? window.screen.availLeft : 0,
+                  availTop: Number.isFinite(window.screen.availTop)
+                    ? window.screen.availTop : 0,
+                  availWidth: window.screen.availWidth || window.screen.width,
+                  availHeight: window.screen.availHeight || window.screen.height,
+                  colorDepth: window.screen.colorDepth || null,
+                  pixelDepth: window.screen.pixelDepth || null,
+                })"""
+            )
+        except BrowserObservationStabilityError:
+            raise
+        except Exception as exc:
+            raise BrowserObservationStabilityError(
+                "the browser geometry or page identity is unavailable"
+            ) from exc
+        try:
+            width = int(raw.get("viewportWidth", raw.get("width")))
+            height = int(raw.get("viewportHeight", raw.get("height")))
+            dpr = float(raw.get("devicePixelRatio", raw.get("dpr", 1.0)))
+            display_bounds = (
+                float(raw.get("availLeft", 0.0)),
+                float(raw.get("availTop", 0.0)),
+                float(raw.get("availWidth", raw.get("screenWidth", width))),
+                float(raw.get("availHeight", raw.get("screenHeight", height))),
+            )
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise BrowserObservationStabilityError(
+                "the browser returned invalid geometry"
+            ) from exc
+        if (
+            width <= 0
+            or height <= 0
+            or not math.isfinite(dpr)
+            or dpr <= 0
+            or not all(math.isfinite(value) for value in display_bounds)
+            or display_bounds[2] <= 0
+            or display_bounds[3] <= 0
+        ):
+            raise BrowserObservationStabilityError(
+                "the browser returned non-positive viewport or display geometry"
+            )
+        display_identity_material = {
+            "schema": "openadapt.browser-display-identity.v1",
+            "screen_width": raw.get("screenWidth"),
+            "screen_height": raw.get("screenHeight"),
+            "available_bounds": list(display_bounds),
+            "device_pixel_ratio": dpr,
+            "color_depth": raw.get("colorDepth"),
+            "pixel_depth": raw.get("pixelDepth"),
+        }
+        display_id = "browser-display:" + frame_observation_identity(
+            display_identity_material
+        )
+        top_frame_identity = frame_observation_identity(
+            {
+                "schema": "openadapt.playwright-top-level-frame-identity.v1",
+                "page_identity_sha256": self._page_identity_sha256,
+                "frame_object": id(getattr(self.page, "main_frame", self.page)),
+                "document_generation": self._top_level_frame_generation,
+            }
+        )
+        window_identity = window_identity_sha256(
+            window_id=self._page_identity_sha256,
+            pid=0,
+            process_start_time=None,
+            owner="playwright-page",
+        )
+        session_identity = session_identity_sha256(
+            authority="playwright-browser-context",
+            session_id=self._context_identity_sha256,
+            session_start_time=self._context_identity_sha256,
+            principal_identity_sha256=None,
+        )
+        # Chromium does not expose a complete host monitor inventory without a
+        # separately granted multi-screen permission. Bind that limitation to
+        # this exact browser context. A selected-display or DPR change still
+        # opens a geometry epoch; it does not masquerade as a topology hot-plug.
+        topology = frame_observation_identity(
+            {
+                "schema": "openadapt.browser-topology-authority.v1",
+                "context_identity_sha256": self._context_identity_sha256,
+                "inventory": "not-exposed-by-page",
+            }
+        )
+        return _BrowserGeometry(
+            viewport_width=width,
+            viewport_height=height,
+            device_pixel_ratio=dpr,
+            display_id=display_id,
+            display_bounds=display_bounds,
+            display_scale=(dpr, dpr),
+            topology_sha256=topology,
+            page_identity_sha256=self._page_identity_sha256,
+            top_level_frame_identity_sha256=top_frame_identity,
+            window_identity_sha256=window_identity,
+            session_identity_sha256=session_identity,
+        )
+
+    def observe_frame(self) -> FrameObservation:
+        """Capture one exact screenshot with stable browser geometry and identity."""
+
+        for _attempt in range(_ATOMIC_OBSERVATION_ATTEMPTS):
+            generation = self._screenshot_frame_generation
+            before = self._read_browser_geometry()
+            if generation != self._screenshot_frame_generation:
+                continue
+            png = self._capture_screenshot_bytes()
+            try:
+                self.page.evaluate("() => null")
+            except Exception as exc:
+                raise BrowserObservationStabilityError(
+                    "the browser disconnected after screenshot capture"
+                ) from exc
+            after = self._read_browser_geometry()
+            if generation != self._screenshot_frame_generation or before != after:
+                continue
+            observation = self._observation_from_geometry(png, before)
+            self._last_frame_observation = observation
+            return observation
+        raise BrowserObservationStabilityError(
+            "the browser viewport, frame tree, or page identity did not stay "
+            "stable across an atomic screenshot"
+        )
+
+    @staticmethod
+    def _observation_from_geometry(
+        png: bytes,
+        geometry: _BrowserGeometry,
+    ) -> FrameObservation:
+        """Bind already-proven stable geometry to its exact PNG bytes."""
+
+        with Image.open(io.BytesIO(png)) as image:
+            png_width, png_height = image.size
+        scale = (
+            png_width / geometry.viewport_width,
+            png_height / geometry.viewport_height,
+        )
+        if not all(
+            math.isclose(value, 1.0, rel_tol=0.0, abs_tol=1e-9) for value in scale
+        ):
+            raise BrowserObservationStabilityError(
+                "browser screenshot pixels do not match CSS input coordinates; "
+                "use screenshot_scale='css' for atomic replay"
+            )
+        return FrameObservation.create(
+            png,
+            viewport_width=geometry.viewport_width,
+            viewport_height=geometry.viewport_height,
+            origin=(0.0, 0.0),
+            scale=scale,
+            device_pixel_ratio=geometry.device_pixel_ratio,
+            display_id=geometry.display_id,
+            display_bounds=geometry.display_bounds,
+            display_scale=geometry.display_scale,
+            topology_sha256=geometry.topology_sha256,
+            window_identity_sha256=geometry.window_identity_sha256,
+            session_identity_sha256=geometry.session_identity_sha256,
+            page_identity_sha256=geometry.page_identity_sha256,
+            top_level_frame_identity_sha256=(geometry.top_level_frame_identity_sha256),
+        )
+
+    @property
+    def last_frame_observation(self) -> Optional[FrameObservation]:
+        """Return the most recent complete atomic browser observation."""
+
+        return self._last_frame_observation
+
+    def screenshot(self) -> bytes:
+        """Compatibility raw screenshot path for recording and inspection."""
+
+        return self._capture_screenshot_bytes()
+
+    def acquire_actuation_observation(self) -> FrameObservation:
+        """Acquire one stable browser frame for fresh target resolution."""
+
+        return self.observe_frame()
+
+    def bind_input_observation(self, observation: FrameObservation) -> None:
+        """Bind the resolver's exact browser observation to the next input edge."""
+
+        if (
+            observation.page_identity_sha256 != self._page_identity_sha256
+            or observation.top_level_frame_identity_sha256 is None
+        ):
+            raise StructuralResolutionRefused(
+                "browser input observation belongs to another page or frame contract"
+            )
+        self._bound_input_observation = observation
+
+    def reset_fresh_actuation_state(self) -> None:
+        """Clear only zero-edge leases before one bounded fresh resolution."""
+
+        self._bound_input_observation = None
+        self.cancel_guarded_coordinate()
+        self.cancel_guarded_keyboard()
+        self.cancel_pending_structural_guards()
+
+    def _consume_input_observation(self, *, operation: str) -> None:
+        """Recheck geometry/page identity and consume a zero-edge input lease."""
+
+        expected = self._bound_input_observation
+        if expected is None:
+            return
+        observed = self.observe_frame()
+        self._bound_input_observation = None
+        if expected.topology_sha256 != observed.topology_sha256:
+            raise DisplayTopologyChanged(
+                expected_observation=expected,
+                observed_observation=observed,
+            )
+        if (
+            expected.page_identity_sha256 != observed.page_identity_sha256
+            or expected.top_level_frame_identity_sha256
+            != observed.top_level_frame_identity_sha256
+            or expected.window_identity_sha256 != observed.window_identity_sha256
+            or expected.session_identity_sha256 != observed.session_identity_sha256
+        ):
+            raise StructuralResolutionRefused(
+                "browser page or top-level frame identity changed before input"
+            )
+        if expected.geometry_epoch != observed.geometry_epoch:
+            raise FreshActuationRequired(
+                operation=operation,
+                changed_pixel_count=observed.viewport[0] * observed.viewport[1],
+                changed_bbox=(0, 0, *observed.viewport),
+                frame_size=observed.viewport,
+                expected_geometry_epoch=expected.geometry_epoch,
+                observed_geometry_epoch=observed.geometry_epoch,
+                expected_observation=expected,
+                observed_observation=observed,
+            )
 
     def click(self, x: int, y: int, *, double: bool = False) -> None:
         """Click (or double-click) at pixel coordinates via the mouse."""
@@ -2410,6 +2767,7 @@ class PlaywrightBackend:
                 raise StructuralResolutionRefused(
                     "visual drag source, record, or context changed before delivery"
                 )
+            self._consume_input_observation(operation="guarded_coordinate_drag")
             current_sha256 = hashlib.sha256(self.screenshot()).hexdigest()
             if not hmac.compare_digest(current_sha256, expected_frame_sha256):
                 raise StructuralResolutionRefused(

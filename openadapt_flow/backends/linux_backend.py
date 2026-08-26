@@ -32,15 +32,27 @@ import os
 import re
 import secrets
 import sys
+import threading
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
-from PIL import Image, ImageGrab
+from PIL import Image, ImageChops, ImageGrab
 
-from openadapt_flow.backend import StructuralResolutionRefused
+from openadapt_flow.backend import (
+    DisplayGeometry,
+    DisplayTopologyChanged,
+    FrameObservation,
+    FreshActuationRequired,
+    StructuralResolutionRefused,
+    display_topology_sha256,
+    frame_observation_identity,
+    select_display_for_bounds,
+    session_identity_sha256,
+    window_identity_sha256,
+)
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
     StructuralHandle,
@@ -106,6 +118,10 @@ class LinuxClient(Protocol):
     def focus_window(self, window: LinuxWindow) -> bool: ...
 
     def capture_window(self, window: LinuxWindow) -> tuple[bytes, int, int]: ...
+
+    def display_topology(self) -> tuple[DisplayGeometry, ...]:
+        """Return every stable display in AT-SPI screen coordinates."""
+        ...
 
     def element_at_point(
         self, window: LinuxWindow, x: int, y: int
@@ -208,6 +224,24 @@ def _linux_session_facts() -> Optional[tuple[str, int, int]]:
         return None
 
 
+def _linux_process_start_time(pid: int) -> Optional[str]:
+    """Return the kernel process-start tick for exact PID reuse detection."""
+
+    if not sys.platform.startswith("linux") or pid <= 0:
+        return None
+    try:
+        # /proc/<pid>/stat field 2 can contain spaces and parentheses. Split
+        # only after the final ')' so field 22 remains unambiguous.
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").strip()
+        suffix = stat.rsplit(")", 1)[1].strip().split()
+        start_ticks = int(suffix[19])
+        if start_ticks < 0:
+            return None
+        return f"linux-proc-start-ticks:{start_ticks}"
+    except (OSError, UnicodeError, ValueError, IndexError):
+        return None
+
+
 def _clean_text(value: object) -> Optional[str]:
     text = " ".join(str(value or "").split())
     return text or None
@@ -285,6 +319,11 @@ class LinuxBackend:
             ]
         ] = None
         self._guarded_keyboard: Optional[tuple[LinuxWindow, str, Optional[str]]] = None
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._bound_input_observation: Optional[FrameObservation] = None
+        self._fresh_actuation_invalidated = False
+        self._backend_session_identity = secrets.token_hex(16)
+        self._input_lock = threading.RLock()
         self._assert_session_supported()
 
     def _assert_session_supported(self) -> None:
@@ -352,6 +391,23 @@ class LinuxBackend:
         return self._viewport
 
     def screenshot(self) -> bytes:
+        """Compatibility byte view of :meth:`observe_frame`."""
+
+        return self.observe_frame().png
+
+    def observe_frame(self) -> FrameObservation:
+        """Capture one exact Linux window and its atomic coordinate context."""
+
+        with self._input_lock:
+            return self._observe_frame_locked()
+
+    @property
+    def last_frame_observation(self) -> Optional[FrameObservation]:
+        """The descriptor created by the most recent completed frame capture."""
+
+        return self._last_frame_observation
+
+    def _observe_frame_locked(self) -> FrameObservation:
         window = self._resolve_window()
         if (
             self._require_active_window_for_capture
@@ -387,7 +443,66 @@ class LinuxBackend:
             )
         self._captured_window = current
         self._viewport = (width, height)
-        return png
+        session_facts = _linux_session_facts()
+        if session_facts is None:
+            session = session_identity_sha256(
+                authority=f"linux:{self._client.session_type}",
+                session_id=self._backend_session_identity,
+                session_start_time=None,
+                principal_identity_sha256=None,
+            )
+        else:
+            boot_id, audit_session_id, uid = session_facts
+            session = session_identity_sha256(
+                authority="linux-kernel-audit",
+                session_id=str(audit_session_id),
+                session_start_time=f"linux-boot-id:{boot_id}",
+                principal_identity_sha256=frame_observation_identity(
+                    {"schema": "openadapt.linux-uid.v1", "uid": uid}
+                ),
+            )
+        display_probe = getattr(self._client, "display_topology", None)
+        displays = (
+            tuple(display_probe())
+            if callable(display_probe)
+            else (
+                DisplayGeometry(
+                    display_id=f"test-window-display:{current.native_id}",
+                    bounds=tuple(float(value) for value in current.bounds),
+                    scale=(1.0, 1.0),
+                ),
+            )
+        )
+        try:
+            display = select_display_for_bounds(displays, current.bounds)
+            topology = display_topology_sha256(
+                displays,
+                coordinate_space=f"linux-{self._client.session_type}-screen",
+            )
+        except ValueError as exc:
+            raise LinuxBackendError(
+                "Linux display topology is unavailable or ambiguous"
+            ) from exc
+        window_identity = window_identity_sha256(
+            window_id=current.native_id,
+            pid=current.pid,
+            process_start_time=_linux_process_start_time(current.pid),
+            owner=current.app_name,
+        )
+        observation = FrameObservation.create(
+            png,
+            origin=(float(current.bounds[0]), float(current.bounds[1])),
+            scale=(float(width / current.bounds[2]), float(height / current.bounds[3])),
+            device_pixel_ratio=float(width / current.bounds[2]),
+            display_id=display.display_id,
+            display_bounds=display.bounds,
+            display_scale=display.scale,
+            topology_sha256=topology,
+            window_identity_sha256=window_identity,
+            session_identity_sha256=session,
+        )
+        self._last_frame_observation = observation
+        return observation
 
     # -- live execution-context identity -----------------------------------
 
@@ -671,9 +786,63 @@ class LinuxBackend:
             fingerprint,
             self.session_identity(),
         )
+        self._bound_input_observation = self._last_frame_observation
 
     def cancel_guarded_coordinate(self) -> None:
         self._guarded_coordinate = None
+
+    def bind_input_observation(self, observation: FrameObservation) -> None:
+        """Bind the next guarded Linux input to one exact frame descriptor."""
+
+        with self._input_lock:
+            current = self._last_frame_observation
+            if self._fresh_actuation_invalidated:
+                raise LinuxBackendError(
+                    "Linux frame lease is invalidated and requires fresh resolution"
+                )
+            if (
+                current is None
+                or current.frame_sha256 != observation.frame_sha256
+                or current.geometry_epoch != observation.geometry_epoch
+            ):
+                raise StructuralResolutionRefused(
+                    "Linux input observation does not match the resolved frame"
+                )
+            self._bound_input_observation = observation
+
+    def reset_fresh_actuation_state(self) -> None:
+        """Reset one proved zero-input invalidation without granting input."""
+
+        with self._input_lock:
+            if not self._fresh_actuation_invalidated:
+                raise LinuxBackendError(
+                    "Linux fresh-actuation reset requires an invalidated lease"
+                )
+            self._fresh_actuation_invalidated = False
+            self._bound_input_observation = None
+
+    @staticmethod
+    def _frame_difference(
+        expected_png: bytes,
+        observed_png: bytes,
+    ) -> tuple[int, tuple[int, int, int, int]]:
+        expected = Image.open(io.BytesIO(expected_png)).convert("RGB")
+        observed = Image.open(io.BytesIO(observed_png)).convert("RGB")
+        if expected.size != observed.size:
+            width, height = observed.size
+            return width * height, (0, 0, width, height)
+        difference = ImageChops.difference(expected, observed)
+        raw_bbox = difference.getbbox()
+        if raw_bbox is None:
+            width, height = observed.size
+            return width * height, (0, 0, width, height)
+        x1, y1, x2, y2 = raw_bbox
+        channels = difference.split()
+        mask = channels[0]
+        for channel in channels[1:]:
+            mask = ImageChops.lighter(mask, channel)
+        changed_pixel_count = sum(mask.histogram()[1:])
+        return changed_pixel_count, (x1, y1, x2 - x1, y2 - y1)
 
     def _assert_guarded_frame(
         self,
@@ -681,17 +850,57 @@ class LinuxBackend:
         expected_frame_sha256: str,
         expected_session: Optional[str],
     ) -> None:
-        current = self._require_same_window(window, require_active=True)
-        png, width, height = self._client.capture_window(current)
-        if (width, height) != current.bounds[2:]:
-            raise LinuxBackendError(
-                "Linux target window dimensions changed before guarded input"
-            )
-        if not hmac.compare_digest(
-            hashlib.sha256(png).hexdigest(), expected_frame_sha256
+        bound = self._bound_input_observation
+        if bound is None or not hmac.compare_digest(
+            bound.frame_sha256, expected_frame_sha256
         ):
+            raise StructuralResolutionRefused(
+                "Linux guarded input lacks its exact atomic frame descriptor"
+            )
+        current = self._resolve_window()
+        if current.native_id != window.native_id or current.pid != window.pid:
+            raise StructuralResolutionRefused(
+                "Linux target window identity changed before guarded input"
+            )
+        if not self._client.window_is_active(current):
             raise LinuxBackendError(
-                "Linux target frame changed after identity verification"
+                "the exact Linux target window is not active; refusing input"
+            )
+        observation = self._observe_frame_locked()
+        if observation.topology_sha256 != bound.topology_sha256:
+            self._fresh_actuation_invalidated = True
+            self._bound_input_observation = None
+            raise DisplayTopologyChanged(
+                expected_observation=bound,
+                observed_observation=observation,
+            )
+        if observation.geometry_epoch != bound.geometry_epoch:
+            self._fresh_actuation_invalidated = True
+            self._bound_input_observation = None
+            raise FreshActuationRequired(
+                operation="linux_guarded_input",
+                changed_pixel_count=(observation.viewport[0] * observation.viewport[1]),
+                changed_bbox=(0, 0, *observation.viewport),
+                frame_size=observation.viewport,
+                expected_geometry_epoch=bound.geometry_epoch,
+                observed_geometry_epoch=observation.geometry_epoch,
+                expected_observation=bound,
+                observed_observation=observation,
+            )
+        if not hmac.compare_digest(observation.frame_sha256, expected_frame_sha256):
+            changed_pixel_count, changed_bbox = self._frame_difference(
+                bound.png,
+                observation.png,
+            )
+            self._fresh_actuation_invalidated = True
+            self._bound_input_observation = None
+            raise FreshActuationRequired(
+                operation="linux_guarded_input",
+                changed_pixel_count=changed_pixel_count,
+                changed_bbox=changed_bbox,
+                frame_size=observation.viewport,
+                expected_observation=bound,
+                observed_observation=observation,
             )
         if expected_session is not None and not hmac.compare_digest(
             self.session_identity() or "", expected_session
@@ -699,6 +908,7 @@ class LinuxBackend:
             raise LinuxBackendError(
                 "Linux desktop session changed after identity verification"
             )
+        self._bound_input_observation = None
 
     def act_guarded_coordinate(
         self,
@@ -708,6 +918,24 @@ class LinuxBackend:
         expected_frame_sha256: str,
         double: bool = False,
         button: str = "left",
+    ) -> ActionDeliveryReceipt:
+        with self._input_lock:
+            return self._act_guarded_coordinate_locked(
+                x,
+                y,
+                expected_frame_sha256=expected_frame_sha256,
+                double=double,
+                button=button,
+            )
+
+    def _act_guarded_coordinate_locked(
+        self,
+        x: int,
+        y: int,
+        *,
+        expected_frame_sha256: str,
+        double: bool,
+        button: str,
     ) -> ActionDeliveryReceipt:
         pending = self._guarded_coordinate
         self._guarded_coordinate = None
@@ -755,7 +983,10 @@ class LinuxBackend:
         )
 
     def guarded_keyboard_frame(self) -> bytes:
-        return self.screenshot()
+        return self.guarded_keyboard_observation().png
+
+    def guarded_keyboard_observation(self) -> FrameObservation:
+        return self.observe_frame()
 
     def arm_guarded_keyboard(self, x: int, y: int) -> None:
         """Bind the unique live focused AT-SPI element at the resolved point."""
@@ -777,6 +1008,7 @@ class LinuxBackend:
             _fingerprint(focused),
             self.session_identity(),
         )
+        self._bound_input_observation = self._last_frame_observation
 
     def cancel_guarded_keyboard(self) -> None:
         self._guarded_keyboard = None
@@ -811,15 +1043,16 @@ class LinuxBackend:
         *,
         expected_frame_sha256: str,
     ) -> ActionDeliveryReceipt:
-        focused, fingerprint = self._consume_guarded_keyboard(expected_frame_sha256)
-        self._require_qualification_input_guard()
-        if text and not self._client.replace_text(focused, text):
-            raise LinuxBackendError("Linux guarded text delivery was rejected")
-        return _receipt(
-            "guarded_atspi_type",
-            native=True,
-            target_fingerprint=fingerprint,
-        )
+        with self._input_lock:
+            focused, fingerprint = self._consume_guarded_keyboard(expected_frame_sha256)
+            self._require_qualification_input_guard()
+            if text and not self._client.replace_text(focused, text):
+                raise LinuxBackendError("Linux guarded text delivery was rejected")
+            return _receipt(
+                "guarded_atspi_type",
+                native=True,
+                target_fingerprint=fingerprint,
+            )
 
     def press_guarded(
         self,
@@ -827,21 +1060,24 @@ class LinuxBackend:
         *,
         expected_frame_sha256: str,
     ) -> ActionDeliveryReceipt:
-        _, fingerprint = self._consume_guarded_keyboard(expected_frame_sha256)
-        if not self._allow_physical_input:
-            raise LinuxBackendError(
-                "guarded Linux KEY delivery requires the explicitly qualified "
-                "physical-input fallback"
+        with self._input_lock:
+            _, fingerprint = self._consume_guarded_keyboard(expected_frame_sha256)
+            if not self._allow_physical_input:
+                raise LinuxBackendError(
+                    "guarded Linux KEY delivery requires the explicitly qualified "
+                    "physical-input fallback"
+                )
+            self._require_qualification_input_guard()
+            if not self._client.physical_press(key):
+                raise LinuxBackendError(
+                    f"Linux guarded key delivery was rejected: {key!r}"
+                )
+            self._clear_focused_element()
+            return _receipt(
+                "guarded_atspi_key",
+                native=False,
+                target_fingerprint=fingerprint,
             )
-        self._require_qualification_input_guard()
-        if not self._client.physical_press(key):
-            raise LinuxBackendError(f"Linux guarded key delivery was rejected: {key!r}")
-        self._clear_focused_element()
-        return _receipt(
-            "guarded_atspi_key",
-            native=False,
-            target_fingerprint=fingerprint,
-        )
 
     def _physical_element_click(
         self, candidate: LinuxElement, expected: str, *, double: bool
@@ -1025,6 +1261,69 @@ class AtspiLinuxClient:
         # A real XDG portal session is a live D-Bus/PipeWire/libei capability,
         # not a boolean environment toggle. This client has no such transport.
         return False
+
+    def display_topology(self) -> tuple[DisplayGeometry, ...]:
+        """Return stable GDK monitor identities in AT-SPI screen coordinates."""
+
+        try:
+            import gi
+
+            gi.require_version("Gdk", "3.0")
+            from gi.repository import Gdk
+
+            display = Gdk.Display.get_default()
+            if display is None:
+                raise LinuxBackendError("GDK returned no interactive display")
+            count = int(display.get_n_monitors())
+            monitors: list[DisplayGeometry] = []
+            for index in range(count):
+                monitor = display.get_monitor(index)
+                if monitor is None:
+                    continue
+                geometry = monitor.get_geometry()
+                connector_probe = getattr(monitor, "get_connector", None)
+                connector = (
+                    str(connector_probe() or "") if callable(connector_probe) else ""
+                )
+                identity_material = {
+                    "schema": "openadapt.linux-display-identity.v1",
+                    "connector": connector or None,
+                    "manufacturer": str(monitor.get_manufacturer() or ""),
+                    "model": str(monitor.get_model() or ""),
+                    "width_mm": int(monitor.get_width_mm()),
+                    "height_mm": int(monitor.get_height_mm()),
+                }
+                monitors.append(
+                    DisplayGeometry(
+                        display_id=(
+                            f"gdk-connector:{connector}"
+                            if connector
+                            else "gdk-display:"
+                            + frame_observation_identity(identity_material)
+                        ),
+                        bounds=(
+                            float(geometry.x),
+                            float(geometry.y),
+                            float(geometry.width),
+                            float(geometry.height),
+                        ),
+                        scale=(
+                            float(monitor.get_scale_factor()),
+                            float(monitor.get_scale_factor()),
+                        ),
+                    )
+                )
+            # This also rejects indistinguishable duplicate monitors. Such a
+            # topology cannot preserve stable display identity across reorders.
+            display_topology_sha256(
+                tuple(monitors),
+                coordinate_space=f"linux-{self._session_type}-screen",
+            )
+            return tuple(monitors)
+        except LinuxBackendError:
+            raise
+        except Exception as exc:
+            raise LinuxBackendError("GDK display topology is unavailable") from exc
 
     @staticmethod
     def _call(obj: Any, *names: str, default: Any = None) -> Any:

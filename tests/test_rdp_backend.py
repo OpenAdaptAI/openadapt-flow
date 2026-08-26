@@ -193,6 +193,25 @@ class FakeRDPTransport:
         self.wheel_events.clear()
 
 
+def test_atomic_observation_refuses_resize_before_first_rdp_input_edge() -> None:
+    transport = FakeRDPTransport([Image.new("RGB", (400, 300), "white")])
+    backend = FreeRDPBackend(transport)
+    observation = backend.acquire_actuation_observation()
+    backend.bind_input_observation(observation)
+    transport.screens = [Image.new("RGB", (500, 300), "white")]
+
+    with pytest.raises(FreshActuationRequired) as error:
+        backend.click_guarded(
+            100,
+            100,
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_geometry_epoch == observation.geometry_epoch
+    assert error.value.observed_geometry_epoch != observation.geometry_epoch
+    assert transport.pointer_events == []
+
+
 class TransportError(RuntimeError):
     """The kind of error a real RDP transport raises mid-operation (a timeout
     on the wire). A distinct type so tests assert on exactly it."""

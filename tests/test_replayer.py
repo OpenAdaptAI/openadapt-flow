@@ -12,7 +12,14 @@ import json
 import pytest
 from PIL import Image
 
-from openadapt_flow.backend import ActionDeliveryUncertain, FreshActuationRequired
+from openadapt_flow.backend import (
+    ActionDeliveryUncertain,
+    FrameObservation,
+    FreshActuationRequired,
+    frame_observation_identity,
+    session_identity_sha256,
+    window_identity_sha256,
+)
 from openadapt_flow.ir import (
     ActionDeliveryReceipt,
     ActionKind,
@@ -581,6 +588,104 @@ def bundle(tmp_path):
 @pytest.fixture()
 def run_dir(tmp_path):
     return tmp_path / "run"
+
+
+def test_geometry_epoch_change_between_actions_forces_fresh_resolution(
+    bundle,
+    run_dir,
+):
+    class ChangingAtomicBackend:
+        def __init__(self) -> None:
+            self.state = 0
+            self.actions: list[tuple] = []
+            self.observed_epochs: list[str] = []
+
+        @property
+        def viewport(self):
+            raise AssertionError("Replayer must not read viewport after capture")
+
+        def observe_frame(self) -> FrameObservation:
+            size = (300, 200) if self.state == 0 else (600, 400)
+            observation = FrameObservation.create(
+                make_png(size),
+                origin=(0.0, 0.0),
+                scale=(1.0, 1.0),
+                device_pixel_ratio=1.0,
+                display_id="test-display",
+                display_bounds=(0.0, 0.0, float(size[0]), float(size[1])),
+                display_scale=(1.0, 1.0),
+                topology_sha256=frame_observation_identity(
+                    {"schema": "test-topology.v1", "viewport": list(size)}
+                ),
+                window_identity_sha256=window_identity_sha256(
+                    window_id="test-window",
+                    pid=1,
+                    process_start_time="test-start",
+                    owner="Test Backend",
+                ),
+                session_identity_sha256=session_identity_sha256(
+                    authority="test",
+                    session_id="test-session",
+                    session_start_time="test-start",
+                    principal_identity_sha256=None,
+                ),
+            )
+            self.observed_epochs.append(observation.geometry_epoch)
+            return observation
+
+        def screenshot(self) -> bytes:
+            return self.observe_frame().png
+
+        def click(self, x, y, *, double=False):
+            self.actions.append(("click", x, y, double))
+            self.state = 1
+
+        def type_text(self, text):
+            self.actions.append(("type", text))
+
+        def press(self, key):
+            self.actions.append(("press", key))
+
+        def scroll(self, dx, dy):
+            self.actions.append(("scroll", dx, dy))
+
+    backend = ChangingAtomicBackend()
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95),
+        Match(point=(220, 210), region=(200, 200, 100, 40), confidence=0.95),
+    ]
+    vision.text_results = {
+        "Ready": Match(point=(10, 10), region=(5, 5, 20, 10), confidence=0.95)
+    }
+    expected = [
+        Postcondition(
+            kind=PostconditionKind.TEXT_PRESENT,
+            text="Ready",
+            timeout_s=0.1,
+        )
+    ]
+    workflow = Workflow(
+        name="geometry-change",
+        steps=[
+            click_step("first", expect=expected),
+            click_step("second", expect=expected),
+        ],
+    )
+
+    report = Replayer(backend, vision=vision).run(
+        workflow,
+        bundle_dir=bundle,
+        run_dir=run_dir,
+    )
+
+    assert report.success is True
+    assert backend.actions == [
+        ("click", 110, 105, False),
+        ("click", 220, 210, False),
+    ]
+    assert len(vision.template_calls) == 2
+    assert len(set(backend.observed_epochs)) == 2
 
 
 def test_happy_path_click_then_param_type(bundle, run_dir):

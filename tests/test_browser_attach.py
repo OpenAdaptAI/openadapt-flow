@@ -1782,7 +1782,8 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 cdp_endpoint=endpoint,
                 script=expose_late_unbound_closed_secret,
             )
-        assert not late_closed_output.exists()
+        assert not (late_closed_output / "meta.json").exists()
+        assert (late_closed_output / "incomplete.json").is_file()
         with sync_playwright() as late_cleanup_playwright:
             late_cleanup_browser = late_cleanup_playwright.chromium.connect_over_cdp(
                 endpoint
@@ -1927,7 +1928,8 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 cdp_endpoint=endpoint,
                 script=replace_page_privacy_guard,
             )
-        assert not replaced_guard_output.exists()
+        assert not (replaced_guard_output / "meta.json").exists()
+        assert (replaced_guard_output / "incomplete.json").is_file()
         with sync_playwright() as guard_cleanup_playwright:
             guard_cleanup_browser = guard_cleanup_playwright.chromium.connect_over_cdp(
                 endpoint
@@ -2027,6 +2029,9 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 cdp_endpoint=endpoint,
                 script=lambda _page, _pump: None,
             )
+        assert not (refused_closed_output / "meta.json").exists()
+        # Startup refused before Flow could retain one valid atomic
+        # observation. There is no evidence journal to preserve.
         assert not refused_closed_output.exists()
         with sync_playwright() as refusal_cleanup_playwright:
             refusal_cleanup_browser = (
@@ -2296,7 +2301,11 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                     }"""
                 )
             frame_race_session.abort()
-        assert not (tmp_path / "recording-frame-race-probe").exists()
+        frame_race_recording = tmp_path / "recording-frame-race-probe"
+        assert not (frame_race_recording / "meta.json").exists()
+        assert json.loads((frame_race_recording / "incomplete.json").read_text())[
+            "terminal_reason"
+        ] == "operator_aborted"
         assert process.poll() is None
 
         interleaved_recording = tmp_path / "recording-interleaved-action-refusal"
@@ -2309,21 +2318,23 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert interleaved_session.page is not None
         assert interleaved_session.backend is not None
         interleaved_session.page.click("#note")
-        original_backend_screenshot = interleaved_session.backend.screenshot
+        original_backend_capture = (
+            interleaved_session.backend._capture_screenshot_bytes
+        )
         interleaved_action_injected = False
 
-        def screenshot_after_second_action() -> bytes:
+        def capture_after_second_action() -> bytes:
             nonlocal interleaved_action_injected
             if not interleaved_action_injected:
                 interleaved_action_injected = True
                 interleaved_session.page.click("#save")
                 interleaved_session.page.wait_for_timeout(0)
-            return original_backend_screenshot()
+            return original_backend_capture()
 
         monkeypatch.setattr(
             interleaved_session.backend,
-            "screenshot",
-            screenshot_after_second_action,
+            "_capture_screenshot_bytes",
+            capture_after_second_action,
         )
         try:
             with pytest.raises(BrowserAttachError, match="more than one logical"):
@@ -2663,7 +2674,8 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                 cdp_endpoint=endpoint,
                 script=leave_origin_and_return,
             )
-        assert not origin_bounce_recording.exists()
+        assert not (origin_bounce_recording / "meta.json").exists()
+        assert (origin_bounce_recording / "incomplete.json").is_file()
         assert process.poll() is None
 
         overlap_recording = tmp_path / "recording-resize-overlap-refusal"
@@ -2732,6 +2744,27 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
         assert meta["viewport_mode"] == "per-event"
         assert meta["viewport_history"][-1]["viewport"] == [900, 600]
         assert len(meta["viewport_history"]) >= 2
+        assert meta["frame_observation_schema"] == (
+            "openadapt.browser-frame-observation.v1"
+        )
+        observations = [
+            json.loads(line)
+            for line in (recording / "observation_journal.jsonl")
+            .read_text()
+            .splitlines()
+        ]
+        assert len(observations) == meta["observation_count"]
+        assert any(
+            observation["boundary"] == "geometry_transition"
+            for observation in observations
+        )
+        assert len(
+            {observation["geometry_epoch"] for observation in observations}
+        ) >= 2
+        assert all(
+            (recording / observation["frame_path"]).is_file()
+            for observation in observations
+        )
         assert events
         assert {tuple(event["viewport_before"]) for event in events} == {
             (1000, 650),

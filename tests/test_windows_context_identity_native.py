@@ -30,6 +30,7 @@ from openadapt_flow.backends import WindowsBackend
 from openadapt_flow.backends.win_agent import AgentConfig, create_server
 from openadapt_flow.backends.win_agent.server import (
     _foreground_application_identity,
+    _foreground_window_identity,
     _native_session_digest,
 )
 
@@ -75,6 +76,13 @@ def test_live_session_digest_roundtrips_through_typed_agent() -> None:
         assert "title" not in payload
         application = payload["application"]
         assert application is None or _APPLICATION_RE.fullmatch(application)
+        window = payload["window"]
+        assert (application is None) == (window is None)
+        if window is not None:
+            assert window["owner"] == application
+            assert int(window["window_id"]) > 0
+            assert window["pid"] > 0
+            assert int(window["process_start_time"]) > 0
 
         backend = WindowsBackend(url, auth_token="context-probe")
         assert backend.session_identity() == direct
@@ -137,6 +145,23 @@ def test_foreground_application_uses_process_image_not_window_title(
         calls.append(("close", int(handle)))
         return 1
 
+    def get_process_times(
+        process: Any,
+        created_pointer: Any,
+        exited_pointer: Any,
+        kernel_pointer: Any,
+        user_pointer: Any,
+    ) -> int:
+        del exited_pointer, kernel_pointer, user_pointer
+        calls.append(("process_times", int(process)))
+        created = ctypes.cast(
+            created_pointer,
+            ctypes.POINTER(wintypes.FILETIME),
+        ).contents
+        created.dwLowDateTime = 123
+        created.dwHighDateTime = 456
+        return 1
+
     class FakeUser32:
         GetForegroundWindow = _FakeFunction(get_foreground_window)
         GetWindowThreadProcessId = _FakeFunction(get_window_thread_process_id)
@@ -144,6 +169,7 @@ def test_foreground_application_uses_process_image_not_window_title(
     class FakeKernel32:
         OpenProcess = _FakeFunction(open_process)
         QueryFullProcessImageNameW = _FakeFunction(query_process_image)
+        GetProcessTimes = _FakeFunction(get_process_times)
         CloseHandle = _FakeFunction(close_handle)
 
     def fake_win_dll(name: str, *, use_last_error: bool) -> object:
@@ -156,11 +182,24 @@ def test_foreground_application_uses_process_image_not_window_title(
 
     monkeypatch.setattr(ctypes, "WinDLL", fake_win_dll)
 
+    assert _foreground_window_identity() == {
+        "window_id": "101",
+        "pid": 4242,
+        "process_start_time": str((456 << 32) | 123),
+        "owner": "accuro.emr",
+    }
     assert _foreground_application_identity() == "accuro.emr"
     assert calls == [
         ("foreground", None),
         ("window_pid", 101),
         ("open_process", (0x1000, False, 4242)),
         ("process_image", (202, 0)),
+        ("process_times", 202),
+        ("close", 202),
+        ("foreground", None),
+        ("window_pid", 101),
+        ("open_process", (0x1000, False, 4242)),
+        ("process_image", (202, 0)),
+        ("process_times", 202),
         ("close", 202),
     ]

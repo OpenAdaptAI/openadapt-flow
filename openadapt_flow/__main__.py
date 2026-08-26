@@ -1228,6 +1228,7 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
         params=params,
         identifier_region=identifier_region,
         window=window,
+        source_surface=(backend if backend in ("windows", "macos", "linux") else None),
         backend_kind=backend if backend in ("rdp", "citrix") else None,
         replay_window=getattr(args, "rdp_window", None),
         replay_window_title=getattr(args, "rdp_window_title", None),

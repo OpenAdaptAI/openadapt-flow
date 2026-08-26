@@ -18,15 +18,13 @@ Input contract (a real openadapt-capture >= 0.5 session directory):
                               #     key_char, canonical_key_name, ...)
       captured media         # external-FFmpeg video or supported frame store
 
-The adapter is a thin bridge over openadapt-capture's **public API** — it does
-*no* raw SQL and knows nothing about capture's schema. It calls
-``CaptureSession.load(dir)`` and iterates ``.actions(include_moves=False)``,
-which runs capture's own event-processing pipeline (raw mouse/keyboard streams
--> merged clicks / drags / typed text) and exposes each merged action as a
-public ``Action`` (``.type``, ``.timestamp``, ``.x/.y/.dx/.dy``,
-``.button/.text/.keys``). Frames come from ``CaptureSession.get_frame_at`` (the
-same tested frame-extraction path ``Action.screenshot`` uses), so the adapter
-inherits capture's decoding and survives capture's future schema changes.
+The adapter reads events and frames through openadapt-capture's public API. It
+does one immutable, read-only config lookup before loading the database. That
+lookup distinguishes a current v2 window capture, which must have a completion
+seal, from a legacy capture that can use Capture's migration-compatible loader.
+It then iterates ``.actions(include_moves=False)``. Capture's processing
+pipeline turns the raw mouse and keyboard stream into clicks, drags, and typed
+text exposed through the public ``Action`` model.
 
 Action mapping (capture ``Action.type`` -> flow event ``kind``):
 
@@ -107,14 +105,13 @@ This adapter detects such a session and:
 A window-scoped session that declares a coordinate space this adapter does
 not understand is refused loudly rather than converted with guessed scaling.
 
-Frame selection: ``CaptureSession.get_frame_at`` abstracts captured media
-(default external-FFmpeg video and any supported frame store). For an event at
-wall-clock time ``T`` the *before* frame is ``get_frame_at(T)`` and the *after* frame is
-``get_frame_at(T + settle_s)`` clamped to just before the next event — an
-approximation of the live Recorder's perceptual-hash settle wait (see
-docs/desktop/PHASE1.md). A per-action frame may be unavailable; a missing
-*before* frame for a click is fatal (the compiler requires it), while a missing
-*after* frame simply yields no postconditions for that step.
+Frame selection has two contracts. A sealed native v2 window capture names the
+exact before frame by source ordinal and keeps the first retained frame after
+the action as its after frame. The adapter decodes both exact timestamps and
+refuses a missing binding. Legacy and remote-display captures keep the existing
+``get_frame_at`` behavior: sample the action time and ``T + settle_s``, clamped
+to the next event. A missing click before frame is fatal. A missing legacy after
+frame leaves that step without a visual postcondition.
 
 Scroll deltas: pynput reports wheel *notches* with positive ``dy`` = scroll up,
 while the flow recording stores *pixels* with positive ``dy`` = view down
@@ -137,16 +134,34 @@ Window-scoped RDP/Citrix captures deliberately do NOT promote local UIA
 observations. UIA describes the local remote-client canvas, not controls inside
 the remote session, so those surfaces remain external black-box workflows using
 pixels, OCR, relational anchors, identity regions, and fresh-frame verification.
+
+Native Windows, macOS, and Linux source bindings are separate. When the CLI
+converts a sealed v2 window capture for one of those surfaces, each output event
+gets a closed ``source_geometry`` object. It binds the exact source session,
+terminal, artifact manifest, action/frame ordinals, PNG digest, process-bound
+window identity, display topology, and geometry epoch. The compiler accepts it
+only when the recording surface matches. Browser, RDP, and Citrix compilation
+refuses this native object.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
+import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, TypeGuard
+
+from openadapt_flow.source_geometry import (
+    NATIVE_SOURCE_GEOMETRY_SCHEMA_VERSION,
+    NativeSourceGeometry,
+    native_source_geometry_sha256,
+)
+from openadapt_flow.source_terminal import SourceCaptureTerminal
 
 if TYPE_CHECKING:  # pragma: no cover
     from openadapt_capture.capture import Action, CaptureSession
@@ -246,6 +261,169 @@ def _require_capture() -> "type[CaptureSession]":
             "    pip install 'openadapt-flow[capture]'\n"
         ) from exc
     return CaptureSession
+
+
+def _declares_v2_window_capture(capture_dir: Path) -> bool:
+    """Inspect only the immutable read-only DB surface before legacy loading."""
+    db_path = capture_dir / "recording.db"
+    details = db_path.lstat()
+    if not stat.S_ISREG(details.st_mode):
+        raise ValueError("capture recording.db must be a regular file")
+    database = sqlite3.connect(
+        f"{db_path.resolve().as_uri()}?mode=ro&immutable=1",
+        uri=True,
+    )
+    try:
+        row = database.execute("SELECT config FROM recording").fetchone()
+    finally:
+        database.close()
+    if row is None:
+        return False
+    raw_config = row[0]
+    if raw_config is None:
+        return False
+    try:
+        config = json.loads(raw_config) if isinstance(raw_config, str) else raw_config
+    except json.JSONDecodeError as exc:
+        raise ValueError("capture recording config is malformed") from exc
+    return (
+        isinstance(config, dict)
+        and isinstance(config.get("capture_window"), dict)
+        and config["capture_window"].get("schema_version")
+        == "openadapt.capture.window-scoped/v2"
+    )
+
+
+def _load_capture_session(CaptureSession, capture_dir: Path):
+    """Use the sealed snapshot path for current captures, legacy path otherwise."""
+    terminal_path = capture_dir / "capture-terminal.json"
+    manifest_path = capture_dir / "capture-artifact-manifest.json"
+    if terminal_path.exists() or manifest_path.exists():
+        return CaptureSession.load_verified(capture_dir)
+    if _declares_v2_window_capture(capture_dir):
+        raise ValueError(
+            "v2 window capture has no immutable terminal and artifact manifest"
+        )
+    return CaptureSession.load(capture_dir)
+
+
+def _source_terminal(session: "CaptureSession") -> SourceCaptureTerminal:
+    raw = getattr(session, "terminal", None)
+    if raw is None:
+        raise ValueError("native source geometry requires a verified capture terminal")
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(mode="json")
+    return SourceCaptureTerminal.model_validate(raw)
+
+
+def _native_source_geometry(
+    *,
+    action: "Action",
+    session: "CaptureSession",
+    terminal: SourceCaptureTerminal,
+    source_surface: str,
+    frame_sha256: str,
+) -> NativeSourceGeometry:
+    """Build one closed native action/frame/geometry binding."""
+    action_ordinal = getattr(action, "source_ordinal", None)
+    frame_ordinal = getattr(action, "screenshot_source_ordinal", None)
+    window_ordinal = getattr(action, "window_event_source_ordinal", None)
+    generation = getattr(action, "window_geometry_generation", None)
+    if (
+        action_ordinal is None
+        or frame_ordinal is None
+        or window_ordinal is None
+        or generation is None
+        or frame_ordinal != window_ordinal
+    ):
+        raise ValueError("native action has an incomplete source geometry binding")
+    window_events = {
+        event.source_ordinal: event for event in session.window_capture_events_v2()
+    }
+    window_event = window_events.get(window_ordinal)
+    if window_event is None or window_event.window_capture_v2 is None:
+        raise ValueError("native action names a missing v2 window geometry event")
+    state = window_event.window_capture_v2
+    if state.geometry_generation != generation:
+        raise ValueError("native action generation differs from its window geometry")
+    payload = {
+        "schema_version": NATIVE_SOURCE_GEOMETRY_SCHEMA_VERSION,
+        "source_surface": source_surface,
+        "source_capture_session_sha256": terminal.source_capture_session_sha256,
+        "source_capture_terminal_sha256": terminal.terminal_sha256,
+        "source_artifact_manifest_sha256": terminal.artifact_manifest_sha256,
+        "source_action_ordinal": action_ordinal,
+        "source_frame_ordinal": frame_ordinal,
+        "frame_sha256": frame_sha256,
+        "window_id": state.window_id,
+        "owner": state.owner,
+        "pid": state.pid,
+        "process_start_time": state.process_start_time,
+        "coordinate_source": state.coordinate_source,
+        "geometry_generation": state.geometry_generation,
+        "geometry_epoch_sha256": state.geometry_epoch_sha256,
+        "display_topology_sha256": state.display_topology_sha256,
+        "bounds": state.bounds,
+        "scale_x": state.scale_x,
+        "scale_y": state.scale_y,
+        "viewport": state.viewport,
+        "source_viewport": state.source_viewport,
+        "content_rect": state.content_rect,
+        "fit_scale": state.fit_scale,
+    }
+    payload["binding_sha256"] = native_source_geometry_sha256(payload)
+    return NativeSourceGeometry.model_validate(payload)
+
+
+def _exact_native_frames(
+    session: "CaptureSession",
+    action: "Action",
+) -> tuple["Image", "Image"]:
+    """Return the bound before frame and first ordinal-later retained frame."""
+    action_ordinal = getattr(action, "source_ordinal", None)
+    frame_ordinal = getattr(action, "screenshot_source_ordinal", None)
+    frame_timestamp = getattr(action, "screenshot_timestamp", None)
+    if action_ordinal is None or frame_ordinal is None or frame_timestamp is None:
+        raise ValueError("native action has no exact source-frame binding")
+
+    frames = list(session.frames())
+    if not frames:
+        raise ValueError("native capture has no retained source frames")
+    ordinals = [frame.source_ordinal for frame in frames]
+    if any(ordinal is None for ordinal in ordinals):
+        raise ValueError("native capture has a frame without a source ordinal")
+    parsed_ordinals = [int(ordinal) for ordinal in ordinals if ordinal is not None]
+    if parsed_ordinals != sorted(parsed_ordinals) or len(parsed_ordinals) != len(
+        set(parsed_ordinals)
+    ):
+        raise ValueError("native capture frame ordinals are not unique and ordered")
+
+    bound = next(
+        (
+            frame
+            for frame in frames
+            if frame.source_ordinal == frame_ordinal
+            and frame.timestamp == frame_timestamp
+        ),
+        None,
+    )
+    if bound is None:
+        raise ValueError("native action names no exact retained source frame")
+    after = next(
+        (frame for frame in frames if int(frame.source_ordinal) > action_ordinal),
+        None,
+    )
+    if after is None:
+        raise ValueError("native action has no ordinal-later retained after frame")
+    try:
+        return (
+            session.get_exact_frame(bound.timestamp),
+            session.get_exact_frame(after.timestamp),
+        )
+    except LookupError as exc:
+        raise ValueError(
+            "native action frame binding cannot be decoded exactly"
+        ) from exc
 
 
 def _window_capture_meta(session: "CaptureSession") -> Optional[dict[str, Any]]:
@@ -859,7 +1037,7 @@ def _flow_events(
     events: list[dict[str, Any]] = []
     # A run of typed characters, buffered so the compiler sees one ``type``
     # event per typed value (capture emits one key.type per key-release burst).
-    text_run: dict[str, Any] = {"chars": [], "ts": None}
+    text_run: dict[str, Any] = {"chars": [], "ts": None, "source_action": None}
 
     def flush_text() -> None:
         if not text_run["chars"]:
@@ -869,12 +1047,14 @@ def _flow_events(
             "kind": "type",
             "text": text,
             "_ts": text_run["ts"],
+            "_source_action": text_run["source_action"],
         }
         if text in value_to_param:
             line["param"] = value_to_param[text]
         events.append(line)
         text_run["chars"] = []
         text_run["ts"] = None
+        text_run["source_action"] = None
 
     for action in actions:
         atype = action.type
@@ -897,6 +1077,7 @@ def _flow_events(
                 "x": int(round((action.x or 0.0) * scale)),
                 "y": int(round((action.y or 0.0) * scale)),
                 "_ts": ts,
+                "_source_action": action,
             }
             structural = (
                 _capture_structural_locator(action) if include_structural else None
@@ -913,6 +1094,7 @@ def _flow_events(
                     "dx": int(round((action.dx or 0.0) * SCROLL_PIXELS_PER_NOTCH)),
                     "dy": int(round(-(action.dy or 0.0) * SCROLL_PIXELS_PER_NOTCH)),
                     "_ts": ts,
+                    "_source_action": action,
                 }
             )
         elif atype == "mouse.drag":
@@ -934,6 +1116,7 @@ def _flow_events(
                 "end_x": int(round((start_x + float(action.dx)) * scale)),
                 "end_y": int(round((start_y + float(action.dy)) * scale)),
                 "_ts": ts,
+                "_source_action": action,
             }
             structural = (
                 _capture_structural_locator(action) if include_structural else None
@@ -969,6 +1152,7 @@ def _flow_events(
                     "modifiers": modifiers,
                     "key": trigger,
                     "_ts": ts,
+                    "_source_action": action,
                 }
             )
         elif atype == "mouse.move":
@@ -1019,6 +1203,7 @@ def _convert_key_type(
         if not text_run["chars"]:
             text_run["ts"] = ts
         text_run["chars"].append(action.text)
+        text_run["source_action"] = action
         return
 
     # Empty text: a named special key press (Enter/Tab/...) or a bare modifier.
@@ -1034,7 +1219,14 @@ def _convert_key_type(
     if mapped is None:
         raise ValueError(f"unmapped key {name!r} at t={ts:.3f}; extend _KEY_NAME_MAP")
     flush_text()
-    events.append({"kind": "key", "key": mapped, "_ts": ts})
+    events.append(
+        {
+            "kind": "key",
+            "key": mapped,
+            "_ts": ts,
+            "_source_action": action,
+        }
+    )
 
 
 def _write_png(path: Path, image: "Image") -> None:
@@ -1049,6 +1241,7 @@ def convert_capture(
     params: Optional[dict[str, str]] = None,
     settle_s: float = 1.0,
     include_structural: bool = False,
+    source_surface: Optional[str] = None,
 ) -> Path:
     """Convert an openadapt-capture session into a flow recording directory.
 
@@ -1115,6 +1308,8 @@ def convert_capture(
     CaptureSession = _require_capture()
     capture_dir = Path(capture_dir)
     out_dir = Path(out_recording_dir)
+    if source_surface not in (None, "windows", "macos", "linux"):
+        raise ValueError("source_surface must be windows, macos, linux, or null")
 
     params = dict(params or {})
     value_to_param: dict[str, str] = {}
@@ -1126,7 +1321,7 @@ def convert_capture(
             )
         value_to_param[value] = name
 
-    session = CaptureSession.load(capture_dir)
+    session = _load_capture_session(CaptureSession, capture_dir)
     try:
         window_capture = _window_capture_meta(session)
         desktop_capture = _desktop_capture_meta(session)
@@ -1164,6 +1359,15 @@ def convert_capture(
         else:
             scale = float(session.pixel_ratio or 1.0)
         actions = list(session.actions(include_moves=False))
+        source_terminal: Optional[SourceCaptureTerminal] = None
+        native_geometry_enabled = (
+            source_surface is not None
+            and window_capture is not None
+            and window_capture.get("schema_version")
+            == "openadapt.capture.window-scoped/v2"
+        )
+        if native_geometry_enabled:
+            source_terminal = _source_terminal(session)
         scoped_viewport: Optional[tuple[int, int]] = None
         scope_label: Optional[str] = None
         if window_capture is not None:
@@ -1203,11 +1407,17 @@ def convert_capture(
 
         for i, event in enumerate(events):
             ts = float(event["_ts"])
-            before_img = session.get_frame_at(ts, tolerance=FRAME_TOLERANCE_S)
-            t_after = ts + settle_s
-            if i + 1 < len(events):
-                t_after = min(t_after, float(events[i + 1]["_ts"]))
-            after_img = session.get_frame_at(t_after, tolerance=FRAME_TOLERANCE_S)
+            source_action = event.get("_source_action")
+            if native_geometry_enabled:
+                if source_action is None:
+                    raise ValueError(f"native event {i} has no source action binding")
+                before_img, after_img = _exact_native_frames(session, source_action)
+            else:
+                before_img = session.get_frame_at(ts, tolerance=FRAME_TOLERANCE_S)
+                t_after = ts + settle_s
+                if i + 1 < len(events):
+                    t_after = min(t_after, float(events[i + 1]["_ts"]))
+                after_img = session.get_frame_at(t_after, tolerance=FRAME_TOLERANCE_S)
 
             if scoped_viewport is not None:
                 assert scope_label is not None
@@ -1229,7 +1439,8 @@ def convert_capture(
                     "anchored"
                 )
             if before_img is not None:
-                _write_png(frames_dir / f"{i:04d}_before.png", before_img)
+                before_path = frames_dir / f"{i:04d}_before.png"
+                _write_png(before_path, before_img)
                 if viewport is None:
                     viewport = [before_img.width, before_img.height]
             if after_img is not None:
@@ -1241,7 +1452,24 @@ def convert_capture(
                 used_params[event["param"]] = event["text"]
 
             line: dict[str, Any] = {"i": i}
-            line.update({k: v for k, v in event.items() if k != "_ts"})
+            line.update({k: v for k, v in event.items() if not k.startswith("_")})
+            if native_geometry_enabled:
+                if before_img is None:
+                    raise ValueError(
+                        f"native event {i} has no exact bound source frame"
+                    )
+                assert source_terminal is not None
+                assert source_action is not None
+                assert source_surface is not None
+                before_png = (frames_dir / f"{i:04d}_before.png").read_bytes()
+                source_geometry = _native_source_geometry(
+                    action=source_action,
+                    session=session,
+                    terminal=source_terminal,
+                    source_surface=source_surface,
+                    frame_sha256=hashlib.sha256(before_png).hexdigest(),
+                )
+                line["source_geometry"] = source_geometry.model_dump(mode="json")
             line["t"] = round(ts - started_at, 3)
             lines.append(json.dumps(line))
 

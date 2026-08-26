@@ -462,6 +462,9 @@ def test_record_desktop_backend_invokes_capture(monkeypatch, tmp_path, kind) -> 
     assert _cmd_record(args) == 0
     assert captured["params"] == {}
     assert captured["window"] is None  # no --window: full-screen capture
+    assert captured["source_surface"] == (
+        kind if kind in ("windows", "macos", "linux") else None
+    )
     assert captured["backend_kind"] == (kind if kind in ("rdp", "citrix") else None)
 
 

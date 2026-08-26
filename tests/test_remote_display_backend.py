@@ -22,6 +22,8 @@ from PIL import Image
 from openadapt_flow.backend import (
     ActionDeliveryUncertain,
     Backend,
+    DisplayGeometry,
+    DisplayTopologyChanged,
     ExecutionContextIdentityBackend,
     FreshActuationRequired,
     IdentityBackend,
@@ -55,6 +57,7 @@ class FakeClient:
         px: tuple[int, int] = (3024, 1888),
         key_window_id: int | None = None,
         hit_window_id: int | None = None,
+        displays: tuple[DisplayGeometry, ...] | None = None,
     ) -> None:
         self.trusted = trusted
         self._frontmost = frontmost
@@ -78,6 +81,13 @@ class FakeClient:
         self.frame_overrides: dict[tuple[int, int], tuple[int, int, int]] = {}
         self.png_kwargs = {}
         self.calls: list[tuple] = []
+        self.displays = displays or (
+            DisplayGeometry(
+                "fake-primary",
+                (-10_000.0, -10_000.0, 20_000.0, 20_000.0),
+                (2.0, 2.0),
+            ),
+        )
 
     def input_trusted(self) -> bool:
         return self.trusted
@@ -108,6 +118,9 @@ class FakeClient:
         buf = io.BytesIO()
         img.save(buf, format="PNG", **self.png_kwargs)
         return buf.getvalue(), self.px[0], self.px[1]
+
+    def display_topology(self):
+        return self.displays
 
     def activate(self, pid):
         self.calls.append(("activate", pid))
@@ -151,6 +164,122 @@ def test_exposes_pixel_targeting_plus_context_identity_protocol() -> None:
     assert not hasattr(backend, "structural_locator_at")
     assert not hasattr(backend, "structured_text_at")
     assert not hasattr(backend, "locate_structural")
+
+
+def test_atomic_observation_refuses_window_move_before_first_input_edge() -> None:
+    initial = WindowInfo(
+        window_id=1,
+        owner="Parallels Desktop",
+        title="Windows 11",
+        pid=99,
+        bounds=(0.0, 0.0, 200.0, 150.0),
+        on_screen=True,
+    )
+    backend, client = _backend(window=initial, px=(400, 300))
+    backend.observe_frame()
+    backend.prepare_pointer_actuation(100, 100)
+    observation = backend.acquire_actuation_observation()
+    backend.bind_input_observation(observation)
+    moved = WindowInfo(
+        window_id=client.window.window_id,
+        owner=client.window.owner,
+        title=client.window.title,
+        pid=client.window.pid,
+        bounds=(250.0, 75.0, 200.0, 150.0),
+        on_screen=True,
+    )
+    client.window = moved
+    client.windows = [moved]
+
+    with pytest.raises(FreshActuationRequired) as error:
+        backend.click_guarded(
+            100,
+            100,
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_geometry_epoch == observation.geometry_epoch
+    assert error.value.observed_geometry_epoch != observation.geometry_epoch
+    assert not any(call[0] == "mouse" for call in client.calls)
+
+
+def test_cross_monitor_move_retains_negative_origin_scale_and_display_ids() -> None:
+    displays = (
+        DisplayGeometry("left", (-800.0, 0.0, 800.0, 600.0), (1.0, 1.0)),
+        DisplayGeometry("right", (0.0, 0.0, 1000.0, 800.0), (2.0, 2.0)),
+    )
+    initial = WindowInfo(
+        window_id=1,
+        owner="Parallels Desktop",
+        title="Windows 11",
+        pid=99,
+        bounds=(-700.0, 40.0, 200.0, 150.0),
+        on_screen=True,
+    )
+    backend, client = _backend(window=initial, px=(200, 150), displays=displays)
+    backend.observe_frame()
+    backend.prepare_pointer_actuation(100, 75)
+    observation = backend.acquire_actuation_observation()
+    backend.bind_input_observation(observation)
+    assert observation.origin[0] < 0
+    assert observation.display_id == "left"
+    assert observation.display_scale == (1.0, 1.0)
+
+    moved = WindowInfo(
+        window_id=1,
+        owner=initial.owner,
+        title=initial.title,
+        pid=initial.pid,
+        bounds=(100.0, 40.0, 200.0, 150.0),
+        on_screen=True,
+    )
+    client.window = moved
+    client.windows = [moved]
+    client.px = (400, 300)
+
+    with pytest.raises(FreshActuationRequired) as error:
+        backend.click_guarded(
+            100,
+            75,
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_observation is observation
+    assert error.value.observed_observation is not None
+    assert error.value.expected_observation.display_id == "left"
+    assert error.value.observed_observation.display_id == "right"
+    assert error.value.observed_observation.display_scale == (2.0, 2.0)
+    assert error.value.expected_observation.topology_sha256 == (
+        error.value.observed_observation.topology_sha256
+    )
+    assert not any(call[0] == "mouse" for call in client.calls)
+
+
+def test_hotplug_invalidates_session_instead_of_retrying_input() -> None:
+    original_displays = (
+        DisplayGeometry("primary", (0.0, 0.0, 1200.0, 900.0), (2.0, 2.0)),
+    )
+    backend, client = _backend(displays=original_displays)
+    backend.observe_frame()
+    backend.prepare_pointer_actuation(100, 100)
+    observation = backend.acquire_actuation_observation()
+    backend.bind_input_observation(observation)
+    client.displays = original_displays + (
+        DisplayGeometry("hotplug", (-900.0, 0.0, 900.0, 700.0), (1.0, 1.0)),
+    )
+
+    with pytest.raises(DisplayTopologyChanged) as error:
+        backend.click_guarded(
+            100,
+            100,
+            expected_frame_sha256=observation.frame_sha256,
+        )
+
+    assert error.value.expected_observation is observation
+    assert error.value.observed_observation.topology_sha256 != (
+        observation.topology_sha256
+    )
+    assert not any(call[0] == "mouse" for call in client.calls)
 
 
 def test_live_context_markers_preserve_an_unchanged_actuation_lease() -> None:
@@ -820,6 +949,77 @@ def test_replayer_reacquires_real_remote_display_lease_after_zero_edge_change(
     assert report.success is True
     assert backend.click_attempts == 2
     assert len([call for call in client.calls if call[0] == "mouse"]) == 2
+    assert [event.retried for event in report.results[0].fresh_actuation_events] == [
+        True
+    ]
+
+
+def test_replayer_reacquires_after_resize_before_first_input_edge(tmp_path) -> None:
+    from tests.test_replayer import FakeVision, Match, click_step, make_png
+
+    class ResizeBeforeFirstEdgeBackend(RemoteDisplayBackend):
+        def __init__(self, *, client):
+            super().__init__(client=client, settle_s=0.0)
+            self.click_attempts = 0
+            self.first_refusal: FreshActuationRequired | None = None
+
+        def click(self, x, y, *, double=False):
+            self.click_attempts += 1
+            if self.click_attempts == 1:
+                resized = WindowInfo(
+                    window_id=self._client.window.window_id,
+                    owner=self._client.window.owner,
+                    title=self._client.window.title,
+                    pid=self._client.window.pid,
+                    bounds=(0.0, 0.0, 400.0, 300.0),
+                    on_screen=True,
+                )
+                self._client.window = resized
+                self._client.windows = [resized]
+                self._client.px = (400, 300)
+            try:
+                return super().click(x, y, double=double)
+            except FreshActuationRequired as exc:
+                self.first_refusal = exc
+                raise
+
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.runtime.replayer import Replayer
+
+    initial = WindowInfo(
+        window_id=1,
+        owner="Parallels Desktop",
+        title="Windows 11",
+        pid=99,
+        bounds=(0.0, 0.0, 300.0, 200.0),
+        on_screen=True,
+    )
+    client = FakeClient(window=initial, px=(300, 200))
+    backend = ResizeBeforeFirstEdgeBackend(client=client)
+    vision = FakeVision()
+    vision.template_results = [
+        Match(point=(110, 105), region=(100, 100, 50, 20), confidence=0.95)
+        for _ in range(3)
+    ]
+    bundle = tmp_path / "bundle"
+    (bundle / "templates").mkdir(parents=True)
+    (bundle / "templates" / "btn.png").write_bytes(make_png((50, 20)))
+
+    report = Replayer(backend, vision=vision).run(
+        Workflow(name="resize-retry", steps=[click_step(risk="irreversible")]),
+        bundle_dir=bundle,
+        run_dir=tmp_path / "run",
+    )
+
+    assert report.success is True
+    assert backend.click_attempts == 2
+    assert len(vision.template_calls) == 3
+    assert len([call for call in client.calls if call[0] == "mouse"]) == 2
+    assert backend.first_refusal is not None
+    assert backend.first_refusal.expected_observation is not None
+    assert backend.first_refusal.observed_observation is not None
+    assert backend.first_refusal.expected_observation.viewport == (300, 200)
+    assert backend.first_refusal.observed_observation.viewport == (400, 300)
     assert [event.retried for event in report.results[0].fresh_actuation_events] == [
         True
     ]

@@ -18,9 +18,19 @@ from collections.abc import Iterator
 import pytest
 import requests
 
+from openadapt_flow.backend import (
+    DisplayTopologyChanged,
+    FrameObservationBackend,
+    FreshActuationRequired,
+)
 from openadapt_flow.backends.win_agent import AgentConfig, create_server
+from openadapt_flow.backends.win_agent import server as win_agent_server
 from openadapt_flow.backends.win_agent.server import (
     AgentRequestError,
+    CapturedDesktopFrame,
+    FrameGeometry,
+    MonitorGeometry,
+    _normalize_virtual_point,
     _perform_input,
     _perform_uia,
 )
@@ -28,10 +38,102 @@ from openadapt_flow.backends.win_agent.server import (
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
+def _test_context(
+    *,
+    application: str = "accuro",
+    session: str = "a" * 64,
+    window_id: str = "4096",
+    pid: int = 321,
+    process_start_time: str = "133801632000000000",
+) -> dict:
+    return {
+        "status": "ok",
+        "application": application,
+        "session": session,
+        "workflow_state": None,
+        "window": {
+            "window_id": window_id,
+            "pid": pid,
+            "process_start_time": process_start_time,
+            "owner": application,
+        },
+    }
+
+
 def _fake_png() -> bytes:
     """Minimal valid-enough PNG: signature + IHDR with a 4x2 size."""
     ihdr = struct.pack(">II", 4, 2)
     return _PNG_SIGNATURE + b"\x00\x00\x00\x0dIHDR" + ihdr + b"\x00" * 8
+
+
+def _fake_png_size(width: int, height: int) -> bytes:
+    ihdr = struct.pack(">II", width, height)
+    return _PNG_SIGNATURE + b"\x00\x00\x00\x0dIHDR" + ihdr + b"\x00" * 8
+
+
+def _geometry(
+    *,
+    origin_x: int = 0,
+    origin_y: int = 0,
+    width: int = 4,
+    height: int = 2,
+    dpi: int = 96,
+    device: str = "DISPLAY1",
+) -> FrameGeometry:
+    return FrameGeometry(
+        origin_x=origin_x,
+        origin_y=origin_y,
+        width=width,
+        height=height,
+        monitors=(
+            MonitorGeometry(
+                device=device,
+                left=origin_x,
+                top=origin_y,
+                width=width,
+                height=height,
+                dpi_x=dpi,
+                dpi_y=dpi,
+                primary=True,
+            ),
+        ),
+    )
+
+
+def _negative_origin_geometry() -> FrameGeometry:
+    return FrameGeometry.from_payload(
+        {
+            "version": 1,
+            "coordinate_space": "physical_virtual_desktop",
+            "dpi_awareness": "per_monitor_v2",
+            "origin_x": -1920,
+            "origin_y": -200,
+            "width": 4480,
+            "height": 1640,
+            "monitors": [
+                {
+                    "device": "DISPLAY2",
+                    "left": -1920,
+                    "top": -200,
+                    "width": 1920,
+                    "height": 1080,
+                    "dpi_x": 144,
+                    "dpi_y": 144,
+                    "primary": False,
+                },
+                {
+                    "device": "DISPLAY1",
+                    "left": 0,
+                    "top": 0,
+                    "width": 2560,
+                    "height": 1440,
+                    "dpi_x": 192,
+                    "dpi_y": 192,
+                    "primary": True,
+                },
+            ],
+        }
+    )
 
 
 class RunningAgent:
@@ -129,6 +231,7 @@ def typed_agent() -> Iterator[RunningAgent]:
         AgentConfig(host="127.0.0.1", port=0),
         input_fn=input_fn,
         uia_fn=uia_fn,
+        context_fn=_test_context,
     )
     yield a
     a.close()
@@ -152,6 +255,7 @@ def test_default_agent_disables_arbitrary_exec_and_advertises_typed_contract(
     assert "context_identity_v1" in health["capabilities"]
     assert "typed_input_v1" in health["capabilities"]
     assert "uia_v1" in health["capabilities"]
+    assert "frame_observation_v1" in health["capabilities"]
     assert "legacy_exec" not in health["capabilities"]
     response = requests.post(
         f"{typed_agent.url}/execute_windows",
@@ -175,6 +279,7 @@ def test_typed_input_and_uia_receipts_never_claim_outcome(
         "application",
         "session",
         "workflow_state",
+        "window",
     }
     assert "title" not in context.text.casefold()
     expected_echo = requests.post(
@@ -186,7 +291,14 @@ def test_typed_input_and_uia_receipts_never_claim_outcome(
 
     delivered = requests.post(
         f"{typed_agent.url}/input",
-        json={"action": "click", "x": 1, "y": 2, "double": False},
+        json={
+            "action": "click",
+            "x": 1,
+            "y": 1,
+            "double": False,
+            "expected_frame_sha256": hashlib.sha256(_fake_png()).hexdigest(),
+            "expected_frame_geometry": _geometry().to_payload(),
+        },
         timeout=5,
     )
     assert delivered.status_code == 200
@@ -194,7 +306,10 @@ def test_typed_input_and_uia_receipts_never_claim_outcome(
 
     found = requests.post(
         f"{typed_agent.url}/uia/find",
-        json={"locator": {"automation_id": "duplicate"}},
+        json={
+            "locator": {"automation_id": "duplicate"},
+            "frame_geometry": _geometry().to_payload(),
+        },
         timeout=5,
     ).json()
     assert found["match"] == "ambiguous"
@@ -217,15 +332,134 @@ def test_windows_backend_guarded_key_roundtrip(typed_agent: RunningAgent) -> Non
     from openadapt_flow.backends import WindowsBackend
 
     backend = WindowsBackend(typed_agent.url, viewport=(4, 2))
-    frame = backend.guarded_keyboard_frame()
+    observation = backend.acquire_actuation_observation()
     backend.arm_guarded_keyboard(1, 1)
+    backend.bind_input_observation(observation)
     receipt = backend.press_guarded(
         "Enter",
-        expected_frame_sha256=hashlib.sha256(frame).hexdigest(),
+        expected_frame_sha256=observation.frame_sha256,
     )
 
     assert receipt.operation == "physical_press"
     assert receipt.outcome_verified is False
+
+
+def test_windows_atomic_observation_maps_negative_origin_monitor_topology() -> None:
+    from openadapt_flow.backends import WindowsBackend
+
+    geometry = _negative_origin_geometry()
+    frame = CapturedDesktopFrame(
+        _fake_png_size(geometry.width, geometry.height),
+        geometry,
+    )
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: frame,
+        context_fn=_test_context,
+    )
+    try:
+        backend = WindowsBackend(agent.url)
+        assert isinstance(backend, FrameObservationBackend)
+
+        observation = backend.observe_frame()
+
+        assert observation.viewport == (4480, 1640)
+        assert observation.origin == (-1920.0, -200.0)
+        assert observation.display_id == "windows-virtual-desktop"
+        assert observation.display_bounds == (-1920.0, -200.0, 4480.0, 1640.0)
+        assert observation.scale == (1.0, 1.0)
+        assert len(observation.topology_sha256) == 64
+        assert len(observation.window_identity_sha256) == 64
+        assert len(observation.session_identity_sha256) == 64
+    finally:
+        agent.close()
+
+
+def test_windows_guarded_content_change_raises_fresh_before_input() -> None:
+    from openadapt_flow.backends import WindowsBackend
+
+    state = {"frame": CapturedDesktopFrame(_fake_png(), _geometry())}
+    delivered: list[dict] = []
+
+    def input_fn(payload):
+        delivered.append(payload)
+        return {
+            "status": "delivered",
+            "receipt_id": "must-not-deliver",
+            "operation": "physical_press",
+            "native": False,
+            "target_fingerprint": None,
+            "delivered_at": "2026-08-20T00:00:00+00:00",
+            "outcome_verified": False,
+        }
+
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: state["frame"],
+        input_fn=input_fn,
+        uia_fn=lambda operation, payload: {"status": "ok", "focused": True},
+        context_fn=_test_context,
+    )
+    try:
+        backend = WindowsBackend(agent.url)
+        expected = backend.acquire_actuation_observation()
+        backend.arm_guarded_keyboard(1, 1)
+        backend.bind_input_observation(expected)
+        state["frame"] = CapturedDesktopFrame(
+            _fake_png() + b"changed-after-identity",
+            _geometry(),
+        )
+
+        with pytest.raises(FreshActuationRequired) as error:
+            backend.press_guarded(
+                "Enter",
+                expected_frame_sha256=expected.frame_sha256,
+            )
+
+        assert error.value.expected_observation is expected
+        assert error.value.observed_observation is not None
+        assert error.value.observed_observation.geometry_epoch == (
+            expected.geometry_epoch
+        )
+        assert error.value.observed_observation.frame_sha256 != expected.frame_sha256
+        assert delivered == []
+    finally:
+        agent.close()
+
+
+def test_windows_guarded_topology_change_is_not_a_blind_retry() -> None:
+    from openadapt_flow.backends import WindowsBackend
+
+    original = CapturedDesktopFrame(_fake_png(), _geometry())
+    state = {"frame": original}
+    delivered: list[dict] = []
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: state["frame"],
+        input_fn=lambda payload: delivered.append(payload) or {},
+        uia_fn=lambda operation, payload: {"status": "ok", "focused": True},
+        context_fn=_test_context,
+    )
+    try:
+        backend = WindowsBackend(agent.url)
+        expected = backend.acquire_actuation_observation()
+        backend.arm_guarded_keyboard(1, 1)
+        backend.bind_input_observation(expected)
+        changed_geometry = _geometry(width=6, height=3)
+        state["frame"] = CapturedDesktopFrame(
+            _fake_png_size(6, 3),
+            changed_geometry,
+        )
+
+        with pytest.raises(DisplayTopologyChanged):
+            backend.press_guarded(
+                "Enter",
+                expected_frame_sha256=expected.frame_sha256,
+            )
+
+        assert delivered == []
+    finally:
+        agent.close()
 
 
 @pytest.mark.parametrize("mutation", ["frame", "context", "focus"])
@@ -283,6 +517,7 @@ def test_guarded_input_refuses_post_identity_change(mutation: str) -> None:
             f"{agent.url}/input/guarded",
             json={
                 "expected_frame_sha256": expected_frame,
+                "expected_frame_geometry": _geometry().to_payload(),
                 "expected_context": {
                     "application": "accuro",
                     "session": "a" * 64,
@@ -300,12 +535,229 @@ def test_guarded_input_refuses_post_identity_change(mutation: str) -> None:
     assert delivered == []
 
 
+def test_guarded_input_refuses_geometry_change_with_no_input() -> None:
+    old_geometry = _geometry(dpi=96)
+    new_geometry = _geometry(dpi=144)
+    state = {
+        "frame": CapturedDesktopFrame(_fake_png(), old_geometry),
+    }
+    delivered: list[dict] = []
+
+    def input_fn(payload):
+        delivered.append(payload)
+        return {
+            "status": "delivered",
+            "receipt_id": "must-not-deliver",
+            "operation": "physical_click",
+            "native": False,
+            "target_fingerprint": None,
+            "delivered_at": "2026-08-20T00:00:00+00:00",
+            "outcome_verified": False,
+        }
+
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: state["frame"],
+        input_fn=input_fn,
+        context_fn=lambda: {
+            "status": "ok",
+            "application": "accuro",
+            "session": "a" * 64,
+            "workflow_state": None,
+        },
+    )
+    try:
+        expected_frame = hashlib.sha256(state["frame"].png).hexdigest()
+        state["frame"] = CapturedDesktopFrame(_fake_png(), new_geometry)
+        response = requests.post(
+            f"{agent.url}/input/guarded",
+            json={
+                "expected_frame_sha256": expected_frame,
+                "expected_frame_geometry": old_geometry.to_payload(),
+                "expected_context": {
+                    "application": "accuro",
+                    "session": "a" * 64,
+                    "workflow_state": None,
+                },
+                "input": {"action": "click", "x": 1, "y": 1},
+            },
+            timeout=5,
+        )
+    finally:
+        agent.close()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "stale_geometry"
+    assert delivered == []
+
+
+@pytest.mark.parametrize(
+    ("current_frame", "expected_code"),
+    [
+        (CapturedDesktopFrame(_fake_png() + b"changed", _geometry()), "stale_frame"),
+        (CapturedDesktopFrame(_fake_png(), _geometry(dpi=144)), "stale_geometry"),
+    ],
+)
+def test_direct_pointer_refuses_frame_or_geometry_mismatch_with_no_input(
+    current_frame: CapturedDesktopFrame,
+    expected_code: str,
+) -> None:
+    captured = CapturedDesktopFrame(_fake_png(), _geometry())
+    delivered: list[dict] = []
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: current_frame,
+        input_fn=lambda payload: delivered.append(payload) or {},
+    )
+    try:
+        response = requests.post(
+            f"{agent.url}/input",
+            json={
+                "action": "click",
+                "x": 1,
+                "y": 1,
+                "expected_frame_sha256": hashlib.sha256(captured.png).hexdigest(),
+                "expected_frame_geometry": captured.geometry.to_payload(),
+            },
+            timeout=5,
+        )
+    finally:
+        agent.close()
+
+    assert response.status_code == 409
+    assert response.json()["code"] == expected_code
+    assert delivered == []
+
+
+def test_backend_refreshes_viewport_from_each_bound_frame() -> None:
+    state = {
+        "frame": CapturedDesktopFrame(_fake_png_size(4, 2), _geometry()),
+    }
+    agent = RunningAgent(
+        AgentConfig(host="127.0.0.1", port=0),
+        grab_fn=lambda: state["frame"],
+    )
+    try:
+        from openadapt_flow.backends import WindowsBackend
+
+        backend = WindowsBackend(agent.url)
+        backend.screenshot()
+        assert backend.viewport == (4, 2)
+        state["frame"] = CapturedDesktopFrame(
+            _fake_png_size(6, 3), _geometry(width=6, height=3)
+        )
+        backend.screenshot()
+        assert backend.viewport == (6, 3)
+    finally:
+        agent.close()
+
+
 def test_invalid_input_schema_refuses_before_loading_pyautogui(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "pyautogui", None)
     with pytest.raises(AgentRequestError) as caught:
         _perform_input({"action": "click", "x": 1, "y": 2, "unknown": True})
     assert caught.value.status == 400
     assert caught.value.code == "invalid_schema"
+
+
+def test_pointer_input_maps_negative_frame_origin_through_sendinput(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = _negative_origin_geometry()
+    sent: list[tuple[list[tuple[int, int, int]], FrameGeometry]] = []
+    monkeypatch.setattr(win_agent_server, "_current_frame_geometry", lambda: geometry)
+    monkeypatch.setattr(
+        win_agent_server,
+        "_send_virtual_pointer_sequence",
+        lambda events, current: sent.append((events, current)),
+    )
+
+    receipt = _perform_input(
+        {
+            "action": "click",
+            "x": 100,
+            "y": 250,
+            "double": False,
+            "button": "left",
+            "frame_geometry": geometry.to_payload(),
+        }
+    )
+
+    assert receipt["operation"] == "physical_click"
+    assert sent == [
+        (
+            [(-1820, 50, 0x0002), (-1820, 50, 0x0004)],
+            geometry,
+        )
+    ]
+    assert _normalize_virtual_point(-1820, 50, geometry) == (
+        round(100 * 65535 / 4479),
+        round(250 * 65535 / 1639),
+    )
+
+
+def test_pointer_input_maps_a_secondary_monitor_drag_through_sendinput(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    geometry = _negative_origin_geometry()
+    sent: list[list[tuple[int, int, int]]] = []
+    monkeypatch.setattr(win_agent_server, "_current_frame_geometry", lambda: geometry)
+    monkeypatch.setattr(
+        win_agent_server,
+        "_send_virtual_pointer_sequence",
+        lambda events, _geometry: sent.append(events),
+    )
+
+    _perform_input(
+        {
+            "action": "drag",
+            "x": 2000,
+            "y": 300,
+            "end_x": 4200,
+            "end_y": 1200,
+            "frame_geometry": geometry.to_payload(),
+        }
+    )
+
+    assert sent == [
+        [
+            (80, 100, 0),
+            (80, 100, 0x0002),
+            (2280, 1000, 0),
+            (2280, 1000, 0x0004),
+        ]
+    ]
+
+
+def test_pointer_input_refuses_topology_or_dpi_change_before_sendinput(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _negative_origin_geometry()
+    changed_payload = captured.to_payload()
+    changed_payload["monitors"][0]["dpi_x"] = 192
+    changed_payload["monitors"][0]["dpi_y"] = 192
+    changed = FrameGeometry.from_payload(changed_payload)
+    sent: list[object] = []
+    monkeypatch.setattr(win_agent_server, "_current_frame_geometry", lambda: changed)
+    monkeypatch.setattr(
+        win_agent_server,
+        "_send_virtual_pointer_sequence",
+        lambda *_args: sent.append(object()),
+    )
+
+    with pytest.raises(AgentRequestError) as caught:
+        _perform_input(
+            {
+                "action": "click",
+                "x": 100,
+                "y": 250,
+                "frame_geometry": captured.to_payload(),
+            }
+        )
+
+    assert caught.value.status == 409
+    assert caught.value.code == "stale_geometry"
+    assert sent == []
 
 
 class _FakeRect:

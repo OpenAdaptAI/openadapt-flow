@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import ctypes
 import errno
+import hashlib
 import io
 import ipaddress
 import json
@@ -80,12 +81,14 @@ import shutil
 import sys
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import urlsplit
 
 from PIL import Image
 
+from openadapt_flow.backend import FrameObservation
 from openadapt_flow.backends.playwright_backend import PlaywrightBackend
 from openadapt_flow.recorder import Recorder
 
@@ -2208,11 +2211,15 @@ class InteractiveRecorder:
         self.backend: Optional[PlaywrightBackend] = None
         self.recorder: Optional[Recorder] = None
         self._last_frame: bytes = b""
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._observation_sequence = 0
         self._last_structural: dict[str, Any] = {}
         self._attached_geometry: Optional[tuple[int, int, float]] = None
         self._initial_attached_viewport: Optional[tuple[int, int]] = None
         self._viewport_dirty = False
         self._viewport_history: list[dict[str, Any]] = []
+        self._terminal_incomplete_reason: Optional[str] = None
+        self._incomplete_published = False
         # Source-time secret boundary state. Each document builds a fresh
         # closure, so a later document never saw the value an earlier one
         # received. Once a declared secret receives input, reflected text from
@@ -2338,7 +2345,7 @@ class InteractiveRecorder:
 
             self.backend = PlaywrightBackend(
                 self.page,
-                screenshot_scale="device" if self._owns_browser else "css",
+                screenshot_scale="css",
                 screenshot_mask_selectors=_secret_screenshot_selectors(
                     self._secret_fields,
                     marker_attribute=self._secret_marker_attribute,
@@ -2356,11 +2363,16 @@ class InteractiveRecorder:
             )
             if self._owns_browser:
                 self._last_frame = self.recorder._wait_settled()
+                assert self.backend.last_frame_observation is not None
+                self._retain_frame_observation(
+                    self.backend.last_frame_observation,
+                    boundary="initial",
+                )
                 self._last_structural = self._structural_state()
             else:
                 self._rebaseline_attached_viewport()
-        except Exception:
-            self.abort()
+        except Exception as exc:
+            self.abort(reason=exc)
             raise
 
     def _register_existing_closed_shadow_boundaries(self) -> None:
@@ -2555,8 +2567,8 @@ class InteractiveRecorder:
                     break
         except KeyboardInterrupt:
             print("\n[record] stopping…")
-        except Exception:
-            self.abort()
+        except Exception as exc:
+            self.abort(reason=exc)
             raise
         return self.finish()
 
@@ -2566,8 +2578,8 @@ class InteractiveRecorder:
         flush and finish."""
         try:
             script(self.page, self.pump)
-        except Exception:
-            self.abort()
+        except Exception as exc:
+            self.abort(reason=exc)
             raise
         return self.finish()
 
@@ -2609,6 +2621,9 @@ class InteractiveRecorder:
             # at the final path, and a crash in that window publishes a
             # surface-unbound recording.
             meta["surface"] = self._surface
+            meta["frame_observation_schema"] = "openadapt.browser-frame-observation.v1"
+            meta["observation_journal"] = "observation_journal.jsonl"
+            meta["observation_count"] = self._observation_sequence
             if self._structural_text_withheld:
                 # The operator must be able to see that Flow dropped URL and
                 # title evidence, and why. Silence here would read as evidence
@@ -2643,12 +2658,12 @@ class InteractiveRecorder:
             if self._listener_error is not None:
                 raise self._listener_error
             return self._promote_recording()
-        except Exception:
-            self.abort()
+        except Exception as exc:
+            self.abort(reason=exc)
             raise
 
-    def abort(self) -> None:
-        """Detach and remove only this session's unpublished temporary output."""
+    def abort(self, *, reason: Optional[BaseException] = None) -> None:
+        """Detach and retain a clearly incomplete session when evidence exists."""
 
         self.done = True
         self._pyq.clear()
@@ -2658,7 +2673,104 @@ class InteractiveRecorder:
             try:
                 self._stop_browser_connection()
             finally:
-                self._discard_recording_dir()
+                if self._last_frame_observation is not None:
+                    self._publish_incomplete_recording(reason=reason)
+                else:
+                    self._discard_recording_dir()
+
+    def _retain_frame_observation(
+        self,
+        observation: FrameObservation,
+        *,
+        boundary: str,
+    ) -> None:
+        """Append one exact local frame observation and its immutable PNG."""
+
+        if self._recording_dir is None:
+            raise BrowserAttachError("the recording journal is unavailable")
+        observations_dir = self._recording_dir / "observations"
+        observations_dir.mkdir(parents=True, exist_ok=True)
+        sequence = self._observation_sequence
+        frame_path = f"observations/{sequence:06d}.png"
+        (self._recording_dir / frame_path).write_bytes(observation.png)
+        record = {
+            "schema": "openadapt.browser-frame-observation.v1",
+            "sequence": sequence,
+            "boundary": boundary,
+            "event_count": self.recorder.event_count if self.recorder else 0,
+            "frame_path": frame_path,
+            "frame_sha256": observation.frame_sha256,
+            "viewport": list(observation.viewport),
+            "viewport_width": observation.viewport_width,
+            "viewport_height": observation.viewport_height,
+            "device_pixel_ratio": observation.device_pixel_ratio,
+            "origin": list(observation.origin),
+            "scale": list(observation.scale) if observation.scale else None,
+            "display_id": observation.display_id,
+            "display_bounds": list(observation.display_bounds),
+            "display_scale": list(observation.display_scale),
+            "topology_sha256": observation.topology_sha256,
+            "window_identity_sha256": observation.window_identity_sha256,
+            "session_identity_sha256": observation.session_identity_sha256,
+            "page_identity_sha256": observation.page_identity_sha256,
+            "top_level_frame_identity_sha256": (
+                observation.top_level_frame_identity_sha256
+            ),
+            "geometry_epoch": observation.geometry_epoch,
+        }
+        with (self._recording_dir / "observation_journal.jsonl").open("a") as file:
+            file.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
+            file.write("\n")
+        self._observation_sequence += 1
+        self._last_frame_observation = observation
+
+    def _publish_incomplete_recording(
+        self,
+        *,
+        reason: Optional[BaseException],
+    ) -> None:
+        """Publish evidence with an explicit terminal incomplete marker."""
+
+        if self._incomplete_published or self._recording_dir is None:
+            return
+        reason_code = self._terminal_incomplete_reason
+        if reason_code is None:
+            if reason is None:
+                reason_code = "operator_aborted"
+            elif isinstance(reason, BrowserAttachError):
+                reason_code = "invalid_event"
+            else:
+                reason_code = "browser_or_recording_disconnected"
+        meta_path = self._recording_dir / "meta.json"
+        if meta_path.exists():
+            meta_path.unlink()
+        marker = {
+            "schema": "openadapt.browser-recording-incomplete.v1",
+            "complete": False,
+            "terminal_reason": reason_code,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "session_id_sha256": hashlib.sha256(
+                self._session_id.encode("ascii")
+            ).hexdigest(),
+            "source": (
+                "openadapt-flow-playwright"
+                if self._owns_browser
+                else "openadapt-flow-playwright-cdp"
+            ),
+            "event_count": self.recorder.event_count if self.recorder else 0,
+            "observation_count": self._observation_sequence,
+            "last_valid_observation_sequence": self._observation_sequence - 1,
+        }
+        (self._recording_dir / "incomplete.json").write_text(
+            json.dumps(marker, indent=2)
+        )
+        try:
+            self._promote_recording()
+        except BrowserAttachError:
+            # A competing destination must never cause evidence deletion. The
+            # clearly marked partial directory remains at its reserved path.
+            return
+        self._incomplete_published = True
 
     def _prepare_recording_dir(self) -> None:
         """Reserve a fresh sibling directory without changing the final path."""
@@ -2682,7 +2794,7 @@ class InteractiveRecorder:
         self._recording_dir = Path(temporary)
 
     def _promote_recording(self) -> Path:
-        """Atomically publish the complete recording at the requested path."""
+        """Atomically publish a complete or explicitly incomplete session."""
 
         assert self._recording_dir is not None
         try:
@@ -2712,6 +2824,7 @@ class InteractiveRecorder:
 
         self.done = True
         if not self._owns_browser and self._listener_error is None:
+            self._terminal_incomplete_reason = "page_disconnected"
             self._listener_error = BrowserAttachError(
                 "the selected browser tab closed before Flow could retain the "
                 "final evidence; recording stopped without complete metadata"
@@ -2991,6 +3104,12 @@ class InteractiveRecorder:
             "scroll",
             "viewport",
         }:
+            self._terminal_incomplete_reason = "invalid_event"
+            self._listener_error = BrowserAttachError(
+                "the browser emitted an unsupported event kind; recording "
+                "stopped before accepting the event"
+            )
+            self.done = True
             return
         self._track_secret_document(
             kind, event, raw_doc_id, holds_secret=doc_holds_secret
@@ -3356,6 +3475,11 @@ class InteractiveRecorder:
             self.page.wait_for_timeout(self._poll_ms)
         except Exception:
             self.done = True
+            self._terminal_incomplete_reason = "browser_disconnected"
+            if self._listener_error is None:
+                self._listener_error = BrowserAttachError(
+                    "the browser disconnected before recording completion"
+                )
             return False
         if not self._drain_event_queue():
             # Distinct scroll gestures are separated by pauses; flush a
@@ -3473,7 +3597,9 @@ class InteractiveRecorder:
         # keystroke and the next click, so this frame is the settled field —
         # not a screen the next click has already navigated to.
         assert self.backend is not None
-        pt["after_frame"] = self.backend.screenshot()
+        observation = self.backend.observe_frame()
+        pt["after_frame"] = observation.png
+        pt["after_observation"] = observation
         pt["structural_after"] = self._structural_state()
 
     def _flush_type(self) -> None:
@@ -3530,7 +3656,11 @@ class InteractiveRecorder:
                 after_png=after_png,
                 structural_after=structural_after,
             )
-        self._set_last(after_png, structural_after)
+        self._set_last(
+            after_png,
+            structural_after,
+            observation=pt.get("after_observation"),
+        )
 
     def _accumulate_scroll(self, ev: dict[str, Any]) -> None:
         if self._pending_scroll is None:
@@ -3544,7 +3674,9 @@ class InteractiveRecorder:
         ps["dy"] += int(ev.get("dy", 0))
         # Post-scroll after-state, captured now (before any following action).
         assert self.backend is not None
-        ps["after_frame"] = self.backend.screenshot()
+        observation = self.backend.observe_frame()
+        ps["after_frame"] = observation.png
+        ps["after_observation"] = observation
         ps["structural_after"] = self._structural_state()
 
     def _flush_scroll(self) -> None:
@@ -3562,7 +3694,11 @@ class InteractiveRecorder:
             after_png=after_png,
             structural_after=structural_after,
         )
-        self._set_last(after_png, structural_after)
+        self._set_last(
+            after_png,
+            structural_after,
+            observation=ps.get("after_observation"),
+        )
 
     def _record_pointer(self, ev: dict[str, Any]) -> None:
         assert self.recorder is not None
@@ -3674,8 +3810,25 @@ class InteractiveRecorder:
             with Image.open(io.BytesIO(frame)) as image:
                 frame_size = image.size
             if before == after and frame_size == after[:2]:
+                observation = self.backend.last_frame_observation
+                if (
+                    observation is None
+                    or observation.png != frame
+                    or observation.viewport_width != after[0]
+                    or observation.viewport_height != after[1]
+                    or observation.device_pixel_ratio != after[2]
+                ):
+                    continue
                 self._attached_geometry = after
                 self._last_frame = frame
+                self._retain_frame_observation(
+                    observation,
+                    boundary=(
+                        "initial"
+                        if self._initial_attached_viewport is None
+                        else "geometry_transition"
+                    ),
+                )
                 self._last_structural = self._structural_state()
                 self._viewport_dirty = False
                 viewport = after[:2]
@@ -3708,11 +3861,17 @@ class InteractiveRecorder:
         """After an IMMEDIATE step (click/key), the current settled frame
         becomes the next step's BEFORE frame."""
         assert self.backend is not None
-        self._last_frame = self.backend.screenshot()
+        observation = self.backend.observe_frame()
+        self._last_frame = observation.png
+        self._retain_frame_observation(observation, boundary="event")
         self._last_structural = self._structural_state()
 
     def _set_last(
-        self, after_png: Optional[bytes], structural_after: Optional[dict]
+        self,
+        after_png: Optional[bytes],
+        structural_after: Optional[dict],
+        *,
+        observation: Optional[FrameObservation] = None,
     ) -> None:
         """After a DEFERRED/coalesced step (type/scroll), the next step's
         BEFORE frame is the after-state captured when the step actually
@@ -3720,6 +3879,8 @@ class InteractiveRecorder:
         already have moved on from."""
         if after_png is not None:
             self._last_frame = after_png
+            if observation is not None:
+                self._retain_frame_observation(observation, boundary="event")
         else:
             self._advance()
             return

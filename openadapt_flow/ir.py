@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -2371,6 +2372,54 @@ class FreshActuationEvent(BaseModel):
     changed_pixel_count: int = Field(ge=1)
     changed_bbox: Region
     frame_size: tuple[int, int]
+    expected_geometry_epoch: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    observed_geometry_epoch: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    expected_display_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    observed_display_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=256,
+        exclude_if=lambda value: value is None,
+    )
+    expected_display_bounds: Optional[tuple[float, float, float, float]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    observed_display_bounds: Optional[tuple[float, float, float, float]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    expected_display_scale: Optional[tuple[float, float]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    observed_display_scale: Optional[tuple[float, float]] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    expected_topology_sha256: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
+    observed_topology_sha256: Optional[str] = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+        exclude_if=lambda value: value is None,
+    )
     target_intersection: Optional[bool] = None
     identity_intersection: Optional[bool] = None
     retried: bool
@@ -2385,6 +2434,42 @@ class FreshActuationEvent(BaseModel):
             raise ValueError("fresh-actuation bounding box must be positive")
         if x + width > frame_width or y + height > frame_height:
             raise ValueError("fresh-actuation bounding box exceeds the frame")
+        if (self.expected_geometry_epoch is None) != (
+            self.observed_geometry_epoch is None
+        ):
+            raise ValueError(
+                "fresh-actuation geometry epochs must be supplied together"
+            )
+        descriptor_values = (
+            self.expected_display_id,
+            self.observed_display_id,
+            self.expected_display_bounds,
+            self.observed_display_bounds,
+            self.expected_display_scale,
+            self.observed_display_scale,
+            self.expected_topology_sha256,
+            self.observed_topology_sha256,
+        )
+        if any(value is not None for value in descriptor_values) and not all(
+            value is not None for value in descriptor_values
+        ):
+            raise ValueError(
+                "fresh-actuation old/new display descriptors must be complete"
+            )
+        for bounds in (self.expected_display_bounds, self.observed_display_bounds):
+            if bounds is not None and (
+                not all(math.isfinite(value) for value in bounds)
+                or bounds[2] <= 0
+                or bounds[3] <= 0
+            ):
+                raise ValueError(
+                    "fresh-actuation display bounds must be finite and positive"
+                )
+        for scale in (self.expected_display_scale, self.observed_display_scale):
+            if scale is not None and not all(
+                math.isfinite(value) and value > 0 for value in scale
+            ):
+                raise ValueError("fresh-actuation display scale must be positive")
         return self
 
 

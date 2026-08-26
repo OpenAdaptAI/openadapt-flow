@@ -69,8 +69,16 @@ from PIL import Image, ImageChops
 
 from openadapt_flow.backend import (
     ActionDeliveryUncertain,
+    DisplayGeometry,
+    DisplayTopologyChanged,
+    FrameObservation,
     FreshActuationRequired,
     StructuralResolutionRefused,
+    display_topology_sha256,
+    frame_observation_identity,
+    select_display_for_bounds,
+    session_identity_sha256,
+    window_identity_sha256,
 )
 from openadapt_flow.ir import ActionDeliveryReceipt
 from openadapt_flow.remote_frame_contract import RemoteFrameContract
@@ -390,6 +398,10 @@ class WindowClient(Protocol):
         """Capture window ``window_id``; return ``(png_bytes, px_w, px_h)``."""
         ...
 
+    def display_topology(self) -> tuple[DisplayGeometry, ...]:
+        """Return every stable host display in the window coordinate space."""
+        ...
+
     def activate(self, pid: int) -> None:
         """Un-hide and bring the app owning ``pid`` frontmost (route keystrokes)."""
         ...
@@ -603,6 +615,9 @@ class RemoteDisplayBackend:
         self._last_frame_digest: Optional[bytes] = None
         self._last_comparison_digest: Optional[bytes] = None
         self._actuation_frame_png: Optional[bytes] = None
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._actuation_observation: Optional[FrameObservation] = None
+        self._backend_session_identity = uuid.uuid4().hex
         self._last_session_identity: Optional[str] = None
         self._qualification_environment: Optional[tuple[str, str, str, str]] = None
         self._qualification_input_guard: Optional[Callable[[], None]] = None
@@ -740,6 +755,7 @@ class RemoteDisplayBackend:
                 else self._last_frame_digest
             )
             self._last_session_identity = self._session_identity_from_frame(png)
+            self._last_frame_observation = self._observation_from_state(png)
             # An ordinary observation is not permission to perform a
             # consequential remote action.  Only acquire_actuation_frame arms
             # the one-shot content lease after focus/readiness are established.
@@ -749,9 +765,104 @@ class RemoteDisplayBackend:
             if self._actuation_lease_state == _LEASE_ARMED:
                 self._actuation_lease_state = _LEASE_INVALIDATED
                 self._actuation_frame_png = None
+                self._actuation_observation = None
             return png
 
+    @property
+    def last_frame_observation(self) -> Optional[FrameObservation]:
+        """The descriptor created by the most recent completed frame capture."""
+
+        return self._last_frame_observation
+
+    def _observation_from_state(
+        self,
+        png: bytes,
+        *,
+        window: Optional[WindowInfo] = None,
+        viewport: Optional[tuple[int, int]] = None,
+        scale: Optional[tuple[float, float]] = None,
+        session_identity: Optional[str] = None,
+    ) -> FrameObservation:
+        """Build a descriptor only from facts captured under ``_input_lock``."""
+
+        win = self._frame_window if window is None else window
+        size = self._viewport if viewport is None else viewport
+        if win is None or size is None:
+            raise RemoteDisplayError("remote-display observation has no window state")
+        pixel_scale = (self._scale_x, self._scale_y) if scale is None else scale
+        principal = session_identity or self._last_session_identity
+        session = session_identity_sha256(
+            authority=f"remote-display:{type(self._client).__qualname__}",
+            session_id=self._backend_session_identity,
+            session_start_time=None,
+            principal_identity_sha256=principal,
+        )
+        display_probe = getattr(self._client, "display_topology", None)
+        displays = (
+            tuple(display_probe())
+            if callable(display_probe)
+            else (
+                DisplayGeometry(
+                    display_id=f"test-window-display:{win.window_id}",
+                    bounds=tuple(float(value) for value in win.bounds),
+                    scale=(float(pixel_scale[0]), float(pixel_scale[1])),
+                ),
+            )
+        )
+        try:
+            display = select_display_for_bounds(displays, win.bounds)
+            topology = display_topology_sha256(
+                displays,
+                coordinate_space="host-screen-points-top-left",
+            )
+        except ValueError as exc:
+            raise RemoteDisplayError(
+                "remote-display monitor topology is unavailable or ambiguous"
+            ) from exc
+        topology = frame_observation_identity(
+            {
+                "schema": "openadapt.remote-display-frame-topology.v1",
+                "display_topology_sha256": topology,
+                "client": type(self._client).__qualname__,
+            }
+        )
+        process_start_probe = getattr(self._client, "process_start_time", None)
+        process_start_time = (
+            process_start_probe(win.pid) if callable(process_start_probe) else None
+        )
+        window_identity = window_identity_sha256(
+            window_id=str(win.window_id),
+            pid=win.pid,
+            process_start_time=process_start_time,
+            owner=win.owner,
+        )
+        return FrameObservation.create(
+            png,
+            origin=(float(win.bounds[0]), float(win.bounds[1])),
+            scale=(float(pixel_scale[0]), float(pixel_scale[1])),
+            device_pixel_ratio=float(pixel_scale[0]),
+            display_id=display.display_id,
+            display_bounds=display.bounds,
+            display_scale=display.scale,
+            topology_sha256=topology,
+            window_identity_sha256=window_identity,
+            session_identity_sha256=session,
+        )
+
+    def observe_frame(self) -> FrameObservation:
+        """Capture the exact window pixels and their host coordinate mapping."""
+
+        with self._input_lock:
+            observation = self._observation_from_state(self.screenshot())
+            self._last_frame_observation = observation
+            return observation
+
     def acquire_actuation_frame(self) -> bytes:
+        """Compatibility byte view of :meth:`acquire_actuation_observation`."""
+
+        return self.acquire_actuation_observation().png
+
+    def acquire_actuation_observation(self) -> FrameObservation:
         """Acquire the exact client window and arm a one-shot content lease.
 
         The runtime re-resolves the target and record identity on the returned
@@ -774,7 +885,8 @@ class RemoteDisplayBackend:
                     "app-frontmost, and keyboard-frontmost; refusing to acquire "
                     "an actuation lease"
                 )
-            png = self.screenshot()
+            observation = self.observe_frame()
+            png = observation.png
             assert self._frame_window is not None
             lease = self._frame_window
             current = self._resolve_window(refresh=True)
@@ -816,7 +928,24 @@ class RemoteDisplayBackend:
                 )
             self._actuation_lease_state = _LEASE_ARMED
             self._actuation_frame_png = png
-            return png
+            self._actuation_observation = observation
+            return observation
+
+    def bind_input_observation(self, observation: FrameObservation) -> None:
+        """Require the runtime to consume the exact armed window descriptor."""
+
+        with self._input_lock:
+            armed = self._actuation_observation
+            if (
+                self._actuation_lease_state != _LEASE_ARMED
+                or armed is None
+                or armed.frame_sha256 != observation.frame_sha256
+                or armed.geometry_epoch != observation.geometry_epoch
+            ):
+                self._invalidate_actuation_lease()
+                raise StructuralResolutionRefused(
+                    "remote-display input observation does not match its exact lease"
+                )
 
     def arm_remote_frame_contract(
         self, *, protected_regions: tuple[tuple[int, int, int, int], ...]
@@ -827,8 +956,11 @@ class RemoteDisplayBackend:
     def reset_fresh_actuation_state(self) -> None:
         """Reset only a typed zero-input content invalidation.
 
-        This clears the stale prepared point but grants no actuation authority.
-        The runtime must prepare, acquire, and validate a new lease.
+        This clears the stale prepared point and passively observes the current
+        geometry, but grants no actuation authority.  The passive observation
+        is required after a resize or cross-display move: pointer preparation
+        must map through the new window bounds before the runtime can acquire
+        and validate its replacement lease.
         """
 
         with self._input_lock:
@@ -839,7 +971,12 @@ class RemoteDisplayBackend:
                 )
             self._actuation_lease_state = _LEASE_NONE
             self._actuation_frame_png = None
+            self._actuation_observation = None
             self._prepared_pointer_point = None
+            # ``screenshot`` refreshes only observation state.  It cannot arm
+            # a consequential lease.  A later prepare/acquire/bind sequence is
+            # still required before the next input edge.
+            self.screenshot()
 
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
@@ -1423,14 +1560,18 @@ class RemoteDisplayBackend:
         self._assert_frame_fresh()
         assert self._frame_window is not None
         lease = self._frame_window
+        if current.window_id != lease.window_id or current.pid != lease.pid:
+            raise RemoteDisplayError(
+                "remote-display window identity changed since capture; capture "
+                "and re-resolve before input"
+            )
         if (
-            current.window_id != lease.window_id
-            or current.pid != lease.pid
-            or current.bounds != lease.bounds
+            current.bounds != lease.bounds
+            and self._actuation_lease_state != _LEASE_ARMED
         ):
             raise RemoteDisplayError(
-                "remote-display window identity or geometry changed since capture; "
-                "capture and re-resolve before input"
+                "remote-display window geometry changed since capture; capture "
+                "and re-resolve before input"
             )
         assert self._viewport is not None
         if point is not None:
@@ -1455,12 +1596,16 @@ class RemoteDisplayBackend:
             # lease. This detects a lock/disconnect or content change after the
             # runtime re-resolved the fresh actuation frame.
             png, px_w, px_h = self._client.capture(current.window_id)
-            if _png_size(png) != self._viewport or (px_w, px_h) != self._viewport:
-                self._actuation_lease_state = _LEASE_INVALIDATED
+            observed_size = _png_size(png)
+            if observed_size != (int(px_w), int(px_h)):
+                self._invalidate_actuation_lease()
                 raise RemoteDisplayError(
-                    "remote-display dimensions changed during readiness check; "
-                    "capture and re-resolve before input"
+                    "remote-display capture dimensions disagree before input"
                 )
+            observed_scale = (
+                observed_size[0] / current.bounds[2],
+                observed_size[1] / current.bounds[3],
+            )
             if self._readiness_probe is not None and not self._readiness_probe(png):
                 self._actuation_lease_state = _LEASE_INVALIDATED
                 raise RemoteDisplayError(
@@ -1488,6 +1633,37 @@ class RemoteDisplayBackend:
                     "target resolution; refusing input"
                 )
             if self._actuation_lease_state == _LEASE_ARMED:
+                armed = self._actuation_observation
+                if armed is None:
+                    self._invalidate_actuation_lease()
+                    raise StructuralResolutionRefused(
+                        "remote-display lease has no atomic frame observation"
+                    )
+                current_observation = self._observation_from_state(
+                    png,
+                    window=current,
+                    viewport=observed_size,
+                    scale=observed_scale,
+                    session_identity=current_session_identity,
+                )
+                if current_observation.topology_sha256 != armed.topology_sha256:
+                    self._invalidate_actuation_lease()
+                    raise DisplayTopologyChanged(
+                        expected_observation=armed,
+                        observed_observation=current_observation,
+                    )
+                if current_observation.geometry_epoch != armed.geometry_epoch:
+                    self._invalidate_actuation_lease()
+                    raise _RemoteDisplayFreshActuationRequired(
+                        operation=operation,
+                        changed_pixel_count=observed_size[0] * observed_size[1],
+                        changed_bbox=(0, 0, observed_size[0], observed_size[1]),
+                        frame_size=observed_size,
+                        expected_geometry_epoch=armed.geometry_epoch,
+                        observed_geometry_epoch=current_observation.geometry_epoch,
+                        expected_observation=armed,
+                        observed_observation=current_observation,
+                    )
                 # Consume once before the first input edge.  A double click or
                 # multi-character type is one gesture and must not invalidate
                 # itself after its first state-changing edge.
@@ -1512,14 +1688,55 @@ class RemoteDisplayBackend:
                         changed_pixel_count=changed_pixel_count,
                         changed_bbox=changed_bbox,
                         frame_size=self._viewport,
+                        expected_observation=armed,
+                        observed_observation=current_observation,
                     )
-                if consume_actuation_lease:
-                    self._actuation_lease_state = _LEASE_NONE
-                    self._actuation_frame_png = None
         # Activation, window resolution, capture and readiness/OCR may all
         # block. Re-resolve the exact window/key identity and age again at the
         # last common point before input.
         post = self._resolve_window(refresh=True)
+        post_geometry_changed = (
+            post.window_id == lease.window_id
+            and post.pid == lease.pid
+            and post.bounds != lease.bounds
+        )
+        if post_geometry_changed and self._actuation_lease_state == _LEASE_ARMED:
+            armed = self._actuation_observation
+            assert armed is not None
+            post_png, post_width, post_height = self._client.capture(post.window_id)
+            post_size = _png_size(post_png)
+            if post_size != (int(post_width), int(post_height)):
+                self._invalidate_actuation_lease()
+                raise RemoteDisplayError(
+                    "remote-display post-check capture dimensions disagree"
+                )
+            post_observation = self._observation_from_state(
+                post_png,
+                window=post,
+                viewport=post_size,
+                scale=(
+                    post_size[0] / post.bounds[2],
+                    post_size[1] / post.bounds[3],
+                ),
+                session_identity=self._session_identity_from_frame(post_png),
+            )
+            if post_observation.topology_sha256 != armed.topology_sha256:
+                self._invalidate_actuation_lease()
+                raise DisplayTopologyChanged(
+                    expected_observation=armed,
+                    observed_observation=post_observation,
+                )
+            self._invalidate_actuation_lease()
+            raise _RemoteDisplayFreshActuationRequired(
+                operation=operation,
+                changed_pixel_count=self._viewport[0] * self._viewport[1],
+                changed_bbox=(0, 0, self._viewport[0], self._viewport[1]),
+                frame_size=self._viewport,
+                expected_geometry_epoch=armed.geometry_epoch,
+                observed_geometry_epoch=post_observation.geometry_epoch,
+                expected_observation=armed,
+                observed_observation=post_observation,
+            )
         if (
             not post.on_screen
             or not self._window_focus_matches(post)
@@ -1534,6 +1751,10 @@ class RemoteDisplayBackend:
         if self._qualification_input_guard is not None:
             self._qualification_input_guard()
         self._assert_frame_fresh()
+        if consume_actuation_lease and self._actuation_lease_state == _LEASE_ARMED:
+            self._actuation_lease_state = _LEASE_NONE
+            self._actuation_frame_png = None
+            self._actuation_observation = None
 
     def set_qualification_input_guard(
         self, guard: Optional[Callable[[], None]]
@@ -1553,6 +1774,7 @@ class RemoteDisplayBackend:
         if self._actuation_lease_state == _LEASE_ARMED:
             self._actuation_lease_state = _LEASE_INVALIDATED
         self._actuation_frame_png = None
+        self._actuation_observation = None
 
     @staticmethod
     def _frame_difference(
@@ -1728,6 +1950,63 @@ class MacWindowClient:
             return bool(AXIsProcessTrusted())
         except Exception:  # noqa: BLE001 - absence == untrusted
             return False
+
+    def process_start_time(self, pid: int) -> Optional[str]:
+        """Return the exact AppKit launch timestamp for one live process."""
+
+        try:
+            from AppKit import NSRunningApplication
+
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            launch_date = app.launchDate() if app is not None else None
+            if launch_date is None:
+                return None
+            return f"unix-seconds:{float(launch_date.timeIntervalSince1970()):.6f}"
+        except Exception:  # noqa: BLE001 - unavailable is explicit in the digest
+            return None
+
+    def display_topology(self) -> tuple[DisplayGeometry, ...]:
+        """Return stable CoreGraphics display IDs, bounds, and pixel scales."""
+
+        try:
+            import Quartz
+
+            status, display_ids, count = Quartz.CGGetActiveDisplayList(64, None, None)
+            if int(status) != 0:
+                raise RemoteDisplayError(
+                    f"CoreGraphics display enumeration failed ({int(status)})"
+                )
+            displays: list[DisplayGeometry] = []
+            for raw_display_id in tuple(display_ids or ())[: int(count)]:
+                display_id = int(raw_display_id)
+                rect = Quartz.CGDisplayBounds(display_id)
+                width = float(rect.size.width)
+                height = float(rect.size.height)
+                if width <= 0 or height <= 0:
+                    continue
+                scale_x = float(Quartz.CGDisplayPixelsWide(display_id)) / width
+                scale_y = float(Quartz.CGDisplayPixelsHigh(display_id)) / height
+                displays.append(
+                    DisplayGeometry(
+                        display_id=f"cgdisplay:{display_id}",
+                        bounds=(
+                            float(rect.origin.x),
+                            float(rect.origin.y),
+                            width,
+                            height,
+                        ),
+                        scale=(scale_x, scale_y),
+                    )
+                )
+            if not displays:
+                raise RemoteDisplayError("CoreGraphics returned no active displays")
+            return tuple(displays)
+        except RemoteDisplayError:
+            raise
+        except Exception as exc:
+            raise RemoteDisplayError(
+                "CoreGraphics display topology is unavailable"
+            ) from exc
 
     def resolve_key(self, token: str) -> Optional[tuple[int, bool]]:
         """macOS virtual key code for a named-key/character chord token."""

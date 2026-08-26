@@ -51,9 +51,13 @@ from urllib.parse import urlsplit
 
 from openadapt_flow.backend import (
     ActionDeliveryUncertain,
+    ActuationObservationBackend,
     Backend,
     BrowserPresentationGeometryBackend,
     FocusedElementActuationLeaseBackend,
+    FrameObservation,
+    FrameObservationBackend,
+    FrameObservationLeaseBackend,
     FreshActuationReacquisitionBackend,
     FreshActuationRequired,
     GuardedCoordinateActionBackend,
@@ -67,6 +71,9 @@ from openadapt_flow.backend import (
     RichPointerActionBackend,
     SelectOptionBackend,
     StructuralResolutionRefused,
+    frame_observation_identity,
+    session_identity_sha256,
+    window_identity_sha256,
 )
 from openadapt_flow.bundle_validation import compute_parameter_schema_digest
 from openadapt_flow.identity_signals import (
@@ -602,6 +609,8 @@ class Replayer:
         self._active_runtime_worklists: Optional[dict[str, list[dict[str, str]]]] = None
         self._active_delivery_resolution: Optional[Resolution] = None
         self._active_delivery_region: Optional[Region] = None
+        self._active_frame_observation: Optional[FrameObservation] = None
+        self._last_frame_observation: Optional[FrameObservation] = None
         self._current_graph_id: Optional[str] = None
         self._execution_workflow_source: Optional[Workflow] = None
         self._execution_workflow_snapshot: Optional[Workflow] = None
@@ -724,6 +733,98 @@ class Replayer:
         self._qualification_environment_bound: Optional[
             QualificationEnvironmentObservation
         ] = None
+
+    def _retain_frame_observation(
+        self,
+        observation: FrameObservation,
+        *,
+        active: bool = False,
+    ) -> FrameObservation:
+        self._last_frame_observation = observation
+        if active:
+            self._active_frame_observation = observation
+        return observation
+
+    def _legacy_single_surface_observation(self, png: bytes) -> FrameObservation:
+        """Bind an old Backend to the exact PNG-local coordinate surface.
+
+        The legacy Backend contract defines clicks in screenshot pixel space.
+        It can therefore prove PNG dimensions, frame-local origin, and its
+        process-local surface identity without a later ``viewport`` read. It
+        cannot claim external window/session continuity; production native and
+        remote adapters implement ``observe_frame`` with stronger identities.
+        """
+
+        viewport = exact_png_size(png)
+        backend_identity = {
+            "schema": "openadapt.legacy-frame-surface.v1",
+            "backend_type": (
+                f"{type(self.backend).__module__}.{type(self.backend).__qualname__}"
+            ),
+            "backend_instance": id(self.backend),
+        }
+        window_identity = window_identity_sha256(
+            window_id=f"legacy:{id(self.backend)}",
+            pid=0,
+            process_start_time=None,
+            owner=backend_identity["backend_type"],
+        )
+        session_identity = session_identity_sha256(
+            authority=backend_identity["backend_type"],
+            session_id=str(id(self.backend)),
+            session_start_time=None,
+            principal_identity_sha256=None,
+        )
+        topology = frame_observation_identity(
+            {
+                **backend_identity,
+                "viewport": list(viewport),
+                "coordinate_space": "png-local",
+            }
+        )
+        return FrameObservation.create(
+            png,
+            origin=(0.0, 0.0),
+            scale=None,
+            device_pixel_ratio=None,
+            display_id="legacy-png-surface",
+            display_bounds=(0.0, 0.0, float(viewport[0]), float(viewport[1])),
+            display_scale=(1.0, 1.0),
+            topology_sha256=topology,
+            window_identity_sha256=window_identity,
+            session_identity_sha256=session_identity,
+        )
+
+    def _capture_frame_observation(
+        self,
+        *,
+        active: bool = False,
+    ) -> FrameObservation:
+        if isinstance(self.backend, FrameObservationBackend):
+            observation = self.backend.observe_frame()
+        else:
+            observation = self._legacy_single_surface_observation(
+                self.backend.screenshot()
+            )
+        return self._retain_frame_observation(observation, active=active)
+
+    def _observation_for_frame(self, frame_png: bytes) -> FrameObservation:
+        for observation in (
+            self._active_frame_observation,
+            self._last_frame_observation,
+            getattr(self.backend, "last_frame_observation", None),
+        ):
+            if (
+                isinstance(observation, FrameObservation)
+                and observation.png is frame_png
+            ):
+                return observation
+        return self._legacy_single_surface_observation(frame_png)
+
+    def _viewport_for_frame(self, frame_png: bytes) -> tuple[int, int]:
+        """Return geometry bound to ``frame_png``, never a later backend read."""
+
+        return self._observation_for_frame(frame_png).viewport
 
     @staticmethod
     def _canonical_resume_value(value: Any) -> Any:
@@ -2202,7 +2303,7 @@ class Replayer:
         for text presence; returns [] when OCR is unavailable (pixel-only
         substrate / a vision stub without ocr)."""
         try:
-            frame = self.backend.screenshot()
+            frame = self._capture_frame_observation().png
         except Exception:
             return []
         ocr = getattr(self.vision, "ocr", None)
@@ -3348,10 +3449,7 @@ class Replayer:
                 )
             frame_sha256 = hashlib.sha256(frame).hexdigest()
             frame_ref = f"private/program-transitions/{frame_sha256}.png"
-            viewport = (
-                int(self.backend.viewport[0]),
-                int(self.backend.viewport[1]),
-            )
+            viewport = self._viewport_for_frame(frame)
             try:
                 retained_frame_size = exact_png_size(frame)
             except Exception as exc:
@@ -5441,7 +5539,7 @@ class Replayer:
             return before_png
         if mutation.replace_effect_verifier:
             raise RuntimeError("qualification_screen_fault_replaced_verifier")
-        after_png = self.backend.screenshot()
+        after_png = self._capture_frame_observation().png
         self._validate_fault_mutation(
             context,
             mutation.receipt,
@@ -5651,9 +5749,13 @@ class Replayer:
         # capture only a raw diagnostic frame here so it is not preceded by an
         # unobservable proceed-anyway settle attempt.
         before_png = (
-            self.backend.screenshot()
+            self._capture_frame_observation().png
             if self.require_settled
             else self.vision.wait_settled(self.backend)
+        )
+        self._retain_frame_observation(
+            self._observation_for_frame(before_png),
+            active=True,
         )
         result.before_png = self._save_step_png(
             run_dir, evidence_step_id, "before", before_png
@@ -6124,7 +6226,6 @@ class Replayer:
                             and self._step_needs_consequential_revalidation(
                                 step, workflow
                             )
-                            and isinstance(self.backend, RemoteActuationBackend)
                             and reacquisition_backend is not None
                         )
                         if can_retry:
@@ -8507,21 +8608,34 @@ class Replayer:
                     f"step '{step.id}' ({step.intent}): {detail}",
                 )
         try:
-            fresh_png = (
-                self.backend.acquire_actuation_frame()
-                if isinstance(self.backend, RemoteActuationBackend)
-                else (
-                    cast(
-                        GuardedKeyboardActionBackend, self.backend
-                    ).guarded_keyboard_frame()
-                    if (
-                        guarded_keyboard_backend
-                        or guarded_type_pointer_backend
-                        or guarded_click_pointer_backend
-                    )
-                    else self.backend.screenshot()
+            if isinstance(self.backend, ActuationObservationBackend):
+                fresh_observation = self.backend.acquire_actuation_observation()
+            elif isinstance(self.backend, RemoteActuationBackend):
+                fresh_observation = self._legacy_single_surface_observation(
+                    self.backend.acquire_actuation_frame()
                 )
-            )
+            elif (
+                guarded_keyboard_backend
+                or guarded_type_pointer_backend
+                or guarded_click_pointer_backend
+            ):
+                guarded_observer = getattr(
+                    self.backend,
+                    "guarded_keyboard_observation",
+                    None,
+                )
+                if callable(guarded_observer):
+                    fresh_observation = guarded_observer()
+                else:
+                    fresh_observation = self._legacy_single_surface_observation(
+                        cast(
+                            GuardedKeyboardActionBackend, self.backend
+                        ).guarded_keyboard_frame()
+                    )
+            else:
+                fresh_observation = self._capture_frame_observation()
+            self._retain_frame_observation(fresh_observation, active=True)
+            fresh_png = fresh_observation.png
         except Exception as exc:  # noqa: BLE001 - backend boundary must halt
             if self.governed_authorization is not None:
                 result.safety_halt = True
@@ -8718,6 +8832,19 @@ class Replayer:
                             f"overlaps protected evidence: {type(exc).__name__}"
                         ),
                     )
+        if error is None and isinstance(self.backend, FrameObservationLeaseBackend):
+            try:
+                self.backend.bind_input_observation(fresh_observation)
+            except Exception as exc:  # noqa: BLE001 - lease boundary must halt
+                self._cancel_guarded_coordinate()
+                self._cancel_guarded_keyboard()
+                return (
+                    fresh_resolution,
+                    fresh_region,
+                    fresh_png,
+                    "Actuation preflight HALTED because the exact frame "
+                    f"observation lease was refused ({type(exc).__name__})",
+                )
         # Retain the exact observation that authorizes the next input edge.
         # Composite TYPE/SELECT_OPTION and retry paths can re-resolve inside
         # ``_act`` after the outer scope captured its initial geometry. A typed
@@ -8789,7 +8916,7 @@ class Replayer:
             self.grounder if allow_grounder else None,
             step.intent,
             template_png=template_png,
-            viewport=self.backend.viewport,
+            viewport=self._viewport_for_frame(screen_png),
             structural=structural,
             allow_target_ocr=allow_target_ocr,
         )
@@ -8967,15 +9094,34 @@ class Replayer:
             if identity_regions
             else None
         )
+        expected_observation = exc.expected_observation
+        observed_observation = exc.observed_observation
+        display_fields = (
+            {
+                "expected_display_id": expected_observation.display_id,
+                "observed_display_id": observed_observation.display_id,
+                "expected_display_bounds": expected_observation.display_bounds,
+                "observed_display_bounds": observed_observation.display_bounds,
+                "expected_display_scale": expected_observation.display_scale,
+                "observed_display_scale": observed_observation.display_scale,
+                "expected_topology_sha256": expected_observation.topology_sha256,
+                "observed_topology_sha256": observed_observation.topology_sha256,
+            }
+            if expected_observation is not None and observed_observation is not None
+            else {}
+        )
         return FreshActuationEvent(
             attempt=attempt,
             operation=exc.operation,
             changed_pixel_count=exc.changed_pixel_count,
             changed_bbox=exc.changed_bbox,
             frame_size=exc.frame_size,
+            expected_geometry_epoch=exc.expected_geometry_epoch,
+            observed_geometry_epoch=exc.observed_geometry_epoch,
             target_intersection=target_intersection,
             identity_intersection=identity_intersection,
             retried=retried,
+            **display_fields,
         )
 
     def _active_program_frame_refusal(
@@ -10102,7 +10248,7 @@ class Replayer:
                             else None
                         )
                 else:
-                    before_png = self.backend.screenshot()
+                    before_png = self._capture_frame_observation(active=True).png
             elif self._prev_was_click(workflow, step_index, graph_ctx):
                 field_point = self._last_click_point
                 field_region = self._last_click_region
@@ -10821,7 +10967,7 @@ class Replayer:
                     None,  # NEVER ground a dismissal: stay model-free
                     it.name,
                     template_png=template_png,
-                    viewport=self.backend.viewport,
+                    viewport=self._viewport_for_frame(before_png),
                     structural=structural,
                 )
                 if res is None:
@@ -11151,7 +11297,7 @@ class Replayer:
             frame_png,
             params,
             vision=self.vision,
-            viewport=self.backend.viewport,
+            viewport=self._viewport_for_frame(frame_png),
             asset_loader=lambda rel: self._asset_bytes(
                 bundle_dir,
                 rel,
@@ -11841,7 +11987,9 @@ class Replayer:
                 rh,
             )
         band = identity_mod.band_region(
-            resolution.point, anchor.region[3], self.backend.viewport
+            resolution.point,
+            anchor.region[3],
+            self._viewport_for_frame(before_png),
         )
         # The recorded band was extracted EXCLUDING the target's own crop
         # (labels are mutable evidence the ladder heals through) and
@@ -11964,9 +12112,16 @@ class Replayer:
         self,
         field_point: Optional[Point],
         structural_region: Optional[Region] = None,
+        *,
+        frame_png: Optional[bytes] = None,
     ) -> Optional[Region]:
         """Region to observe for typed input, or None for the whole frame."""
-        vw, vh = self.backend.viewport
+        if frame_png is None:
+            observation = self._last_frame_observation
+            if observation is None:
+                observation = self._capture_frame_observation()
+            frame_png = observation.png
+        vw, vh = self._viewport_for_frame(frame_png)
         if structural_region is not None:
             sx, sy, sw, sh = structural_region
             x = max(0, sx - FIELD_REGION_PAD)
@@ -12060,7 +12215,11 @@ class Replayer:
             retyping is only safe when nothing changed).
         """
         after_png = self.vision.wait_settled(self.backend)
-        region = self._field_region(field_point, field_region)
+        region = self._field_region(
+            field_point,
+            field_region,
+            frame_png=baseline_png,
+        )
         if baseline_field_value is not None:
             expected = baseline_field_value + text
             after_at_point = (
@@ -12295,7 +12454,7 @@ class Replayer:
                 result.input_verified = False
                 return retry_error
         else:
-            retry_baseline = self.backend.screenshot()
+            retry_baseline = self._capture_frame_observation().png
         if (
             needs_revalidation
             and field_point is not None
@@ -12552,7 +12711,7 @@ class Replayer:
                 None,  # scroll readiness must remain deterministic and model-free
                 step.intent,
                 template_png=template_png,
-                viewport=self.backend.viewport,
+                viewport=self._viewport_for_frame(frame_png),
                 structural=structural,
             )
         except OcrResolutionRefused:
@@ -12773,12 +12932,12 @@ class Replayer:
         """
 
         deadline = time.monotonic() + self.settle_readiness_timeout_s
-        frame = self.backend.screenshot()
+        frame = self._capture_frame_observation().png
         while not self.vision.pixels_changed(baseline_png, frame):
             if time.monotonic() >= deadline:
                 return frame
             time.sleep(self.poll_interval_s)
-            frame = self.backend.screenshot()
+            frame = self._capture_frame_observation().png
         return self.vision.wait_settled(self.backend)
 
     def _prepare_remote_scroll_input(
@@ -12799,7 +12958,15 @@ class Replayer:
         if not isinstance(self.backend, RemoteActuationBackend):
             return None
         try:
-            self.backend.acquire_actuation_frame()
+            if isinstance(self.backend, ActuationObservationBackend):
+                observation = self.backend.acquire_actuation_observation()
+            else:
+                observation = self._legacy_single_surface_observation(
+                    self.backend.acquire_actuation_frame()
+                )
+            self._retain_frame_observation(observation, active=True)
+            if isinstance(self.backend, FrameObservationLeaseBackend):
+                self.backend.bind_input_observation(observation)
         except Exception as exc:  # noqa: BLE001 - backend boundary must halt
             if self.governed_authorization is not None:
                 result.safety_halt = True
@@ -12994,7 +13161,7 @@ class Replayer:
                 if time.monotonic() >= deadline:
                     return False, frame_png
                 time.sleep(self.poll_interval_s)
-                frame_png = self.backend.screenshot()
+                frame_png = self._capture_frame_observation().png
         return True, frame_png
 
     def _postcondition_passes(
@@ -13035,6 +13202,19 @@ class Replayer:
         if kind == "region_stable":
             if pc.region is None or pc.phash is None:
                 return True
+            source_observation = self._active_frame_observation
+            current_observation = self._observation_for_frame(frame_png)
+            if (
+                source_observation is not None
+                and current_observation.geometry_epoch
+                != source_observation.geometry_epoch
+            ):
+                # A raw region has no authority after reflow. A future IR field
+                # can carry a named target/anchor binding and map the region
+                # from a newly resolved identity. Until that exact binding is
+                # present, refuse this postcondition rather than applying old
+                # viewport coordinates to a new geometry epoch.
+                return False
             region = tuple(pc.region)
             # Template check first: real apps re-layout by a few pixels
             # between runs (auto-scrolling panes, variable banner heights),
@@ -13043,7 +13223,9 @@ class Replayer:
             template_png = self._postcondition_template(pc, bundle_dir)
             if template_png is not None:
                 search = pad_region(
-                    region, PC_TEMPLATE_SEARCH_PAD, self.backend.viewport
+                    region,
+                    PC_TEMPLATE_SEARCH_PAD,
+                    self._viewport_for_frame(frame_png),
                 )
                 match = self.vision.find_template(
                     frame_png,

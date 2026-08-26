@@ -65,8 +65,12 @@ from PIL import Image, ImageChops
 
 from openadapt_flow.backend import (
     ActionDeliveryUncertain,
+    FrameObservation,
     FreshActuationRequired,
     StructuralResolutionRefused,
+    frame_observation_identity,
+    session_identity_sha256,
+    window_identity_sha256,
 )
 from openadapt_flow.ir import ActionDeliveryReceipt, Point
 from openadapt_flow.remote_frame_contract import RemoteFrameContract
@@ -366,6 +370,9 @@ class FreeRDPBackend:
         self._qualification_environment: Optional[tuple[str, str, str, str]] = None
         self._qualification_input_guard: Optional[Callable[[], None]] = None
         self._actuation_frame_png: Optional[bytes] = None
+        self._last_frame_observation: Optional[FrameObservation] = None
+        self._actuation_observation: Optional[FrameObservation] = None
+        self._connection_identity = uuid.uuid4().hex
         self._actuation_lease_state = _LEASE_NONE
         # Keep capture/geometry validation and a complete input gesture in one
         # critical section. A concurrent screenshot may otherwise replace the
@@ -413,11 +420,77 @@ class FreeRDPBackend:
                 else self._last_frame_digest
             )
             self._last_session_identity = self._session_identity_from_frame(png)
+            self._last_frame_observation = self._observation_from_png(png)
             if self._actuation_lease_state == _LEASE_ARMED:
                 self._invalidate_actuation_lease()
             return png
 
+    @property
+    def last_frame_observation(self) -> Optional[FrameObservation]:
+        """The descriptor created by the most recent completed frame capture."""
+
+        return self._last_frame_observation
+
+    def _observation_from_png(
+        self,
+        png: bytes,
+        *,
+        viewport: Optional[tuple[int, int]] = None,
+        session_identity: Optional[str] = None,
+    ) -> FrameObservation:
+        """Bind one RDP framebuffer to its exact connection and geometry."""
+
+        viewport = self._viewport if viewport is None else viewport
+        if viewport is None:
+            raise RuntimeError("RDP frame observation has no framebuffer geometry")
+        principal = session_identity or self._last_session_identity
+        session = session_identity_sha256(
+            authority=f"rdp:{type(self._transport).__qualname__}",
+            session_id=self._connection_identity,
+            session_start_time=None,
+            principal_identity_sha256=principal,
+        )
+        topology = frame_observation_identity(
+            {
+                "schema": "openadapt.rdp-topology.v1",
+                "transport": type(self._transport).__qualname__,
+                "connection": self._connection_identity,
+                "coordinate_space": "remote-virtual-framebuffer",
+            }
+        )
+        window = window_identity_sha256(
+            window_id=f"rdp-framebuffer:{self._connection_identity}",
+            pid=0,
+            process_start_time=None,
+            owner=type(self._transport).__qualname__,
+        )
+        return FrameObservation.create(
+            png,
+            origin=(0.0, 0.0),
+            scale=(1.0, 1.0),
+            device_pixel_ratio=1.0,
+            display_id=f"rdp-virtual-display:{self._connection_identity}",
+            display_bounds=(0.0, 0.0, float(viewport[0]), float(viewport[1])),
+            display_scale=(1.0, 1.0),
+            topology_sha256=topology,
+            window_identity_sha256=window,
+            session_identity_sha256=session,
+        )
+
+    def observe_frame(self) -> FrameObservation:
+        """Capture one atomic RDP framebuffer observation."""
+
+        with self._input_lock:
+            observation = self._observation_from_png(self.screenshot())
+            self._last_frame_observation = observation
+            return observation
+
     def acquire_actuation_frame(self) -> bytes:
+        """Compatibility byte view of :meth:`acquire_actuation_observation`."""
+
+        return self.acquire_actuation_observation().png
+
+    def acquire_actuation_observation(self) -> FrameObservation:
         """Capture readiness and arm a one-shot exact-content input lease.
 
         A direct RDP transport is already the selected remote session; the
@@ -426,7 +499,8 @@ class FreeRDPBackend:
         when dimensions, readiness, or pixels changed.
         """
         with self._input_lock:
-            png = self.screenshot()
+            observation = self.observe_frame()
+            png = observation.png
             if self._readiness_probe is not None and not self._readiness_probe(png):
                 self._invalidate_actuation_lease()
                 raise RuntimeError(
@@ -453,8 +527,25 @@ class FreeRDPBackend:
                     "fresh actuation frame"
                 )
             self._actuation_frame_png = png
+            self._actuation_observation = observation
             self._actuation_lease_state = _LEASE_ARMED
-            return png
+            return observation
+
+    def bind_input_observation(self, observation: FrameObservation) -> None:
+        """Require the runtime to consume the exact armed RDP descriptor."""
+
+        with self._input_lock:
+            armed = self._actuation_observation
+            if (
+                self._actuation_lease_state != _LEASE_ARMED
+                or armed is None
+                or armed.frame_sha256 != observation.frame_sha256
+                or armed.geometry_epoch != observation.geometry_epoch
+            ):
+                self._invalidate_actuation_lease()
+                raise StructuralResolutionRefused(
+                    "RDP input observation does not match its exact fresh-frame lease"
+                )
 
     def arm_remote_frame_contract(
         self, *, protected_regions: tuple[tuple[int, int, int, int], ...]
@@ -476,6 +567,7 @@ class FreeRDPBackend:
                 )
             self._actuation_lease_state = _LEASE_NONE
             self._actuation_frame_png = None
+            self._actuation_observation = None
 
     # -- Optional ExecutionContextIdentityBackend --------------------------
 
@@ -1122,7 +1214,28 @@ class FreeRDPBackend:
         current = (int(w), int(h))
         if current[0] <= 0 or current[1] <= 0:
             raise RuntimeError(f"RDP framebuffer has invalid dimensions {current!r}")
+        current_img = self._to_image(frame, current[0], current[1])
+        current_png = self._png_bytes(current_img)
+        exact_lease_ready = self._actuation_lease_state == _LEASE_ARMED
         if self._viewport != current:
+            armed = self._actuation_observation
+            if exact_lease_ready and armed is not None:
+                current_observation = self._observation_from_png(
+                    current_png,
+                    viewport=current,
+                    session_identity=self._last_session_identity,
+                )
+                self._invalidate_actuation_lease()
+                raise FreshActuationRequired(
+                    operation=operation,
+                    changed_pixel_count=current[0] * current[1],
+                    changed_bbox=(0, 0, current[0], current[1]),
+                    frame_size=current,
+                    expected_geometry_epoch=armed.geometry_epoch,
+                    observed_geometry_epoch=current_observation.geometry_epoch,
+                    expected_observation=armed,
+                    observed_observation=current_observation,
+                )
             raise RuntimeError(
                 f"RDP framebuffer changed from {self._viewport!r} to {current!r}; "
                 "capture and re-resolve before sending input"
@@ -1138,7 +1251,6 @@ class FreeRDPBackend:
                 "RDP actuation lease was invalidated by another observation; "
                 "refusing input and requiring a fresh lease"
             )
-        exact_lease_ready = self._actuation_lease_state == _LEASE_ARMED
         if (
             self._readiness_probe is not None
             or self._actuation_lease_state == _LEASE_ARMED
@@ -1148,8 +1260,6 @@ class FreeRDPBackend:
             # Evaluate readiness on the current framebuffer, not merely the
             # resolver's leased image: a lock/disconnect or content change can
             # appear while the dimensions stay unchanged.
-            current_img = self._to_image(frame, current[0], current[1])
-            current_png = self._png_bytes(current_img)
             if self._readiness_probe is not None and not self._readiness_probe(
                 current_png
             ):
@@ -1169,6 +1279,29 @@ class FreeRDPBackend:
                     "capture; refusing input"
                 )
             if exact_lease_ready:
+                armed = self._actuation_observation
+                if armed is None:
+                    self._invalidate_actuation_lease()
+                    raise StructuralResolutionRefused(
+                        "RDP actuation lease has no atomic frame observation"
+                    )
+                current_observation = self._observation_from_png(
+                    current_png,
+                    viewport=current,
+                    session_identity=current_session_identity,
+                )
+                if current_observation.geometry_epoch != armed.geometry_epoch:
+                    self._invalidate_actuation_lease()
+                    raise FreshActuationRequired(
+                        operation=operation,
+                        changed_pixel_count=current[0] * current[1],
+                        changed_bbox=(0, 0, current[0], current[1]),
+                        frame_size=current,
+                        expected_geometry_epoch=armed.geometry_epoch,
+                        observed_geometry_epoch=current_observation.geometry_epoch,
+                        expected_observation=armed,
+                        observed_observation=current_observation,
+                    )
                 raw_digest = self._canonical_frame_digest(current_img)
                 digest = (
                     self._remote_frame_contract.comparison_digest(current_png)
@@ -1189,6 +1322,8 @@ class FreeRDPBackend:
                         changed_pixel_count=changed_pixel_count,
                         changed_bbox=changed_bbox,
                         frame_size=current,
+                        expected_observation=armed,
+                        observed_observation=current_observation,
                     )
                 # The complete qualification environment was checked against
                 # this exact leased image in ``acquire_actuation_frame``.  The
@@ -1222,6 +1357,7 @@ class FreeRDPBackend:
                 )
             self._actuation_lease_state = _LEASE_NONE
             self._actuation_frame_png = None
+            self._actuation_observation = None
         self._assert_frame_fresh()
 
     def set_qualification_input_guard(
@@ -1242,6 +1378,7 @@ class FreeRDPBackend:
         if self._actuation_lease_state == _LEASE_ARMED:
             self._actuation_lease_state = _LEASE_INVALIDATED
         self._actuation_frame_png = None
+        self._actuation_observation = None
 
     def _fresh_identity_frame(self) -> Optional[bytes]:
         """Passively capture a fresh framebuffer without replacing a valid lease."""

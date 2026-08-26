@@ -4,11 +4,11 @@ A single GPU appliance serves the identity-veto, grounding, and state-verificati
 VLM tiers to a fleet of **GPU-less** automation runners over the LAN. The runtime
 stays GPU-free and **patient data never leaves the building**.
 
-> Current integration: standard replay and attended execution wire all three
-> appliance tiers. When an operator configures the appliance and enables model
-> grounding, the runtime adds the remote grounder, veto-only identity tier, and
-> drift-oracle state verifier. The default run stays local and model-free. The
-> `resume` command doesn't yet rebuild these appliance handles.
+> Current integration: deployment replay, resume, and attended execution use
+> all three appliance tiers. When an operator configures the appliance and
+> enables model grounding, the runtime adds the remote grounder, veto-only
+> identity tier, and drift-oracle state verifier. The default run stays local
+> and model-free.
 
 ## Topology
 
@@ -160,21 +160,22 @@ state    = RemoteStateVerifier(client)     # yes / no / uncertain
 
 ## Integration
 
-Wired into the `replay` CLI. An appliance is **opt-in** — set three env vars on
-the runner and the grounding rung and identity veto tier come online; leave them
-unset (the default) and the run stays fully local and model-free.
+Flow uses the shared deployment constructor for replay, resume, and attended
+execution. An appliance is **opt-in**: set three env vars on the runner and
+enable model grounding. Leave the URL unset or keep model grounding disabled,
+and the run stays fully local and model-free.
 
 ```bash
 export OPENADAPT_FLOW_VLM_URL="https://gpu-box.lan:8077"   # unset => dormant
 export OPENADAPT_FLOW_VLM_TOKEN="$(cat /etc/openadapt/vlm_token)"
 export OPENADAPT_FLOW_VLM_TIMEOUT=2.0                       # optional, seconds
-openadapt-flow replay bundle
+openadapt-flow replay bundle --allow-model-grounding
 ```
 
 `appliance_from_env()` (`runtime/remote_vlm.py`) reads these and returns a
-`RemoteAppliance` (or `None`). The standard replay path adds its grounder as the
-model fallback and passes its identity and state-verifier handles into the
-`Replayer`.
+`RemoteAppliance` (or `None`). The shared deployment constructor adds its
+grounder as the model fallback and passes its identity and state-verifier
+handles into the `Replayer`.
 
 - **Grounder slot:** `RemoteGrounder` satisfies the `Grounder` protocol
   (`runtime/grounder.py`) and drops into the resolution ladder's grounder slot

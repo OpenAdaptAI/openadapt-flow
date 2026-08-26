@@ -90,14 +90,16 @@ supplied its coordinates. The pair binds the process start identity, display
 topology, bounds, scale, fixed viewport, normalization rectangle, and geometry
 generation. Recorder shutdown also retains one frame after input has stopped.
 
-For `windows`, `macos`, and `linux`, the adapter first verifies Capture's
-artifact manifest and completion terminal. It reads a private immutable
-snapshot, selects the action's exact bound frame, and selects the first retained
-frame whose source ordinal is later than the action. It does not use a nearest
-timestamp for this evidence. The emitted `source_geometry` object binds those
-source identities to the exact PNG written into the Flow recording. The
-compiler checks the PNG digest and carries the closed object on the compiled
-step.
+The adapter verifies the artifact manifest and completion terminal for every
+sealed v2 window capture. This includes external RDP and Citrix recordings. It
+reads a private immutable snapshot, selects the action's exact bound frame, and
+then selects the first retained frame after the action. It doesn't substitute a
+nearby timestamp.
+
+For `windows`, `macos`, and `linux`, the adapter also emits `source_geometry`.
+That object binds the source identities to the exact PNG in the Flow recording.
+The compiler checks its PNG digest, requires one complete source sequence, and
+carries the closed object on each compiled step.
 
 This contract does not promote local native geometry into an external
 RDP/Citrix workflow. The CLI leaves `source_surface` unset for `rdp` and

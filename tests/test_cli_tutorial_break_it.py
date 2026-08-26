@@ -1,14 +1,16 @@
-"""CLI wiring and fail-loud contract for ``tutorial --break-it``.
+"""CLI wiring for the advanced rejected-write verification fixture.
 
 Browser-free: the tutorial's heavy loop is faked, and the real end-to-end
 behavior (record, run, halt) is owned by ``tests/e2e/test_tutorial_break_it_e2e.py``.
 What is proven here, cheaply and on every unit run:
 
-* the flag reaches :func:`openadapt_flow.tutorial.run_tutorial` and its result
+* ``--simulate-rejected-write`` reaches
+  :func:`openadapt_flow.tutorial.run_tutorial` and its result
   drives the printed narrative -- screen claim, refuted verifier read, HALTED
   outcome, evidence path, and the no-receipt rule -- from run evidence, not
   from a script;
-* the plain tutorial ends with a pointer at ``--break-it`` as the next step;
+* the plain tutorial points at a real first workflow, never this fixture;
+* the deprecated ``--break-it`` alias stays hidden and warns on stderr;
 * :func:`openadapt_flow.tutorial._run_break_it` raises loudly when the engine
   does NOT halt on the injected fault, and extracts the narrative facts from a
   halted report when it does.
@@ -65,8 +67,8 @@ def _verified_result(
 
 def _broken_result(root: Path) -> BreakItResult:
     return BreakItResult(
-        run_dir=root / "run-broken",
-        report_path=root / "run-broken" / "REPORT.md",
+        run_dir=root / "run-rejected-write",
+        report_path=root / "run-rejected-write" / "REPORT.md",
         fault="optimistic",
         execution_outcome="HALTED",
         transaction_outcome="RECONCILIATION_REQUIRED",
@@ -80,7 +82,7 @@ def _broken_result(root: Path) -> BreakItResult:
     )
 
 
-def test_break_it_flag_reaches_run_tutorial_and_drives_the_narrative(
+def test_simulate_rejected_write_reaches_tutorial_and_drives_the_narrative(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -92,13 +94,23 @@ def test_break_it_flag_reaches_run_tutorial_and_drives_the_narrative(
         return _verified_result(Path(work_dir), break_it=_broken_result(Path(work_dir)))
 
     monkeypatch.setattr(tutorial_module, "run_tutorial", fake_run_tutorial)
-    assert main(["tutorial", "--break-it", "--out", str(tmp_path / "t")]) == 0
+    assert (
+        main(
+            [
+                "tutorial",
+                "--simulate-rejected-write",
+                "--out",
+                str(tmp_path / "t"),
+            ]
+        )
+        == 0
+    )
     assert seen["break_it"] is True
 
     out = capsys.readouterr().out
     # The two runs are labeled so VERIFIED is never misread as the broken one.
     assert "clean run" in out
-    assert "break-it: the same certified bundle" in out
+    assert "rejected-write verification" in out
     # The narrative's three beats, from evidence fields.
     assert "every on-screen check passed" in out
     assert '"Encounter saved"' in out
@@ -109,14 +121,13 @@ def test_break_it_flag_reaches_run_tutorial_and_drives_the_narrative(
     # The engine's own halt reason is quoted, not paraphrased.
     assert "record_written refuted" in out
     # Where the evidence lives, and what may NOT be claimed.
-    assert str(tmp_path / "t" / "run-broken" / "REPORT.md") in out
+    assert str(tmp_path / "t" / "run-rejected-write" / "REPORT.md") in out
     assert "NOT a success receipt" in out
     assert "No shareable receipt for the halted run" in out
-    # And what to do next.
-    assert "record your own workflow" in out
+    assert "openadapt-flow tutorial --break-it" not in out
 
 
-def test_plain_tutorial_points_at_break_it_next(
+def test_plain_tutorial_points_at_a_real_first_workflow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -134,8 +145,46 @@ def test_plain_tutorial_points_at_break_it_next(
     out = capsys.readouterr().out
     assert "REPORT.md" in out
     assert "receipt.json" in out
-    assert "openadapt-flow tutorial --break-it" in out
-    assert "break-it: the same certified bundle" not in out
+    assert "openadapt-flow record --backend web" in out
+    assert "openadapt-flow compile recording" in out
+    assert "openadapt-flow visualize bundle" in out
+    assert "openadapt-flow lint bundle" in out
+    assert "openadapt-flow replay bundle" in out
+    assert "--simulate-rejected-write" not in out
+    assert "--break-it" not in out
+
+
+def test_rejected_write_help_hides_the_deprecated_alias(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(["tutorial", "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "--simulate-rejected-write" in out
+    assert "--break-it" not in out
+
+
+def test_deprecated_break_it_alias_warns_and_runs_the_same_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_run_tutorial(work_dir: Path, **kwargs: Any) -> TutorialResult:
+        seen.update(kwargs)
+        return _verified_result(Path(work_dir), break_it=_broken_result(Path(work_dir)))
+
+    monkeypatch.setattr(tutorial_module, "run_tutorial", fake_run_tutorial)
+    assert main(["tutorial", "--break-it", "--out", str(tmp_path / "t")]) == 0
+    assert seen["break_it"] is True
+
+    captured = capsys.readouterr()
+    assert "rejected-write verification" in captured.out
+    assert captured.err == (
+        "warning: --break-it is deprecated; use --simulate-rejected-write.\n"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +231,7 @@ def test_run_break_it_refuses_an_uncaught_fault(
         _run_break_it(
             workflow=_fake_workflow(),
             bundle_dir=tmp_path / "bundle",
-            run_dir=tmp_path / "run-broken",
+            run_dir=tmp_path / "run-rejected-write",
             headed=False,
             say=lambda message: None,
         )
@@ -212,7 +261,7 @@ def test_run_break_it_extracts_the_narrative_from_the_halted_report(
     broken = _run_break_it(
         workflow=_fake_workflow(),
         bundle_dir=tmp_path / "bundle",
-        run_dir=tmp_path / "run-broken",
+        run_dir=tmp_path / "run-rejected-write",
         headed=False,
         say=lambda message: None,
     )
@@ -224,4 +273,4 @@ def test_run_break_it_extracts_the_narrative_from_the_halted_report(
     assert broken.effects_refuted == 1
     assert broken.system_of_record_records == 0
     assert broken.halt_reason == "record_written refuted -- nothing landed"
-    assert broken.report_path == tmp_path / "run-broken" / "REPORT.md"
+    assert broken.report_path == tmp_path / "run-rejected-write" / "REPORT.md"

@@ -1,4 +1,4 @@
-"""``tutorial --break-it``, end to end: the engine catches the fault it names.
+"""Rejected-write tutorial simulation, end to end.
 
 The clean free path is pinned by :mod:`test_free_path_e2e` (golden task).  This
 module covers the OTHER half of the tutorial's demonstration: the SAME
@@ -16,7 +16,8 @@ What is asserted, on one real browser run:
 * the lie was real: the consequential step's on-screen postconditions all
   PASSED on the broken run -- the halt did not come from the screen;
 * the caught fault leaves a clearly-labeled LOCAL report
-  (``run-broken/REPORT.md`` leads with ``HALTED``) and NO shareable receipt,
+  (``run-rejected-write/REPORT.md`` leads with ``HALTED``) and NO shareable
+  receipt,
   and ``report-run`` still refuses the halted run -- the success rail was not
   weakened to make the fault showable.
 """
@@ -33,10 +34,10 @@ from openadapt_flow.tutorial import TutorialResult, run_tutorial
 
 
 @pytest.fixture(scope="module")
-def break_it_path(tmp_path_factory: pytest.TempPathFactory) -> TutorialResult:
-    """Run the tutorial once with ``break_it=True`` for the whole module."""
+def rejected_write_path(tmp_path_factory: pytest.TempPathFactory) -> TutorialResult:
+    """Run the advanced simulation once for the whole module."""
 
-    return run_tutorial(tmp_path_factory.mktemp("break-it"), break_it=True)
+    return run_tutorial(tmp_path_factory.mktemp("rejected-write"), break_it=True)
 
 
 def _report(run_dir: Path) -> RunReport:
@@ -45,20 +46,22 @@ def _report(run_dir: Path) -> RunReport:
     )
 
 
-def test_the_clean_half_still_verifies(break_it_path: TutorialResult) -> None:
-    """--break-it prepends, never replaces, the clean VERIFIED run."""
+def test_the_clean_half_still_verifies(rejected_write_path: TutorialResult) -> None:
+    """The simulation follows and never replaces the clean VERIFIED run."""
 
-    assert break_it_path.execution_outcome == "VERIFIED"
-    assert break_it_path.receipt_paths, "the clean half stopped emitting its receipt"
-    assert break_it_path.receipt_paths["json"].is_file()
+    assert rejected_write_path.execution_outcome == "VERIFIED"
+    assert rejected_write_path.receipt_paths, (
+        "the clean half stopped emitting its receipt"
+    )
+    assert rejected_write_path.receipt_paths["json"].is_file()
 
 
 def test_the_engine_halts_on_the_injected_fault(
-    break_it_path: TutorialResult,
+    rejected_write_path: TutorialResult,
 ) -> None:
     """The aha itself: same bundle, lying backend, HALT -- not success."""
 
-    broken = break_it_path.break_it
+    broken = rejected_write_path.break_it
     assert broken is not None
     assert broken.fault == "optimistic"
     assert broken.execution_outcome == "HALTED"
@@ -72,7 +75,7 @@ def test_the_engine_halts_on_the_injected_fault(
     assert "refuted" in broken.halt_reason
 
 
-def test_the_screen_really_did_lie(break_it_path: TutorialResult) -> None:
+def test_the_screen_really_did_lie(rejected_write_path: TutorialResult) -> None:
     """The halt came from the independent verifier, not from the screen.
 
     If the on-screen postconditions had failed, the run would have halted for
@@ -80,7 +83,7 @@ def test_the_screen_really_did_lie(break_it_path: TutorialResult) -> None:
     verification.  The whole point is that the screen PASSED.
     """
 
-    broken = break_it_path.break_it
+    broken = rejected_write_path.break_it
     assert broken is not None
     assert broken.screen_claimed_success is True
 
@@ -98,11 +101,11 @@ def test_the_screen_really_did_lie(break_it_path: TutorialResult) -> None:
 
 
 def test_the_caught_fault_is_showable_but_not_a_success(
-    break_it_path: TutorialResult, tmp_path: Path
+    rejected_write_path: TutorialResult, tmp_path: Path
 ) -> None:
     """A clearly-labeled LOCAL report exists; the success rail does not bend."""
 
-    broken = break_it_path.break_it
+    broken = rejected_write_path.break_it
     assert broken is not None
 
     # The local evidence: REPORT.md leads with the honest outcome.
@@ -122,13 +125,13 @@ def test_the_caught_fault_is_showable_but_not_a_success(
 
 
 def test_the_broken_run_is_separate_from_the_clean_evidence(
-    break_it_path: TutorialResult,
+    rejected_write_path: TutorialResult,
 ) -> None:
-    """The halt lands in run-broken/ and never contaminates the clean run."""
+    """The halt stays separate from the clean run evidence."""
 
-    broken = break_it_path.break_it
+    broken = rejected_write_path.break_it
     assert broken is not None
-    assert broken.run_dir != break_it_path.run_dir
-    assert broken.run_dir.name == "run-broken"
-    clean = _report(break_it_path.run_dir)
+    assert broken.run_dir != rejected_write_path.run_dir
+    assert broken.run_dir.name == "run-rejected-write"
+    clean = _report(rejected_write_path.run_dir)
     assert clean.execution_outcome == "VERIFIED"

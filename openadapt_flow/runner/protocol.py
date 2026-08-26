@@ -43,6 +43,8 @@ POLL_MAX_WAIT_S = 25
 #: v2 permit carries its own admission and authority digests.
 DISPATCH_BINDING_LOCAL_FIELDS = frozenset(
     {
+        "qualification_admission",
+        "qualification_admission_sha256",
         "production_qualification_admission_id",
         "production_qualification_admission_sha256",
         "production_qualification_evidence_identity_sha256",
@@ -112,9 +114,13 @@ class DispatchParamsValues(BaseModel):
 
 
 class DispatchParamsRef(BaseModel):
-    """Regulated-lane params-by-reference. Parsed, but refused in v1: the
-    local reference resolver does not exist yet, and guessing values would
-    break the runtime-inputs digest binding."""
+    """Regulated-lane reference to protected customer-local parameters.
+
+    The hosted adapter treats ``ref`` only as a relative path under the
+    operator-configured protected root. It refuses URLs, traversal, and links,
+    then checks ``expected_digest`` after typed local resolution. Resolved
+    values stay local and never enter the callback.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -133,7 +139,7 @@ class RunnerDispatchPayload(BaseModel):
     # exact UUID across runner restart and reassignment.
     run_id: str = Field(
         pattern=(
-            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            "^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
         )
     )
     workflow_id: str

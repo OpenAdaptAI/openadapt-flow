@@ -333,7 +333,7 @@ class TestProtocol:
             dispatch_binding_sha256(
                 "11111111-1111-4111-8111-111111111111", authorization
             )
-            == "sha256:efd01f7c8c56a0df02200d684a5ab6104e47ec769090b2d76eb090624cdcc272"
+            == "sha256:367411c4ff350c05d6dad465db3dd1f57e8d47d620d3c0f16b70adec0857047e"
         )
 
     def test_dispatch_binding_refuses_changed_run_or_authorization(self, sealed):

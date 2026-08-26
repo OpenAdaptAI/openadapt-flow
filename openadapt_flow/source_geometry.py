@@ -11,36 +11,38 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 NATIVE_SOURCE_GEOMETRY_SCHEMA_VERSION = "openadapt.flow.native-source-geometry/v1"
 _BINDING_DOMAIN = b"openadapt.flow.native-source-geometry.v1\0"
+NATIVE_SOURCE_GEOMETRY_BINDING_FIELDS = (
+    "schema_version",
+    "source_surface",
+    "source_capture_session_sha256",
+    "source_capture_terminal_sha256",
+    "source_artifact_manifest_sha256",
+    "source_action_ordinal",
+    "source_frame_ordinal",
+    "frame_sha256",
+    "window_id",
+    "owner",
+    "pid",
+    "process_start_time",
+    "coordinate_source",
+    "geometry_generation",
+    "geometry_epoch_sha256",
+    "display_topology_sha256",
+    "bounds",
+    "scale_x",
+    "scale_y",
+    "viewport",
+    "source_viewport",
+    "content_rect",
+    "fit_scale",
+)
 
 
 def native_source_geometry_sha256(payload: dict) -> str:
     """Hash the exact, closed native source binding field list."""
-    fields = (
-        "schema_version",
-        "source_surface",
-        "source_capture_session_sha256",
-        "source_capture_terminal_sha256",
-        "source_artifact_manifest_sha256",
-        "source_action_ordinal",
-        "source_frame_ordinal",
-        "frame_sha256",
-        "window_id",
-        "owner",
-        "pid",
-        "process_start_time",
-        "coordinate_source",
-        "geometry_generation",
-        "geometry_epoch_sha256",
-        "display_topology_sha256",
-        "bounds",
-        "scale_x",
-        "scale_y",
-        "viewport",
-        "source_viewport",
-        "content_rect",
-        "fit_scale",
-    )
-    closed = {field: payload.get(field) for field in fields}
+    closed = {
+        field: payload.get(field) for field in NATIVE_SOURCE_GEOMETRY_BINDING_FIELDS
+    }
     raw = json.dumps(
         closed,
         sort_keys=True,
@@ -108,6 +110,13 @@ class NativeSourceGeometry(BaseModel):
             or top + height > self.viewport[1]
         ):
             raise ValueError("native source content rectangle is outside its viewport")
+        expected_scale_x = width / self.bounds[2]
+        expected_scale_y = height / self.bounds[3]
+        if not math.isclose(self.scale_x, expected_scale_x) or not math.isclose(
+            self.scale_y,
+            expected_scale_y,
+        ):
+            raise ValueError("native source scales differ from its content geometry")
         payload = self.model_dump(mode="json", exclude={"binding_sha256"})
         if self.binding_sha256 != native_source_geometry_sha256(payload):
             raise ValueError("native source geometry binding digest is invalid")

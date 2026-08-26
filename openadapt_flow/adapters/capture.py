@@ -1360,13 +1360,23 @@ def convert_capture(
             scale = float(session.pixel_ratio or 1.0)
         actions = list(session.actions(include_moves=False))
         source_terminal: Optional[SourceCaptureTerminal] = None
-        native_geometry_enabled = (
-            source_surface is not None
-            and window_capture is not None
+        exact_v2_frame_selection = (
+            window_capture is not None
             and window_capture.get("schema_version")
             == "openadapt.capture.window-scoped/v2"
         )
+        native_geometry_enabled = source_surface is not None and exact_v2_frame_selection
         if native_geometry_enabled:
+            platform_surface = {
+                "win32": "windows",
+                "darwin": "macos",
+                "linux": "linux",
+            }.get(str(session.platform).lower())
+            if platform_surface != source_surface:
+                raise ValueError(
+                    "native source surface differs from the sealed Capture platform "
+                    f"({source_surface!r} != {session.platform!r})"
+                )
             source_terminal = _source_terminal(session)
         scoped_viewport: Optional[tuple[int, int]] = None
         scope_label: Optional[str] = None
@@ -1408,9 +1418,9 @@ def convert_capture(
         for i, event in enumerate(events):
             ts = float(event["_ts"])
             source_action = event.get("_source_action")
-            if native_geometry_enabled:
+            if exact_v2_frame_selection:
                 if source_action is None:
-                    raise ValueError(f"native event {i} has no source action binding")
+                    raise ValueError(f"v2 capture event {i} has no source action binding")
                 before_img, after_img = _exact_native_frames(session, source_action)
             else:
                 before_img = session.get_frame_at(ts, tolerance=FRAME_TOLERANCE_S)

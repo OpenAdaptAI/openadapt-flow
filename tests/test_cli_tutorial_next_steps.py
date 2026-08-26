@@ -1,13 +1,13 @@
 """The closing "next steps" block after a plain VERIFIED tutorial run.
 
-Browser-free, mirroring ``tests/test_cli_tutorial_break_it.py``: the
+Browser-free, mirroring the rejected-write CLI tests: the
 tutorial's heavy loop is faked and only the CLI wiring is proven here.
 
-* :func:`openadapt_flow.tutorial._next_steps_block` carries the three
-  destinations the flagship README points at;
+* :func:`openadapt_flow.tutorial._next_steps_block` carries the real
+  record, compile, inspect, lint, replay, and qualification path;
 * the plain VERIFIED tutorial prints the block after the receipt paths;
-* a ``--break-it`` run and a non-VERIFIED run do NOT print it -- the block
-  belongs to the success rail only.
+* an advanced rejected-write simulation and a non-VERIFIED run do not print
+  it because the block belongs to the primary success rail.
 """
 
 from __future__ import annotations
@@ -25,9 +25,7 @@ from openadapt_flow.tutorial import (
     _next_steps_block,
 )
 
-EXECUTE_URL = "https://openadapt.ai/execute"
 QUALIFY_URL = "https://openadapt.ai/qualify"
-DISCORD_URL = "https://discord.gg/yF527cQbDG"
 
 
 def _result(
@@ -65,8 +63,8 @@ def _result(
 
 def _broken_result(root: Path) -> BreakItResult:
     return BreakItResult(
-        run_dir=root / "run-broken",
-        report_path=root / "run-broken" / "REPORT.md",
+        run_dir=root / "run-rejected-write",
+        report_path=root / "run-rejected-write" / "REPORT.md",
         fault="optimistic",
         execution_outcome="HALTED",
         transaction_outcome="RECONCILIATION_REQUIRED",
@@ -87,12 +85,17 @@ def _wire(monkeypatch: pytest.MonkeyPatch, result_for: Any) -> None:
     monkeypatch.setattr(tutorial_module, "run_tutorial", fake_run_tutorial)
 
 
-def test_next_steps_block_carries_the_three_readme_urls() -> None:
+def test_next_steps_block_carries_the_real_first_workflow() -> None:
     block = _next_steps_block()
-    assert EXECUTE_URL in block
+    assert "openadapt-flow record --backend web" in block
+    assert "openadapt-flow compile recording" in block
+    assert "openadapt-flow visualize bundle" in block
+    assert "openadapt-flow lint bundle" in block
+    assert "openadapt-flow replay bundle" in block
     assert QUALIFY_URL in block
-    assert DISCORD_URL in block
-    assert "no model call" in block
+    assert "identity, effect, and policy evidence" in block
+    assert "--simulate-rejected-write" not in block
+    assert "--break-it" not in block
 
 
 def test_verified_tutorial_prints_the_block_after_the_receipt(
@@ -106,10 +109,10 @@ def test_verified_tutorial_prints_the_block_after_the_receipt(
     out = capsys.readouterr().out
     assert _next_steps_block() in out
     # After the receipt paths, at the very end of the run's story.
-    assert out.index("receipt.json") < out.index(EXECUTE_URL)
+    assert out.index("receipt.json") < out.index("openadapt-flow record")
 
 
-def test_break_it_run_does_not_print_the_block(
+def test_rejected_write_simulation_does_not_print_the_first_workflow_block(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -118,12 +121,21 @@ def test_break_it_run_does_not_print_the_block(
         monkeypatch,
         lambda root, kwargs: _result(root, break_it=_broken_result(root)),
     )
-    assert main(["tutorial", "--break-it", "--out", str(tmp_path / "t")]) == 0
+    assert (
+        main(
+            [
+                "tutorial",
+                "--simulate-rejected-write",
+                "--out",
+                str(tmp_path / "t"),
+            ]
+        )
+        == 0
+    )
 
     out = capsys.readouterr().out
-    assert EXECUTE_URL not in out
     assert QUALIFY_URL not in out
-    assert DISCORD_URL not in out
+    assert "openadapt-flow record --backend web" not in out
 
 
 def test_unverified_tutorial_does_not_print_the_block(
@@ -138,6 +150,5 @@ def test_unverified_tutorial_does_not_print_the_block(
     assert main(["tutorial", "--out", str(tmp_path / "t")]) == 1
 
     out = capsys.readouterr().out
-    assert EXECUTE_URL not in out
     assert QUALIFY_URL not in out
-    assert DISCORD_URL not in out
+    assert "openadapt-flow record --backend web" not in out

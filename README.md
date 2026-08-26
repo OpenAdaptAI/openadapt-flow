@@ -77,8 +77,6 @@ name:
 pip install 'openadapt-flow[browser]'
 
 openadapt-flow tutorial                                  # same loop as `openadapt quickstart`
-
-openadapt-flow tutorial --break-it                       # then watch it catch a lie
 ```
 
 `tutorial` records a demonstration against the bundled MockMed fixture, mines its
@@ -87,15 +85,7 @@ policy, and verifies the write by reading the system of record out of band — a
 path the app never calls, so the screen cannot influence it. It ends `VERIFIED`
 with zero model calls.
 
-`--break-it` then reruns the **same certified bundle** against a backend that
-lies: the server rejects the write *after* the application has painted its
-success banner, so every on-screen check passes while nothing lands. The
-independent read of the system of record refutes the mined `record_written`
-contract. Because delivery reached the consequential step, the runtime returns
-`RECONCILIATION_REQUIRED` and makes no blind retry or replay dispatch. The
-caught fault's evidence is a clearly labeled local `run-broken/REPORT.md`. No
-shareable receipt is emitted because only `VERIFIED` runs may use the success
-rail.
+Next, [record one small workflow in your own app](#record-your-own-app-on-any-substrate).
 
 Full walkthrough, including `--guided` and the hand-driven
 `demo-record` / `compile` / `lint` / `certify` / `replay` stages:

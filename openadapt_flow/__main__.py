@@ -1307,6 +1307,15 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
     presentation_delay_s = args.presentation_delay
     if presentation_delay_s is None:
         presentation_delay_s = GUIDED_PRESENTATION_DELAY_S if args.guided else 0.0
+    deprecated_break_it = bool(getattr(args, "deprecated_break_it", False))
+    if deprecated_break_it:
+        print(
+            "warning: --break-it is deprecated; use --simulate-rejected-write.",
+            file=sys.stderr,
+        )
+    simulate_rejected_write = bool(
+        getattr(args, "simulate_rejected_write", False) or deprecated_break_it
+    )
     try:
         result = run_tutorial(
             out,
@@ -1316,7 +1325,7 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
             interactive_record=interactive_record,
             presentation_delay_s=presentation_delay_s,
             echo=print,
-            break_it=args.break_it,
+            break_it=simulate_rejected_write,
         )
     except TutorialError as e:
         print(f"\nTutorial REFUSED: {e}")
@@ -1346,12 +1355,8 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
         print(f"                   {result.receipt_paths['json']}")
 
     if result.break_it is not None:
-        _print_break_it_narrative(result.break_it)
+        _print_rejected_write_narrative(result.break_it)
     elif result.execution_outcome == "VERIFIED":
-        print(
-            "\nNext: rerun this same bundle against a backend that lies -- and "
-            "watch the engine halt:\n  openadapt-flow tutorial --break-it"
-        )
         print(f"\n{_next_steps_block()}")
     else:
         # Presentation-only epilogue for the non-VERIFIED endings: what
@@ -1362,7 +1367,7 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_break_it_narrative(broken: "BreakItResult") -> None:
+def _print_rejected_write_narrative(broken: "BreakItResult") -> None:
     """Tell the caught-fault story from the halted run's own evidence.
 
     Every fact printed here was read back from the broken run's report or the
@@ -1375,7 +1380,10 @@ def _print_break_it_narrative(broken: "BreakItResult") -> None:
     )
     if broken.screen_claim_text:
         claim += f'\n                       (observed on screen: "{broken.screen_claim_text}")'
-    print("\n--- break-it: the same certified bundle, against a backend that lies ---")
+    print(
+        "\n--- rejected-write verification: the same certified bundle, "
+        "against a backend that lies ---"
+    )
     print(f"\n  Injected fault:      {broken.fault!r} -- the server rejects the write")
     print("                       AFTER the app reports success")
     print(f"  The screen claimed:  {claim}")
@@ -1404,10 +1412,6 @@ def _print_break_it_narrative(broken: "BreakItResult") -> None:
     print(
         "\nNo shareable receipt for the halted run: only VERIFIED runs may use "
         "the\nsuccess rail. The halt itself is the demonstration."
-    )
-    print(
-        "\nNext: record your own workflow:\n"
-        "  openadapt-flow record --backend web --url <your app>"
     )
 
 
@@ -5118,16 +5122,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip writing the local receipt (the run and its report are unchanged)",
     )
     p.add_argument(
+        "--simulate-rejected-write",
+        action="store_true",
+        help=(
+            "After the clean VERIFIED run, this advanced fixture reruns the "
+            "same certified bundle against a sample backend that reports "
+            "success in the UI but rejects the write. OpenAdapt must refuse "
+            "false success and return RECONCILIATION_REQUIRED. Evidence lands "
+            "in <out>/run-rejected-write/REPORT.md"
+        ),
+    )
+    p.add_argument(
         "--break-it",
         action="store_true",
-        dest="break_it",
-        help=(
-            "After the clean VERIFIED run, rerun the SAME certified bundle "
-            "against a backend that silently rejects the write AFTER the app "
-            "paints its success banner -- and watch the engine HALT instead of "
-            "believing the screen. The halted run's evidence lands in "
-            "<out>/run-broken/REPORT.md"
-        ),
+        dest="deprecated_break_it",
+        help=argparse.SUPPRESS,
     )
     p.set_defaults(func=_cmd_tutorial)
 

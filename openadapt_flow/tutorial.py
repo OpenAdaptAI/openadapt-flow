@@ -77,14 +77,15 @@ TUTORIAL_POLICY = "clinical-write"
 #: key so the mined contract can assert at-most-once honestly.
 TUTORIAL_ENTRY_QUERY = "?fault=ok&idempotency=demo#tasks"
 
-#: The fault mode ``--break-it`` injects.  ``optimistic`` is the sharpest
-#: demonstration of the product's claim: the backend REJECTS the write AFTER
+#: The fault mode ``--simulate-rejected-write`` injects. ``optimistic`` is the
+#: sharpest demonstration of the product's claim.
+#: The backend REJECTS the write AFTER
 #: the application has already painted its success banner, so every on-screen
 #: check passes while nothing landed in the system of record.  Only an
 #: independent read of that system can catch it -- which is the point.
 TUTORIAL_BREAK_FAULT = "optimistic"
 
-#: The entry query for the ``--break-it`` rerun.  Identical to the clean
+#: The entry query for the ``--simulate-rejected-write`` rerun. Identical to the
 #: query except for the fault mode; the bundle, the policy, the gate, and the
 #: verifier are all unchanged.
 TUTORIAL_BREAK_ENTRY_QUERY = f"?fault={TUTORIAL_BREAK_FAULT}&idempotency=demo#tasks"
@@ -96,7 +97,7 @@ class TutorialError(RuntimeError):
 
 @dataclass
 class BreakItResult:
-    """What the ``--break-it`` rerun proved, for the CLI's narrative.
+    """What the rejected-write simulation proved for the CLI narrative.
 
     Every field is read from the halted run's own report or from the fault
     server's ground-truth store -- nothing here is scripted output.
@@ -144,25 +145,32 @@ class TutorialResult:
     # billable. This local-only tutorial never reports usage to Cloud.
     reported_to_metering: bool = False
     receipt_paths: dict[str, Path] = field(default_factory=dict)
-    #: Present only when the tutorial ran with ``break_it=True``: the same
-    #: certified bundle, rerun against a backend that lies, and the engine's
-    #: halt that caught it.
+    #: Present only for the advanced rejected-write simulation: the same
+    #: certified bundle, rerun against a backend that lies, with the retained
+    #: halt evidence that caught the false success.
     break_it: Optional[BreakItResult] = None
 
 
 def _next_steps_block() -> str:
     """The closing block the CLI prints after a plain VERIFIED tutorial run.
 
-    Only the success rail earns it: a halt or a ``--break-it`` rerun ends on
-    its own narrative instead.  The links match the flagship OpenAdapt
-    README so every surface points at the same three destinations.
+    Only the primary success rail earns it. A halt or an advanced verification
+    simulation ends on its own evidence instead.
     """
 
     return (
-        "That run made no model call and sent nothing off this computer.\n"
-        "  What it proves        https://openadapt.ai/execute\n"
-        "  Run it on your work   https://openadapt.ai/qualify\n"
-        "  Community             https://discord.gg/yF527cQbDG"
+        "Next: automate one small task in your own app.\n"
+        "  Record       openadapt-flow record --backend web "
+        "--url https://your-app.example --out recording\n"
+        "  Compile      openadapt-flow compile recording --out bundle "
+        "--name my-task\n"
+        "  Inspect      openadapt-flow visualize bundle -o graph.html\n"
+        "  Lint         openadapt-flow lint bundle\n"
+        "  Replay       openadapt-flow replay bundle --backend web "
+        "--url https://your-app.example --headed\n"
+        "Before unattended use, qualify identity, effect, and policy evidence "
+        "for the exact app and environment:\n"
+        "  https://openadapt.ai/qualify"
     )
 
 
@@ -434,8 +442,9 @@ def run_tutorial_workflow(
 ) -> Any:
     """Admit and execute the tutorial under the ``standard`` profile.
 
-    ``entry_query`` defaults to the clean :data:`TUTORIAL_ENTRY_QUERY`; the
-    ``--break-it`` rerun passes :data:`TUTORIAL_BREAK_ENTRY_QUERY` instead.
+    ``entry_query`` defaults to the clean :data:`TUTORIAL_ENTRY_QUERY`.
+    The rejected-write simulation passes :data:`TUTORIAL_BREAK_ENTRY_QUERY`
+    instead.
     Nothing else differs between the two runs: same bundle, same policy, same
     gate, same verifier.
     """
@@ -527,12 +536,12 @@ def run_tutorial(
     Stages: serve -> record -> compile -> certify -> run (standard profile,
     independent effect verification) -> receipt.
 
-    With ``break_it=True`` the SAME certified bundle is then rerun against a
-    backend that injects the :data:`TUTORIAL_BREAK_FAULT` fault -- the server
+    With ``break_it=True`` the same certified bundle is then rerun against a
+    backend that injects the :data:`TUTORIAL_BREAK_FAULT` fault. The server
     rejects the write after the application has already painted its success
-    banner -- and the engine is expected to HALT rather than believe the
-    screen.  The rerun's evidence lands in ``<work_dir>/run-broken`` and on
-    :attr:`TutorialResult.break_it`.  If the engine does NOT halt, this
+    banner, and the engine must halt rather than believe the screen. The
+    rerun's evidence lands in ``<work_dir>/run-rejected-write`` and on
+    :attr:`TutorialResult.break_it`. If the engine does not halt, this
     function raises: an uncaught injected fault is a product failure, never a
     tutorial variant.
 
@@ -654,7 +663,7 @@ def run_tutorial(
         result.break_it = _run_break_it(
             workflow=workflow,
             bundle_dir=bundle_dir,
-            run_dir=root / "run-broken",
+            run_dir=root / "run-rejected-write",
             headed=headed,
             say=say,
         )
@@ -682,9 +691,11 @@ def _run_break_it(
     from openadapt_flow.report import render_run_report
 
     say("")
-    say("[break-it] Rerun the SAME certified bundle, but this time the backend")
-    say(f"[break-it] lies: fault mode {TUTORIAL_BREAK_FAULT!r} rejects the write")
-    say("[break-it] AFTER the app has painted its success banner.")
+    say("[rejected-write] Rerun the same certified bundle against the fault.")
+    say(
+        f"[rejected-write] Fault mode {TUTORIAL_BREAK_FAULT!r} rejects the "
+        "write after the app reports success."
+    )
     base_url, _db, stop = serve()
     try:
         report = run_tutorial_workflow(
@@ -726,7 +737,7 @@ def _run_break_it(
         )
     envelope = report.outcome_envelope
     say(
-        f"[break-it] {report.execution_outcome}: the system of record holds "
+        f"[rejected-write] {report.execution_outcome}: the system of record holds "
         f"{record_count} record(s); the screen said otherwise."
     )
     return BreakItResult(

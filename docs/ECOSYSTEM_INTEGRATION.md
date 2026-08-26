@@ -89,4 +89,4 @@ the declared execution boundary.
 `openadapt-verifier`, `openadapt-grounding`, `openadapt-retrieval`, and
 `openadapt-viewer` are not required to record, compile, replay, or verify a
 workflow. Keep a package integration only when a live product boundary consumes
-it. Do not infer product maturity from a package name or from code presence.
+it. Do not infer product state from a package name or from code presence.

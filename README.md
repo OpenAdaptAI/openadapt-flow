@@ -12,13 +12,13 @@
 [Discussions](https://github.com/OpenAdaptAI/openadapt-flow/discussions) ·
 [Contributing](CONTRIBUTING.md)
 
-**openadapt-flow is the OpenAdapt engine: a governed demonstration compiler.**
-Record a task once, compile it to a deterministic program, and replay that
-program deterministically with zero model calls on the healthy path. Instead of
-silently doing the wrong thing when an interface drifts, it re-resolves from the
-evidence the demonstration retained, or it **halts** for a human or an AI, gated
-by an identity check and independent effect verification. It runs entirely on
-your machine; nothing egresses unless you opt in.
+**openadapt-flow is the demonstration compiler and governed runtime behind
+OpenAdapt.** It compiles a demonstrated GUI workflow into a deterministic,
+locally executable program. Healthy runs make no model calls. When an interface
+drifts, Flow re-resolves from retained evidence. A person or configured model
+can propose a repair. Identity, effect, and policy checks still apply, and Flow
+halts when verification fails. It runs on your machine and doesn't send data
+anywhere unless you opt in.
 
 It targets repeated workflows across every interface an operator touches:
 browser pages, native Windows / macOS / Linux desktops, and remote-display
@@ -87,10 +87,15 @@ policy, and verifies the write by reading the system of record out of band — a
 path the app never calls, so the screen cannot influence it. It ends `VERIFIED`
 with zero model calls.
 
-`--break-it` reruns the **same certified bundle** against a backend that lies:
-the server rejects the write *after* the app paints its success banner, so every
-on-screen check passes while nothing lands. The independent read refutes the
-mined contract and the engine **HALTS** at the consequential step.
+`--break-it` then reruns the **same certified bundle** against a backend that
+lies: the server rejects the write *after* the application has painted its
+success banner, so every on-screen check passes while nothing lands. The
+independent read of the system of record refutes the mined `record_written`
+contract. Because delivery reached the consequential step, the runtime returns
+`RECONCILIATION_REQUIRED` and makes no blind retry or replay dispatch. The
+caught fault's evidence is a clearly labeled local `run-broken/REPORT.md`. No
+shareable receipt is emitted because only `VERIFIED` runs may use the success
+rail.
 
 Full walkthrough, including `--guided` and the hand-driven
 `demo-record` / `compile` / `lint` / `certify` / `replay` stages:

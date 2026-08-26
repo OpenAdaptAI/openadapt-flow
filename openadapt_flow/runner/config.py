@@ -45,7 +45,7 @@ import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from openadapt_flow.hosted import HostedError
 from openadapt_flow.private_file import (
@@ -58,6 +58,8 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
 )
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,199}$")
+
+LocalReleaseTarget = Literal["flow", "desktop", "capture"]
 
 
 def _load_manifest_toml(path: Path, *, protected: bool = False) -> dict[str, Any]:
@@ -203,7 +205,7 @@ class BusinessDecisionServiceConfig:
 class LocalRuntimeRelease:
     """One independently installed target release used during enrollment."""
 
-    target: str
+    target: LocalReleaseTarget
     admission_id: str
     admission_sha256: str
     release_version: str
@@ -372,7 +374,11 @@ def load_runner_config(
     if not isinstance(local_release_tbl, dict):
         raise RunnerConfigError("[local_runtime_release] must be a table")
     local_runtime_release: list[LocalRuntimeRelease] = []
-    expected_release_targets = ("flow", "desktop", "capture")
+    expected_release_targets: tuple[LocalReleaseTarget, ...] = (
+        "flow",
+        "desktop",
+        "capture",
+    )
     for target in expected_release_targets:
         entry = local_release_tbl.get(target)
         if entry is None:

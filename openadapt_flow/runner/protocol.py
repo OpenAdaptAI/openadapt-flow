@@ -17,11 +17,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Union
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from openadapt_flow.runtime.authorization import GovernedRunAuthorization
+from openadapt_flow.runtime.authorization import (
+    GovernedRunAuthorization,
+    RuntimeParamScalar,
+    is_runtime_param_scalar,
+    normalize_runtime_param_scalar,
+)
 
 #: The only job kind the v1 client executes.
 JOB_KIND_GOVERNED_RUN = "governed_run"
@@ -33,6 +39,21 @@ DISPATCH_LEASE_TTL_S = 900
 
 #: Cloud long-poll ceiling (runners.ts POLL_MAX_WAIT_S).
 POLL_MAX_WAIT_S = 25
+
+# This is the exact closed grammar used by Cloud's production runtime schema.
+# Keeping hosted parameter keys in ASCII also makes Python and JavaScript key
+# ordering byte-identical for the authorization digest.
+RUNTIME_PARAM_NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+_RUNTIME_PARAM_NAME = re.compile(RUNTIME_PARAM_NAME_PATTERN)
+
+
+def validate_runtime_param_name(name: str) -> str:
+    """Refuse a hosted parameter name outside the shared Cloud grammar."""
+
+    if _RUNTIME_PARAM_NAME.fullmatch(name) is None:
+        raise ValueError("runtime parameter name is invalid")
+    return name
+
 
 #: Runtime-local v2 authority bindings are deliberately OUTSIDE the dispatch
 #: binding digest. The digest grammar is a cross-repo contract: Cloud and Flow
@@ -110,7 +131,20 @@ class DispatchParamsValues(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    values: dict[str, str]
+    values: dict[str, RuntimeParamScalar] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def _finite_json_scalars(self) -> "DispatchParamsValues":
+        normalized: dict[str, RuntimeParamScalar] = {}
+        for key, value in self.values.items():
+            validate_runtime_param_name(key)
+            if not is_runtime_param_scalar(value):
+                raise ValueError(
+                    "runtime parameters must be finite JSON-safe scalar values"
+                )
+            normalized[key] = normalize_runtime_param_scalar(value)
+        object.__setattr__(self, "values", normalized)
+        return self
 
 
 class DispatchParamsRef(BaseModel):

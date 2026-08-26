@@ -48,6 +48,7 @@ from openadapt_flow.runner.dispatch_envelope import (
     write_managed_dispatch_envelope,
 )
 from openadapt_flow.runner.hosted_adapter import (
+    RUNNER_RENEWAL_HEADER,
     CallbackRequest,
     CallbackResponse,
     DeliveryAuthority,
@@ -61,6 +62,7 @@ from openadapt_flow.runner.hosted_adapter import (
     RegisterCapabilities,
     RegisterRequest,
     RegisterResponse,
+    registration_renewal_headers,
 )
 from openadapt_flow.runner.lease import (
     CompletionDisposition,
@@ -108,6 +110,7 @@ __all__ = [
     "Refusal",
     "RefusalCode",
     "PollRequest",
+    "RUNNER_RENEWAL_HEADER",
     "RegisterCapabilities",
     "RegisterRequest",
     "RegisterResponse",
@@ -126,6 +129,7 @@ __all__ = [
     "map_control_verb",
     "read_managed_dispatch_envelope",
     "parse_dispatch",
+    "registration_renewal_headers",
     "server_reclaim_outcome",
     "verify_dispatch",
     "write_managed_dispatch_envelope",

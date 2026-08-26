@@ -3,25 +3,35 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from base64 import b64encode, urlsafe_b64encode
+from base64 import b64decode, b64encode, urlsafe_b64encode
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 import openadapt_flow.runner.hosted_adapter as hosted
-from openadapt_flow.ir import ParamKind, ParamSpec
+from openadapt_flow.__main__ import _replay_params
+from openadapt_flow.ir import ParamKind, ParamSpec, Workflow
 from openadapt_flow.runner.hosted_adapter import (
+    RUNNER_RENEWAL_HEADER,
     AdmissionArtifactBytes,
+    CallbackRequest,
     DeliveryAuthority,
     HostedDispatch,
     HostedRunnerAdapter,
+    HostedRunResult,
+    HostedTerminalEvent,
     ManagedExecution,
+    PollRequest,
     RegisterCapabilities,
+    RegisterRequest,
+    registration_renewal_headers,
 )
+from openadapt_flow.runner.inputs import resolve_admitted_params
 from openadapt_flow.runner.product_release import (
     DOMAIN,
     TARGETS,
@@ -33,13 +43,30 @@ from openadapt_flow.runner.product_release import (
 )
 from openadapt_flow.runner.protocol import (
     DispatchParamsRef,
+    DispatchParamsValues,
     RunnerDispatchPayload,
     dispatch_binding_sha256,
 )
 from openadapt_flow.runner.verify import VerifiedDispatch
+from openadapt_flow.runtime.authorization import (
+    runtime_inputs_bytes,
+    runtime_param_text,
+)
 from openadapt_flow.runtime.durable.authority import REMOTE_DISPATCH_SESSION_ID_ENV
+from openadapt_flow.terminal_verification_v2 import (
+    ProductionDeliveryPermit,
+    ProductionDeliveryPermitChain,
+    ProductionDeliveryPermitPayload,
+    ProductionDeliveryReceiptPayload,
+    evidence_runner_signer_sha256,
+    sign_production_delivery_permit,
+    sign_production_delivery_receipt,
+    sign_production_terminal_verification,
+)
 from openadapt_flow.transaction import TransactionOutcome
+from tests.test_run_receipt import _report as _production_report
 from tests.test_runner_client_lib import dispatch_payload
+from tests.test_terminal_verification_v2 import _payload, _private_key
 
 pytest_plugins = ("tests.test_runner_client_lib",)
 
@@ -220,6 +247,151 @@ def test_registration_refuses_without_protected_runner_origin(
         )
 
 
+def test_protected_runner_origin_is_public_strict_accessor(
+    monkeypatch, tmp_path, config
+) -> None:
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    local_config = replace(config, host="https://cloud.example")
+    monkeypatch.setattr(
+        hosted, "load_runner_config", lambda *_args, **_kwargs: local_config
+    )
+
+    assert adapter.protected_runner_origin(tmp_path / "runner.toml") == (
+        "https://cloud.example"
+    )
+
+
+def test_runner_renewal_token_has_one_register_only_header_boundary() -> None:
+    token = "oar_" + "a" * 64
+
+    assert registration_renewal_headers(None) == {}
+    assert registration_renewal_headers("") == {}
+    assert registration_renewal_headers(token) == {
+        RUNNER_RENEWAL_HEADER: token,
+    }
+    for invalid in ("runner-token", "oar_" + "A" * 64, "oar_" + "a" * 63):
+        with pytest.raises(ValueError, match="renewal credential"):
+            registration_renewal_headers(invalid)
+
+    for request_type in (RegisterRequest, PollRequest, HostedDispatch, CallbackRequest):
+        assert "runner_token" not in request_type.model_fields
+        assert RUNNER_RENEWAL_HEADER not in request_type.model_fields
+        assert all("renewal" not in name for name in request_type.model_fields)
+
+
+def test_dispatch_param_scalars_round_trip_without_coercion() -> None:
+    values = {
+        "text": "1.5",
+        "enabled": True,
+        "count": 7,
+        "ratio": 1.5,
+        "small": 1e-7,
+        "large": 1e21,
+    }
+
+    parsed = DispatchParamsValues.model_validate({"values": values})
+
+    assert parsed.model_dump(mode="json")["values"] == values
+    assert type(parsed.values["enabled"]) is bool
+    assert type(parsed.values["count"]) is int
+    assert type(parsed.values["ratio"]) is float
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, {}, [], float("nan"), float("inf"), 9_007_199_254_740_993],
+)
+def test_dispatch_param_scalars_refuse_invalid_values(value: object) -> None:
+    with pytest.raises(ValueError):
+        DispatchParamsValues.model_validate({"values": {"value": value}})
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["\ue000", "\U0001f600", "has-dash", "a" * 129],
+)
+def test_dispatch_param_names_use_shared_ascii_grammar(name: str) -> None:
+    with pytest.raises(ValueError, match="parameter name"):
+        DispatchParamsValues.model_validate({"values": {name: "value"}})
+
+
+def test_private_params_file_preserves_scalar_types(tmp_path) -> None:
+    values = {"text": "false", "enabled": False, "count": 0, "ratio": 1.5}
+
+    path = HostedRunnerAdapter._write_params(tmp_path / "params.json", values)
+
+    assert path is not None
+    assert json.loads(path.read_bytes()) == values
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_scalar_dispatch_to_gui_boundary_preserves_exact_types(tmp_path) -> None:
+    values = {
+        "string_int": "7",
+        "string_float": "1.5",
+        "string_bool": "true",
+        "bool_true": True,
+        "bool_false": False,
+        "whole": 7,
+        "float": 1.5,
+        "small": 1e-7,
+        "mid": 1e20,
+        "large": 1e21,
+    }
+    kinds = {
+        "string_int": ParamKind.STRING,
+        "string_float": ParamKind.STRING,
+        "string_bool": ParamKind.STRING,
+        "bool_true": ParamKind.BOOLEAN,
+        "bool_false": ParamKind.BOOLEAN,
+        "whole": ParamKind.NUMBER,
+        "float": ParamKind.NUMBER,
+        "small": ParamKind.NUMBER,
+        "mid": ParamKind.NUMBER,
+        "large": ParamKind.NUMBER,
+    }
+    workflow = Workflow(
+        name="scalar-path",
+        param_specs={
+            name: ParamSpec(name=name, type=kind, required=True)
+            for name, kind in kinds.items()
+        },
+    )
+
+    wire = DispatchParamsValues.model_validate({"values": values})
+    admitted = resolve_admitted_params(workflow, dict(wire.values), inline=True)
+    expected = (
+        b'{"params":{"bool_false":false,"bool_true":true,"float":1.5,'
+        b'"large":1e+21,"mid":100000000000000000000,"small":1e-7,'
+        b'"string_bool":"true","string_float":"1.5","string_int":"7",'
+        b'"whole":7},"worklists":{}}'
+    )
+    params_path = HostedRunnerAdapter._write_params(tmp_path / "params.json", admitted)
+    assert params_path is not None
+    child_params = _replay_params(None, str(params_path))
+
+    assert runtime_inputs_bytes(workflow, admitted, None) == expected
+    assert child_params == values
+    assert {name: type(value) for name, value in child_params.items()} == {
+        name: type(value) for name, value in values.items()
+    }
+    assert {
+        name: runtime_param_text(value) for name, value in child_params.items()
+    } == {
+        "string_int": "7",
+        "string_float": "1.5",
+        "string_bool": "true",
+        "bool_true": "true",
+        "bool_false": "false",
+        "whole": "7",
+        "float": "1.5",
+        "small": "1e-7",
+        "mid": "100000000000000000000",
+        "large": "1e+21",
+    }
+
+
 def _prepared_adapter(monkeypatch, tmp_path, config, workflow, runner):
     config = replace(config, host="https://cloud.example")
     adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite", runner=runner)
@@ -260,6 +432,321 @@ def _prepared_adapter(monkeypatch, tmp_path, config, workflow, runner):
 
     monkeypatch.setattr(hosted, "ProductionQualificationGuard", Guard)
     return adapter, dispatch
+
+
+def _terminal_delivery_chain(
+    dispatch: HostedDispatch,
+    *,
+    admission_sha256: str,
+    evidence_identity_sha256: str,
+    environment_digest: str,
+    registry_sha256: str,
+) -> ProductionDeliveryPermitChain:
+    authority_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64)))
+    permit_payload = ProductionDeliveryPermitPayload(
+        execution_authority_id="00000000-0000-4000-8000-000000000008",
+        execution_authority_sha256="1" * 64,
+        permit_id="permit:hosted:1",
+        run_id=dispatch.run_id,
+        flow_run_id_sha256=hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest(),
+        run_request_sha256="3" * 64,
+        action_request_sha256="4" * 64,
+        admission_artifact_sha256=admission_sha256,
+        evidence_identity_sha256=evidence_identity_sha256,
+        environment_digest=environment_digest,
+        qualification_signer_registry_sha256=registry_sha256,
+        qualification_signer_registry_revision=7,
+        qualification_signer_registry_checked_at="2026-08-26T11:59:30Z",
+        qualification_signer_registry_expires_at="2026-08-28T12:00:00Z",
+        input_edge_sequence=1,
+        authority_sequence=0,
+        issued_at="2026-08-26T12:00:00Z",
+    )
+    permit = sign_production_delivery_permit(permit_payload, authority_key)
+    receipt_payload = ProductionDeliveryReceiptPayload(
+        execution_authority_id=permit_payload.execution_authority_id,
+        permit_id=permit_payload.permit_id,
+        permit_artifact_sha256=permit.artifact_sha256(),
+        authenticated_runner_id_sha256=hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest(),
+        authenticated_session_id_sha256=hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest(),
+        one_use_claim_id="00000000-0000-4000-8000-000000000010",
+        runtime_delivery_sequence=9,
+        delivered_at="2026-08-26T12:00:01Z",
+    )
+    receipt = sign_production_delivery_receipt(receipt_payload, authority_key)
+    return ProductionDeliveryPermitChain.build(
+        (ProductionDeliveryPermit.build(permit, receipt),)
+    )
+
+
+def test_outer_adapter_builds_stores_rereads_and_verifies_terminal_v2(
+    monkeypatch, tmp_path, sealed
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    verified_params = dict(dispatch.payload.params.values)
+    report = _production_report(
+        run_id_sha256=hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest(),
+        bundle_content_digest=dispatch.payload.bundle.content_digest,
+        params=verified_params,
+    )
+    authorization = dispatch.payload.authorization.model_copy(
+        update={
+            "admitted_policy_name": report.governed_policy_name
+            or dispatch.payload.authorization.admitted_policy_name,
+            "admitted_policy_contract_sha256": (report.governed_policy_contract_sha256),
+            "execution_profile": report.execution_profile,
+            "minimum_effect_tier": report.governed_minimum_effect_tier,
+            "qualified_effect_requirements": tuple(
+                report.governed_qualified_effect_requirements
+            ),
+            "required_identity_step_ids": tuple(report.required_identity_step_ids),
+            "approval_source": report.governed_approval_source,
+        }
+    )
+    payload = dispatch.payload.model_copy(
+        update={
+            "authorization": authorization,
+            "dispatch_binding_sha256": dispatch_binding_sha256(
+                dispatch.run_id, authorization
+            ),
+        }
+    )
+    dispatch = dispatch.model_copy(update={"payload": payload})
+    report = report.model_copy(
+        update={
+            "governed_authorization_id": authorization.authorization_id,
+            "governed_authorization_created_at": authorization.created_at,
+            "governed_approval_source": authorization.approval_source,
+            "governed_policy_name": authorization.admitted_policy_name,
+            "governed_runtime_inputs_digest": authorization.runtime_inputs_digest,
+        }
+    )
+    private_key = _private_key()
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    admission_sha256 = "5" * 64
+    evidence_identity_sha256 = "6" * 64
+    environment_digest = "7" * 64
+    registry_sha256 = "8" * 64
+    qualification_sha256 = "f" * 64
+    evidence_identity = SimpleNamespace(
+        admission_policy_sha256="9" * 64,
+        artifact_sha256=lambda: evidence_identity_sha256,
+    )
+    runtime = SimpleNamespace(
+        substrate="web",
+        artifact_sha256=lambda: "0" * 64,
+    )
+    expected = SimpleNamespace(
+        bundle_artifact_sha256="b" * 64,
+        bundle_content_digest=dispatch.payload.bundle.content_digest,
+        environment_digest=environment_digest,
+        environment_contract_sha256="a" * 64,
+        runtime_environment_sha256="b" * 64,
+        identity_contract_sha256="c" * 64,
+        effect_contract_sha256="d" * 64,
+        runtime_validation_id="00000000-0000-4000-8000-000000000006",
+        runtime_build_identity=runtime,
+        evidence_runner_signer_sha256=evidence_runner_signer_sha256(public_key),
+    )
+    admission = SimpleNamespace(
+        payload=SimpleNamespace(
+            admission_id="00000000-0000-4000-8000-000000000001",
+            evidence_identity=evidence_identity,
+        )
+    )
+    qualification = SimpleNamespace(
+        qualification_admission_sha256=admission_sha256,
+        qualification_admission=admission,
+        expected=expected,
+        qualification_signer_registry_sha256=registry_sha256,
+        qualification_signer_registry=SimpleNamespace(
+            revision=7,
+            expires_at="2026-08-28T12:00:00Z",
+        ),
+        immutable_binding_sha256=lambda: qualification_sha256,
+    )
+    chain = _terminal_delivery_chain(
+        dispatch,
+        admission_sha256=admission_sha256,
+        evidence_identity_sha256=evidence_identity_sha256,
+        environment_digest=environment_digest,
+        registry_sha256=registry_sha256,
+    )
+    binding = dispatch.payload.dispatch_binding_sha256
+    local_authorization = authorization.model_copy(
+        update={
+            "production_qualification_admission_id": (admission.payload.admission_id),
+            "production_qualification_admission_sha256": admission_sha256,
+            "production_qualification_evidence_identity_sha256": (
+                evidence_identity_sha256
+            ),
+            "production_qualification_runtime_validation_id": (
+                expected.runtime_validation_id
+            ),
+            "production_qualification_signer_registry_sha256": registry_sha256,
+            "production_qualification_signer_registry_revision": 7,
+            "production_qualification_signer_registry_expires_at": (
+                "2026-08-28T12:00:00Z"
+            ),
+            "production_qualification_authority_sha256": qualification_sha256,
+        }
+    )
+    manifest = SimpleNamespace(
+        delivery_authority_kind="cloud_runner",
+        remote_delivery_run_id=dispatch.run_id,
+        managed_dispatch_binding_sha256=binding,
+        params=verified_params,
+        governed_authorization=local_authorization,
+    )
+
+    class Store:
+        def __init__(self, _run_dir):
+            pass
+
+        def read_manifest(self):
+            return manifest
+
+    class Authority:
+        def __init__(self, _run_dir, _store):
+            pass
+
+        def production_delivery_permit_chain(self):
+            return chain
+
+    fixed_now = datetime(2026, 8, 26, 12, 0, 2, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now if tz is not None else fixed_now.replace(tzinfo=None)
+
+    monkeypatch.setattr(hosted, "CheckpointStore", Store)
+    monkeypatch.setattr(hosted, "DurableAuthority", Authority)
+    monkeypatch.setattr(hosted, "datetime", FixedDatetime)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+
+    mismatched_dir = tmp_path / "mismatched-run"
+    mismatched_dir.mkdir(mode=0o700)
+    with pytest.raises(ValueError, match="run report differs"):
+        adapter._produce_terminal_verification(
+            dispatch=dispatch,
+            report=report.model_copy(update={"params": {"visit_date": "wrong"}}),
+            run_dir=mismatched_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=binding,
+        )
+    assert not (mismatched_dir / "production-terminal-report.json").exists()
+    assert not (mismatched_dir / "production-terminal-verification.json").exists()
+
+    storage_failure_dir = tmp_path / "storage-failure-run"
+    storage_failure_dir.mkdir(mode=0o700)
+    original_read = adapter._read_private_bytes
+
+    def fail_proof_reread(path, *, maximum_bytes, label):
+        if label == "production terminal verification":
+            raise OSError("simulated protected storage failure")
+        return original_read(path, maximum_bytes=maximum_bytes, label=label)
+
+    monkeypatch.setattr(adapter, "_read_private_bytes", fail_proof_reread)
+    with pytest.raises(OSError, match="storage failure"):
+        adapter._produce_terminal_verification(
+            dispatch=dispatch,
+            report=report,
+            run_dir=storage_failure_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=binding,
+        )
+    assert not (storage_failure_dir / "production-terminal-report.json").exists()
+    assert not (storage_failure_dir / "production-terminal-verification.json").exists()
+    monkeypatch.setattr(adapter, "_read_private_bytes", original_read)
+
+    proof, report_sha256 = adapter._produce_terminal_verification(
+        dispatch=dispatch,
+        report=report,
+        run_dir=run_dir,
+        qualification=qualification,
+        private_key=private_key,
+        verified_params=verified_params,
+        dispatch_binding_sha256=binding,
+    )
+
+    report_path = run_dir / "production-terminal-report.json"
+    proof_path = run_dir / "production-terminal-verification.json"
+    assert hashlib.sha256(report_path.read_bytes()).hexdigest() == report_sha256
+    assert proof_path.read_bytes() == hosted.canonical_json(proof)
+    assert hashlib.sha256(proof_path.read_bytes()).hexdigest() == (
+        proof.artifact_sha256()
+    )
+    if os.name != "nt":
+        assert report_path.stat().st_mode & 0o777 == 0o600
+        assert proof_path.stat().st_mode & 0o777 == 0o600
+    assert "2026-07-01" in report_path.read_text(encoding="utf-8")
+    assert "2026-07-01" not in proof_path.read_text(encoding="utf-8")
+
+
+def test_terminal_admission_is_revalidated_after_child_execution(
+    monkeypatch, tmp_path, config, sealed
+) -> None:
+    workflow, _ = sealed
+    report = _production_report()
+    calls = 0
+
+    def runner(_argv, _run_dir, _child_env):
+        nonlocal calls
+        calls += 1
+        return ManagedExecution(
+            returncode=0,
+            report_bytes=report.model_dump_json().encode(),
+        )
+
+    adapter, dispatch = _prepared_adapter(
+        monkeypatch, tmp_path, config, workflow, runner
+    )
+    release_checks = 0
+
+    def verify_release(*_args):
+        nonlocal release_checks
+        release_checks += 1
+        if release_checks == 2:
+            raise ValueError("release admission was revoked during execution")
+
+    monkeypatch.setattr(adapter, "_verify_product_release", verify_release)
+    monkeypatch.setattr(
+        adapter,
+        "_produce_terminal_verification",
+        lambda **_kwargs: pytest.fail("revoked run must not produce terminal proof"),
+    )
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+
+    first = adapter.execute(
+        dispatch,
+        runner_config=tmp_path / "runner.toml",
+        run_dir=tmp_path / "run",
+        authority=authority,
+    )
+
+    assert first.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
+    assert first.started is True
+    assert first.terminal_verification is None
+    assert calls == 1
+    assert release_checks == 2
 
 
 @pytest.mark.parametrize(
@@ -684,3 +1171,61 @@ def test_parsed_refusal_callback_contains_closed_terminal(tmp_path, sealed) -> N
     assert terminal["outcome"] == "REJECTED_POLICY"
     assert terminal["started"] is False
     assert terminal["uncertain_delivery"] is False
+
+
+def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    proof = sign_production_terminal_verification(_payload(), _private_key())
+    binding = adapter.recovery_binding(dispatch).model_copy(
+        update={"run_id": proof.payload.run_id}
+    )
+    result = HostedRunResult(
+        dispatch_id=dispatch.dispatch_id,
+        run_id=binding.run_id,
+        outcome=TransactionOutcome.VERIFIED,
+        evidence_batch=(),
+        terminal_verification=proof,
+        started=True,
+        uncertain_delivery=False,
+        report_sha256=proof.payload.run_report_sha256,
+    )
+
+    callback = adapter.callback_request(binding, result)
+    terminal = HostedTerminalEvent.model_validate(callback.events[-1])
+    assert terminal.terminal_verification_artifact_bytes_base64 is not None
+    raw = b64decode(terminal.terminal_verification_artifact_bytes_base64, validate=True)
+    assert hashlib.sha256(raw).hexdigest() == (
+        terminal.terminal_verification_artifact_sha256
+    )
+    decoded = json.loads(raw)
+    assert decoded["payload"]["schema_version"] == (
+        "openadapt.production-terminal-verification/v2"
+    )
+    assert "params" not in decoded["payload"]
+    assert "report" not in decoded["payload"]
+    assert callback.runner_session_id == dispatch.runner_session_id
+    assert callback.workflow_admission_sha256 == (
+        dispatch.workflow_admission.artifact_sha256
+    )
+
+
+def test_callback_refuses_terminal_proof_for_a_different_run(tmp_path, sealed) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    proof = sign_production_terminal_verification(_payload(), _private_key())
+    result = HostedRunResult.model_construct(
+        dispatch_id=dispatch.dispatch_id,
+        run_id=dispatch.run_id,
+        outcome=TransactionOutcome.VERIFIED,
+        evidence_batch=(),
+        terminal_verification=proof,
+        started=True,
+        uncertain_delivery=False,
+        report_sha256=proof.payload.run_report_sha256,
+    )
+
+    with pytest.raises(ValueError, match="different run report"):
+        adapter.callback_request(adapter.recovery_binding(dispatch), result)

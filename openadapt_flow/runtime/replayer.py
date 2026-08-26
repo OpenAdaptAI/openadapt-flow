@@ -46,7 +46,16 @@ import uuid
 from copy import deepcopy
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Literal, Optional, TypeVar, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+    Mapping,
+    Optional,
+    TypeVar,
+    cast,
+)
 from urllib.parse import urlsplit
 
 from openadapt_flow.backend import (
@@ -135,7 +144,10 @@ from openadapt_flow.runtime import healing as healing_mod
 from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.authorization import (
     GovernedRunAuthorization,
+    RuntimeParamScalar,
     runtime_inputs_digest,
+    runtime_param_text,
+    runtime_params_for_gui,
 )
 from openadapt_flow.runtime.durable.approval import StateDiverged
 from openadapt_flow.runtime.durable.program_checkpoint import (
@@ -314,7 +326,7 @@ class _ProgramHalt(Exception):
         # Empty means the halt is not eligible for a generic attended
         # Continue/Skip transition.
         self.program_frames: list[GraphFrame] = []
-        self.program_params: dict[str, str] = {}
+        self.program_params: dict[str, RuntimeParamScalar] = {}
         self.program_history_hash: str = ""
 
 
@@ -598,7 +610,7 @@ class Replayer:
         self._governed_asset_hashes: dict[str, str] = {}
         self._governed_plaintext_assets = False
         self._governed_asset_mutation: Optional[str] = None
-        self._governed_base_params: Optional[dict[str, str]] = None
+        self._governed_base_params: Optional[dict[str, RuntimeParamScalar]] = None
         self._active_runtime_worklists: Optional[dict[str, list[dict[str, str]]]] = None
         self._active_delivery_resolution: Optional[Resolution] = None
         self._active_delivery_region: Optional[Region] = None
@@ -751,7 +763,7 @@ class Replayer:
         run_dir: Path,
         bundle_dir: Path,
         run_id: str,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         resume_from: Optional[int],
         resume_program: Optional[ProgramCheckpoint],
@@ -848,7 +860,7 @@ class Replayer:
         run_dir: Path,
         bundle_dir: Path,
         run_id: Optional[str],
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         resume_from: Optional[int],
         resume_program: Optional[ProgramCheckpoint],
@@ -913,7 +925,7 @@ class Replayer:
         run_dir: Path,
         bundle_dir: Path,
         run_id: str,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         resume_from: Optional[int],
         resume_program: Optional[ProgramCheckpoint],
@@ -983,7 +995,7 @@ class Replayer:
         self,
         workflow: Workflow,
         *,
-        params: Optional[dict[str, str]] = None,
+        params: Optional[dict[str, RuntimeParamScalar]] = None,
         worklists: Optional[dict[str, list[dict[str, str]]]] = None,
         bundle_dir: Path,
         run_dir: Path,
@@ -1134,7 +1146,7 @@ class Replayer:
         # with caller-supplied values overriding both. A v0 bundle (empty
         # ``param_specs``) collapses to exactly the old ``{**workflow.params,
         # **caller}`` merge.
-        merged: dict[str, str] = {**workflow.params}
+        merged: dict[str, RuntimeParamScalar] = {**workflow.params}
         for pname, spec in workflow.param_specs.items():
             if spec.example is not None:
                 merged.setdefault(pname, spec.example)
@@ -1543,7 +1555,11 @@ class Replayer:
         missing = sorted(
             pname
             for pname, spec in workflow.param_specs.items()
-            if spec.required and not params.get(pname)
+            if spec.required
+            and (
+                pname not in params
+                or (isinstance(params[pname], str) and params[pname] == "")
+            )
         )
         if missing:
             report.results.append(
@@ -2295,7 +2311,7 @@ class Replayer:
         self,
         workflow: Workflow,
         *,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         bundle_dir: Path,
         run_dir: Path,
@@ -2334,7 +2350,7 @@ class Replayer:
         # Where the interpreter currently is (for a durable pause record).
         self._current_state_id: str = ""
         self._current_intent: str = ""
-        self._current_params: dict[str, str] = dict(params)
+        self._current_params: dict[str, RuntimeParamScalar] = dict(params)
         if durable_run is not None:
             self._bundle_version = _bundle_version(bundle_dir)
             if self._durable_resume_mode == "program":
@@ -2532,7 +2548,7 @@ class Replayer:
         *,
         graph_id: str,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         bundle_dir: Path,
         run_dir: Path,
@@ -2591,7 +2607,7 @@ class Replayer:
         frame: dict,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         bundle_dir: Path,
         run_dir: Path,
@@ -2632,7 +2648,7 @@ class Replayer:
                     state.decision.question if state.decision is not None else state.id
                 )
             )
-            self._current_params = params
+            self._current_params = dict(params)
 
             if state.kind is StateKind.TERMINAL:
                 self._raise_on_governed_asset_mutation()
@@ -2668,7 +2684,7 @@ class Replayer:
         graph: ProgramGraph,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         bundle_dir: Path,
         run_dir: Path,
@@ -2780,7 +2796,7 @@ class Replayer:
         graph: ProgramGraph,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         bundle_dir: Path,
         run_dir: Path,
         report: RunReport,
@@ -2927,7 +2943,7 @@ class Replayer:
         state: State,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         worklists: dict[str, list[dict[str, str]]],
         bundle_dir: Path,
         run_dir: Path,
@@ -3058,7 +3074,7 @@ class Replayer:
         state: State,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: dict[str, RuntimeParamScalar],
         bundle_dir: Path,
         report: RunReport,
         run_dir: Path,
@@ -3212,7 +3228,7 @@ class Replayer:
         state: State,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
         report: Optional[RunReport] = None,
         run_dir: Optional[Path] = None,
@@ -3566,14 +3582,14 @@ class Replayer:
 
     def _params_with_business_decisions(
         self,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         scope: list[ProgramExecutionScopeFrame],
         evidence: list[BusinessDecisionEvidence],
         *,
         run_dir: Path,
         workflow: Workflow,
         governed_runtime_inputs_digest: str | None,
-    ) -> dict[str, str]:
+    ) -> dict[str, RuntimeParamScalar]:
         """Reapply authenticated decisions made in this exact frame scope."""
 
         if not evidence:
@@ -3600,7 +3616,10 @@ class Replayer:
         return resolved
 
     def _skip_completed_effect_state(
-        self, state: State, params: dict[str, str], report: RunReport
+        self,
+        state: State,
+        params: Mapping[str, RuntimeParamScalar],
+        report: RunReport,
     ) -> bool:
         """Idempotency guard: skip an action state whose declared effects were
         ALL already CONFIRMED (in the completed-effect ledger).
@@ -3797,7 +3816,7 @@ class Replayer:
         self,
         state: State,
         result: StepResult,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         report: RunReport,
     ) -> None:
         """Persist a verified-state interpreter checkpoint (Tier-3, program mode).
@@ -4342,7 +4361,7 @@ class Replayer:
         *,
         graph_id: str,
         state_id: str,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
         run_dir: Path,
         run_id: str,
@@ -4418,7 +4437,7 @@ class Replayer:
         *,
         graph_id: str,
         state_id: str,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
     ) -> Optional[str]:
         """Select and prove one exact successor for an attended action state."""
@@ -4488,7 +4507,7 @@ class Replayer:
         workflow: Workflow,
         *,
         step_index: int,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
         run_dir: Path,
         run_id: str,
@@ -5495,7 +5514,7 @@ class Replayer:
         *,
         workflow: Workflow,
         step_index: int,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
         run_dir: Path,
         new_crops: dict[str, bytes],
@@ -6363,7 +6382,7 @@ class Replayer:
                     selection_error: Optional[str] = None
                     if step.action is ActionKind.SELECT_OPTION:
                         selection_text = (
-                            params[step.param]
+                            runtime_param_text(params[step.param])
                             if step.param is not None
                             else step.text or ""
                         )
@@ -6670,7 +6689,7 @@ class Replayer:
     def _api_identity_refusal(
         self,
         step: Step,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
         effects: list["Effect"],
         result: StepResult,
@@ -6709,7 +6728,8 @@ class Replayer:
                     f"({step.intent}): semantic signal {identity.key!r} is not "
                     "part of the qualified identity policy"
                 )
-            value = params.get(identity.param)
+            raw_value = params.get(identity.param)
+            value = runtime_param_text(raw_value) if raw_value is not None else None
             if value is None or value == "":
                 return (
                     f"API identity verification HALTED step '{step.id}' "
@@ -6782,7 +6802,7 @@ class Replayer:
     def _try_api_tier(
         self,
         step: Step,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         result: StepResult,
         *,
         workflow: Workflow,
@@ -6988,7 +7008,10 @@ class Replayer:
         result.delivery_attempted = True
         try:
             self._require_qualification_environment_current()
-            outcome = self.api_actuator.actuate(binding, params)
+            outcome = self.api_actuator.actuate(
+                binding,
+                runtime_params_for_gui(params),
+            )
         except Exception as exc:  # noqa: BLE001 - external actuator boundary
             # The actuator contract is no-throw, but a deployment adapter can
             # still violate it. The delivery boundary was crossed immediately
@@ -7332,7 +7355,7 @@ class Replayer:
     # -- system-of-record effect verification -----------------------------------
 
     def _resolve_effects(
-        self, effects: list["Effect"], params: dict[str, str]
+        self, effects: list["Effect"], params: Mapping[str, RuntimeParamScalar]
     ) -> list["Effect"]:
         """Bind each effect's ``ValueExpr`` contract to THIS run's params (P0-3).
 
@@ -7343,7 +7366,10 @@ class Replayer:
         idempotency key can be bound per-run. A pure-literal (v1) effect is
         returned value-identical -- ``resolve`` is a no-op for it.
         """
-        namespace = {**params, "__run_id__": self._run_id}
+        namespace = {
+            **{name: runtime_param_text(value) for name, value in params.items()},
+            "__run_id__": self._run_id,
+        }
         run_id_sha256 = hashlib.sha256(self._run_id.encode("utf-8")).hexdigest()
         return [
             effect.resolve(
@@ -7810,7 +7836,7 @@ class Replayer:
         step: Step,
         resolution: Resolution,
         frame_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
         bundle_dir: Path,
         result: StepResult,
@@ -8391,7 +8417,7 @@ class Replayer:
         resolution: Optional[Resolution],
         matched_region: Optional[Region],
         before_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
         bundle_dir: Path,
         result: StepResult,
@@ -8982,9 +9008,9 @@ class Replayer:
     def _active_program_frame_refusal(
         self,
         workflow: Workflow,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         step: Step,
-        base_params: dict[str, str],
+        base_params: Mapping[str, RuntimeParamScalar],
     ) -> Optional[str]:
         """Bind the live interpreter path to the sealed program before input."""
 
@@ -9103,7 +9129,7 @@ class Replayer:
     def _fresh_actuation_authorization_refusal(
         self,
         workflow: Workflow,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         step: Step,
     ) -> Optional[str]:
         """Recheck exact governed authority and inputs before fresh input."""
@@ -9336,7 +9362,7 @@ class Replayer:
     def _delivery_authorization_refusal(
         self,
         workflow: Workflow,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         step: Step,
         result: StepResult,
     ) -> Optional[str]:
@@ -9400,7 +9426,7 @@ class Replayer:
         self,
         step: Step,
         resolution: Optional[Resolution],
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         *,
         workflow: Workflow,
         step_index: int,
@@ -9888,7 +9914,7 @@ class Replayer:
                         f"Step '{step.id}' ({step.intent}) requires parameter "
                         f"'{step.param}' but it was not provided"
                     )
-                text = params[step.param]
+                text = runtime_param_text(params[step.param])
             elif step.text is not None:
                 text = step.text
             else:
@@ -10677,7 +10703,7 @@ class Replayer:
         step: Step,
         before_png: bytes,
         bundle_dir: Path,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         result: StepResult,
         audit_events: list[InterstitialActionResult],
         workflow: Optional[Workflow],
@@ -11003,7 +11029,7 @@ class Replayer:
         step: Step,
         before_png: bytes,
         bundle_dir: Path,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         result: StepResult,
         workflow: Optional[Workflow] = None,
     ) -> tuple[bool, Optional[str], bytes]:
@@ -11135,7 +11161,7 @@ class Replayer:
         pred: Predicate,
         frame_png: bytes,
         bundle_dir: Path,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         *,
         workflow: Optional[Workflow] = None,
     ) -> bool:
@@ -11150,7 +11176,7 @@ class Replayer:
         return evaluate_program_predicate(
             pred,
             frame_png,
-            params,
+            runtime_params_for_gui(params),
             vision=self.vision,
             viewport=self.backend.viewport,
             asset_loader=lambda rel: self._asset_bytes(
@@ -11220,7 +11246,7 @@ class Replayer:
         signal: Any,
         anchor: Anchor,
         live: Optional[str],
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
     ) -> Literal["verified", "conflict", "unverifiable"]:
         """Compare one live source without returning or logging identity values."""
@@ -11259,7 +11285,7 @@ class Replayer:
             )
             if set(parameter_names) != set(signal.params):
                 return "unverifiable"
-            live_values = {**workflow.params, **params}
+            live_values = {**workflow.params, **runtime_params_for_gui(params)}
             live_form, used = parameterize_identity_text(
                 live,
                 live_values,
@@ -11293,7 +11319,7 @@ class Replayer:
             match=signal.match.value,
             normalizers=signal.normalizers,
             live=live,
-            params=params,
+            params=runtime_params_for_gui(params),
             param_examples=workflow.params,
             parameter_names=signal.params,
             extract_pattern=extract_pattern,
@@ -11406,7 +11432,7 @@ class Replayer:
         step: Step,
         resolution: Resolution,
         before_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
         bundle_dir: Optional[Path],
         policy: Any,
@@ -11519,7 +11545,10 @@ class Replayer:
                     # pixels than the demonstration. Exact/explicitly normalized
                     # OCR may verify it only when the expected value does not
                     # occupy the known glyph-confusable identifier class.
-                    live_values = {**workflow.params, **params}
+                    live_values = {
+                        **workflow.params,
+                        **runtime_params_for_gui(params),
+                    }
                     vulnerable = any(
                         identity_mod.identity_rests_on_confusable_identifier(
                             live_values.get(name)
@@ -11571,7 +11600,7 @@ class Replayer:
         recorded: Optional[str],
         live: Optional[str],
         *,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
     ) -> tuple[
         Literal["verified", "conflict", "unverifiable"],
@@ -11590,7 +11619,7 @@ class Replayer:
             return "unverifiable", signal.params
         live, used = parameterize_identity_text(
             live,
-            {**workflow.params, **params},
+            {**workflow.params, **runtime_params_for_gui(params)},
             names=parameter_names,
             minimum_chars=identity_mod.MIN_PARAM_CHARS,
             case_sensitive=not (
@@ -11614,7 +11643,7 @@ class Replayer:
         step: Step,
         resolution: Resolution,
         before_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
         bundle_dir: Optional[Path] = None,
     ) -> IdentityCheck:
@@ -11668,7 +11697,7 @@ class Replayer:
                     step=step,
                     resolution=resolution,
                     before_png=before_png,
-                    params=params,
+                    params=runtime_params_for_gui(params),
                     workflow=workflow,
                     bundle_dir=bundle_dir,
                     policy=identity_policy,
@@ -11696,7 +11725,7 @@ class Replayer:
                 return itmpl.verify_structured_template(
                     tmpl,
                     live,
-                    params=params,
+                    params=runtime_params_for_gui(params),
                     param_examples=workflow.params,
                 )
             return identity_mod.verify_structured_identity(recorded, live)
@@ -11802,7 +11831,7 @@ class Replayer:
         step: Step,
         resolution: Resolution,
         before_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         workflow: Workflow,
     ) -> IdentityCheck:
         """OCR name+DOB-primary identity tier (the pixel-substrate fallback).
@@ -11902,7 +11931,7 @@ class Replayer:
                 return itmpl.verify_template_identity(
                     anchor.identity_template,
                     observed,
-                    params=params,
+                    params=runtime_params_for_gui(params),
                     param_examples=workflow.params,
                 )
             # This branch means no identity_template, so the constructor-time
@@ -11912,7 +11941,7 @@ class Replayer:
             return identity_mod.verify_target_identity(
                 anchor.context_text,
                 observed,
-                params=params,
+                params=runtime_params_for_gui(params),
                 param_examples=workflow.params,
             )
 
@@ -12135,7 +12164,7 @@ class Replayer:
         result: StepResult,
         *,
         workflow: Workflow,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         bundle_dir: Path,
         run_dir: Path,
         resolution: Optional[Resolution],
@@ -12525,7 +12554,7 @@ class Replayer:
         *,
         workflow: Workflow,
         bundle_dir: Path,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
     ) -> bool:
         """Resolve an implicit scroll target and honor its armed identity.
 
@@ -12595,7 +12624,7 @@ class Replayer:
         bundle_dir: Path,
         run_dir: Path,
         before_png: bytes,
-        params: dict[str, str],
+        params: Mapping[str, RuntimeParamScalar],
         result: StepResult,
         graph_ctx: Optional["_GraphStepContext"] = None,
     ) -> Optional[str]:

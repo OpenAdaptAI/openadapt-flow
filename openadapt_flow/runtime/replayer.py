@@ -206,6 +206,7 @@ if TYPE_CHECKING:
 # and the minimum template-match score to accept it.
 PC_TEMPLATE_SEARCH_PAD = 80
 
+
 def _frame_viewport(frame_png: bytes) -> tuple[int, int]:
     """Return the viewport of THIS frame, read from the frame itself.
 

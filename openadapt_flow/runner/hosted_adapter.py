@@ -468,10 +468,10 @@ class HostedRunnerAdapter:
         *,
         runner_config: Path,
         name: str,
-        platform: str,
+        platform: Literal["windows", "macos", "linux"],
         agent_version: str,
         engine_version: str,
-        mode: str,
+        mode: Literal["attended", "service"],
         capabilities: RegisterCapabilities | Mapping[str, object],
     ) -> RegisterRequest:
         config = load_runner_config(runner_config, protected=True)

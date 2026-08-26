@@ -448,6 +448,46 @@ def test_orchestration_promotes_structure_only_for_native_surface(
     assert observed["include_structural"] is expected
 
 
+def test_orchestration_passes_exact_native_source_surface(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    observed: dict[str, object] = {}
+    log: list = []
+
+    def fake_convert(
+        cap_dir,
+        out_dir,
+        *,
+        params=None,
+        include_structural=None,
+        source_surface=None,
+    ):
+        observed["include_structural"] = include_structural
+        observed["source_surface"] = source_surface
+        (Path(out_dir) / "meta.json").write_text(
+            json.dumps({"id": "x", "viewport": [800, 600], "params": {}})
+        )
+        return Path(out_dir)
+
+    monkeypatch.setattr(
+        "openadapt_flow.adapters.capture.convert_capture",
+        fake_convert,
+    )
+    record_desktop_capture(
+        tmp_path / "native",
+        source_surface="windows",
+        recorder_factory=_make(log),
+        stop=lambda: True,
+        announce=False,
+    )
+
+    assert observed == {
+        "include_structural": True,
+        "source_surface": "windows",
+    }
+
+
 def test_orchestration_stamps_exact_citrix_replay_binding(tmp_path: Path) -> None:
     log: list = []
 

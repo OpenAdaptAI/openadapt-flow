@@ -42,6 +42,7 @@ from pydantic import (
 )
 
 from openadapt_flow.qualification_faults import FaultMutationReceipt
+from openadapt_flow.source_geometry import NativeSourceGeometry
 
 if TYPE_CHECKING:
     # Type-only import for the Step.effects forward reference. The RUNTIME
@@ -915,6 +916,13 @@ class Step(BaseModel):
     id: str
     intent: str = Field(description="Human-readable purpose of the step")
     action: ActionKind
+    source_geometry: Optional[NativeSourceGeometry] = Field(
+        default=None,
+        description=(
+            "Verified source frame, process identity, display topology, and "
+            "native geometry epoch for this demonstrated action"
+        ),
+    )
     anchor: Optional[Anchor] = None  # None for pure keyboard/wait steps
     text: Optional[str] = None  # literal text for TYPE
     param: Optional[str] = None  # if set, TYPE text comes from params[param]
@@ -1103,6 +1111,14 @@ class Step(BaseModel):
             " band tier (docs/LIMITS.md)."
         ),
     )
+
+    @model_serializer(mode="wrap")
+    def _serialize_source_geometry_compatible(self, handler: Any) -> dict[str, Any]:
+        """Keep legacy Step JSON unchanged when no native source binding exists."""
+        data: dict[str, Any] = handler(self)
+        if self.source_geometry is None:
+            data.pop("source_geometry", None)
+        return data
 
 
 # -- Workflow-program IR, Phase 2 (RFC docs/design/WORKFLOW_PROGRAM_IR.md §2) --

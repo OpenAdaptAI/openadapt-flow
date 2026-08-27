@@ -154,6 +154,12 @@ def test_plain_tutorial_points_at_a_real_first_workflow(
     assert "--run-dir first-run" in out
     assert "first-run/REPORT.md" in out
     assert "before Flow first actuates it" in out
+    assert out.index("openadapt-flow lint bundle") < out.index(
+        "before Flow first actuates it"
+    )
+    assert out.index("before Flow first actuates it") < out.index(
+        "openadapt-flow replay bundle"
+    )
     assert "--simulate-rejected-write" not in out
     assert "--break-it" not in out
 

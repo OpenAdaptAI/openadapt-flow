@@ -98,6 +98,12 @@ def test_next_steps_block_carries_the_real_first_workflow() -> None:
     assert QUALIFY_URL in block
     assert "identity, effect, and policy evidence" in block
     assert "before Flow first actuates it" in block
+    assert block.index("openadapt-flow lint bundle") < block.index(
+        "before Flow first actuates it"
+    )
+    assert block.index("before Flow first actuates it") < block.index(
+        "openadapt-flow replay bundle"
+    )
     assert "--simulate-rejected-write" not in block
     assert "--break-it" not in block
 

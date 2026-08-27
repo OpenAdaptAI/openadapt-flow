@@ -164,8 +164,7 @@ Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) and
 ## Record your own app, on any substrate
 
 Start with one small read-only task and test data. Write down the result you
-expect. Record the task, compile it, inspect and lint the bundle, then replay it
-with the browser visible:
+expect. Record the task, compile it, then inspect and lint the bundle:
 
 Six substrates run on the same `Backend` protocol and the same governed runtime,
 selected with `--backend web | windows | macos | linux | rdp | citrix` on
@@ -179,6 +178,15 @@ openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
 openadapt-flow visualize bundle -o graph.html
 openadapt-flow lint bundle
+```
+
+Confirm that the bundle contains only the read-only task you selected. If lint
+reports a state-changing, unknown, consequential, or irreversible action, stop
+and [qualify it](https://openadapt.ai/qualify) before Flow first actuates it.
+
+Then replay the read-only workflow with the browser visible:
+
+```bash
 openadapt-flow replay bundle --backend web --url https://your.app --headed \
   --run-dir first-run
 ```
@@ -186,10 +194,7 @@ openadapt-flow replay bundle --backend web --url https://your.app --headed \
 Review `first-run/REPORT.md`. Confirm that the recorded steps and the final
 result match what you expected before you expand the task.
 
-Qualify the exact app and environment before unattended use. If an action is
-state-changing, unknown, consequential, or irreversible, qualify its identity,
-effect, and policy evidence before Flow first actuates it:
-[openadapt.ai/qualify](https://openadapt.ai/qualify).
+Qualify the exact app and environment before unattended use.
 
 - Install matrix, exact commands for all six substrates, the counted evidence
   behind each, and the two remote execution modes:

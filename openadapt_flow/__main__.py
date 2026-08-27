@@ -1314,7 +1314,7 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
     simulate_rejected_write = bool(
-        getattr(args, "simulate_rejected_write", False) or deprecated_break_it
+        getattr(args, "simulate_rejected_write", False)
     )
     try:
         result = run_tutorial(
@@ -1325,7 +1325,8 @@ def _cmd_tutorial(args: argparse.Namespace) -> int:
             interactive_record=interactive_record,
             presentation_delay_s=presentation_delay_s,
             echo=print,
-            break_it=simulate_rejected_write,
+            simulate_rejected_write=simulate_rejected_write,
+            break_it=deprecated_break_it,
         )
     except TutorialError as e:
         print(f"\nTutorial REFUSED: {e}")
@@ -1393,6 +1394,10 @@ def _print_rejected_write_narrative(broken: "BreakItResult") -> None:
         "REFUTED by an independent\n"
         "                       read of the system of record, which holds "
         f"{broken.system_of_record_records} record(s)"
+    )
+    print(
+        f"  The backend saw:     {broken.rejected_writes} rejected write attempt "
+        "(no retry)"
     )
     print(
         f"  The engine did:      {broken.execution_outcome} at the consequential "

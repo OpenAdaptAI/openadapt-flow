@@ -122,6 +122,9 @@ class BreakItResult:
     #: Rows in the independent system of record after the run (0: the write
     #: the screen claimed was never persisted).
     system_of_record_records: int
+    #: Exact rejected POST attempts observed by the fault backend. One proves
+    #: that the fixture dispatched once and did not retry blindly.
+    rejected_writes: int
 
 
 @dataclass
@@ -536,6 +539,7 @@ def run_tutorial(
     interactive_record: bool = False,
     presentation_delay_s: float = 0.0,
     echo: Optional[Callable[[str], None]] = None,
+    simulate_rejected_write: bool = False,
     break_it: bool = False,
 ) -> TutorialResult:
     """Run the complete free path and return its evidence.
@@ -543,14 +547,16 @@ def run_tutorial(
     Stages: serve -> record -> compile -> certify -> run (standard profile,
     independent effect verification) -> receipt.
 
-    With ``break_it=True`` the same certified bundle is then rerun against a
-    backend that injects the :data:`TUTORIAL_BREAK_FAULT` fault. The server
-    rejects the write after the application has already painted its success
-    banner, and the engine must halt rather than believe the screen. The
-    rerun's evidence lands in ``<work_dir>/run-rejected-write`` and on
-    :attr:`TutorialResult.break_it`. If the engine does not halt, this
-    function raises: an uncaught injected fault is a product failure, never a
-    tutorial variant.
+    With ``simulate_rejected_write=True`` the same certified bundle is then
+    rerun against a backend that injects the
+    :data:`TUTORIAL_BREAK_FAULT` fault. The server rejects the write after the
+    application has already painted its success banner, and the engine must
+    halt rather than believe the screen. The rerun's evidence lands in
+    ``<work_dir>/run-rejected-write`` and on :attr:`TutorialResult.break_it`.
+
+    ``break_it=True`` preserves the deprecated Python API and its historical
+    ``<work_dir>/run-broken`` artifact path. Both modes enforce the same exact
+    rejected-write evidence contract.
 
     Raises:
         TutorialError: a stage produced insufficient evidence.  Nothing here
@@ -666,11 +672,14 @@ def run_tutorial(
             receipt = _build_tutorial_receipt(report)
             result.receipt_paths = write_receipt(receipt, run_dir)
 
-    if break_it:
+    if simulate_rejected_write or break_it:
+        fault_run_dir = root / (
+            "run-rejected-write" if simulate_rejected_write else "run-broken"
+        )
         result.break_it = _run_break_it(
             workflow=workflow,
             bundle_dir=bundle_dir,
-            run_dir=root / "run-rejected-write",
+            run_dir=fault_run_dir,
             headed=headed,
             say=say,
         )
@@ -703,7 +712,7 @@ def _run_break_it(
         f"[rejected-write] Fault mode {TUTORIAL_BREAK_FAULT!r} rejects the "
         "write after the app reports success."
     )
-    base_url, _db, stop = serve()
+    base_url, fault_db, stop = serve()
     try:
         report = run_tutorial_workflow(
             base_url=base_url,
@@ -714,6 +723,7 @@ def _run_break_it(
             entry_query=TUTORIAL_BREAK_ENTRY_QUERY,
         )
         record_count = len(_records(base_url))
+        rejected_writes = int(fault_db.snapshot()["rejected_writes"])
     finally:
         stop()
     report_path = render_run_report(run_dir)
@@ -732,8 +742,7 @@ def _run_break_it(
     )
     refuted = sum(
         1
-        for result in report.results
-        for evidence in result.effect_evidence
+        for evidence in (step_result.effect_evidence if step_result is not None else [])
         if evidence.final_verdict == "refuted"
     )
     claim_text: Optional[str] = None
@@ -743,6 +752,44 @@ def _run_break_it(
             None,
         )
     envelope = report.outcome_envelope
+    effects_required = (
+        int(envelope.required_contracts.effect) if envelope is not None else 0
+    )
+    screen_claimed_success = bool(step_result and step_result.postconditions_ok)
+    halt_reason = report.halt.reason if report.halt is not None else ""
+    evidence_failures: list[str] = []
+    if report.transaction_outcome != "RECONCILIATION_REQUIRED":
+        evidence_failures.append(
+            "transaction outcome was not RECONCILIATION_REQUIRED"
+        )
+    if report.transaction_billable is not False:
+        evidence_failures.append("transaction was not explicitly non-billable")
+    if step_result is None:
+        evidence_failures.append("the consequential step has no result")
+    elif not screen_claimed_success:
+        evidence_failures.append("the consequential screen postcondition did not pass")
+    if effects_required < 1:
+        evidence_failures.append("the run required no effect contract")
+    if refuted < 1:
+        evidence_failures.append("the consequential effect was not refuted")
+    if record_count != 0:
+        evidence_failures.append("the system of record was not empty")
+    if rejected_writes != 1:
+        evidence_failures.append(
+            f"the backend observed {rejected_writes} rejected writes instead of one"
+        )
+    lowered_halt_reason = halt_reason.lower()
+    if (
+        "record_written" not in lowered_halt_reason
+        or "refut" not in lowered_halt_reason
+    ):
+        evidence_failures.append("the halt reason did not name the refuted record write")
+    if evidence_failures:
+        raise TutorialError(
+            "the rejected-write verification FAILED its evidence contract: "
+            + "; ".join(evidence_failures)
+        )
+
     say(
         f"[rejected-write] {report.execution_outcome}: the system of record holds "
         f"{record_count} record(s); the screen said otherwise."
@@ -754,12 +801,11 @@ def _run_break_it(
         execution_outcome=str(report.execution_outcome),
         transaction_outcome=report.transaction_outcome,
         transaction_billable=report.transaction_billable,
-        screen_claimed_success=bool(step_result and step_result.postconditions_ok),
+        screen_claimed_success=screen_claimed_success,
         screen_claim_text=claim_text,
-        effects_required=(
-            int(envelope.required_contracts.effect) if envelope is not None else 0
-        ),
+        effects_required=effects_required,
         effects_refuted=refuted,
-        halt_reason=(report.halt.reason if report.halt is not None else ""),
+        halt_reason=halt_reason,
         system_of_record_records=record_count,
+        rejected_writes=rejected_writes,
     )

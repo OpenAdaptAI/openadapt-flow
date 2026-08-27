@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from base64 import b64decode, b64encode, urlsafe_b64encode
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,17 +60,24 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionDeliveryPermitChain,
     ProductionDeliveryPermitPayload,
     ProductionDeliveryReceiptPayload,
+    ProductionDeliveryResultLossClosurePayload,
+    ProductionPendingDeliveryPermit,
     delivery_authority_signer_sha256,
     evidence_runner_signer_sha256,
     sign_production_delivery_permit,
     sign_production_delivery_receipt,
+    sign_production_delivery_result_loss_closure,
     sign_production_terminal_verification,
 )
 from openadapt_flow.transaction import TransactionOutcome
 from tests.test_run_receipt import _report as _production_report
 from tests.test_runner_client_lib import dispatch_payload
 from tests.test_terminal_verification_v2 import (
+    IDS,
+    _acknowledged_reconciliation_payload,
     _halted_payload,
+    _managed_result_loss_acknowledged_payload,
+    _managed_result_loss_payload,
     _payload,
     _private_key,
     _reconciliation_payload,
@@ -500,6 +508,78 @@ def _terminal_delivery_chain(
     )
 
 
+def _result_loss_closure_result(
+    dispatch: HostedDispatch,
+    marker: hosted.ManagedChildStartEvidence,
+    request: hosted.ProductionDeliveryResultLossClosureRequest,
+    chain: ProductionDeliveryPermitChain,
+) -> hosted.ProductionDeliveryResultLossClosureResult:
+    all_permits = (*chain.entries, *((chain.pending,) if chain.pending else ()))
+    assert all_permits
+    first = all_permits[0]
+    final = all_permits[-1]
+    pending = chain.pending
+    acknowledged = chain.entries[-1] if chain.entries else None
+    payload = ProductionDeliveryResultLossClosurePayload(
+        closure_id="00000000-0000-4000-8000-000000000011",
+        closure_request_sha256=request.request_sha256(),
+        closed_at=request.result_loss_observed_at,
+        result_loss_observed_at=request.result_loss_observed_at,
+        receipt_absence_observed_at=(
+            pending.receipt_absence_observed_at if pending is not None else None
+        ),
+        tenant_id=dispatch.tenant_id,
+        run_id=dispatch.run_id,
+        flow_run_id_sha256=hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest(),
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_session_id=dispatch.dispatch_session_id,
+        managed_dispatch_binding_sha256=dispatch.payload.dispatch_binding_sha256,
+        idempotency_key_sha256=hosted.managed_result_loss_idempotency_sha256(
+            dispatch.idempotency_key
+        ),
+        authenticated_runner_id_sha256=hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest(),
+        authenticated_session_id_sha256=hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest(),
+        execution_authority_id=dispatch.execution_authority_id,
+        execution_authority_sha256=dispatch.execution_authority_sha256,
+        execution_authority_signer_sha256=(dispatch.execution_authority_signer_sha256),
+        child_started_at=marker.started_at,
+        child_start_evidence_sha256=marker.marker_sha256,
+        run_store_identity_sha256=marker.run_store_identity_sha256,
+        permit_chain_sha256=chain.permit_chain_sha256,
+        permit_count=len(all_permits),
+        acknowledged_permit_count=len(chain.entries),
+        pending_permit_count=1 if pending else 0,
+        pending_permit_artifact_sha256=(
+            pending.permit_artifact_sha256 if pending else None
+        ),
+        run_request_sha256=first.run_request_sha256,
+        pending_action_request_sha256=(
+            pending.action_request_sha256 if pending else None
+        ),
+        final_input_edge_sequence=final.input_edge_sequence,
+        final_authority_sequence=final.authority_sequence,
+        final_runtime_delivery_sequence=(
+            acknowledged.runtime_delivery_sequence if acknowledged else 0
+        ),
+    )
+    artifact = sign_production_delivery_result_loss_closure(
+        payload,
+        Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64))),
+    )
+    artifact_raw = hosted.canonical_json(artifact)
+    chain_raw = hosted.canonical_json(chain)
+    return hosted.ProductionDeliveryResultLossClosureResult(
+        closure_artifact_bytes_base64=b64encode(artifact_raw).decode("ascii"),
+        closure_artifact_sha256=artifact.artifact_sha256(),
+        permit_chain_bytes_base64=b64encode(chain_raw).decode("ascii"),
+        permit_chain_sha256=chain.permit_chain_sha256,
+    )
+
+
 def test_outer_adapter_builds_stores_rereads_and_verifies_terminal_v2(
     monkeypatch, tmp_path, sealed
 ) -> None:
@@ -687,8 +767,11 @@ def test_outer_adapter_builds_stores_rereads_and_verifies_terminal_v2(
             verified_params=verified_params,
             dispatch_binding_sha256=binding,
         )
-    assert not (storage_failure_dir / "production-terminal-report.json").exists()
-    assert not (storage_failure_dir / "production-terminal-verification.json").exists()
+    # The one-use terminal CAS remains authoritative after a component reread
+    # fault. Removing it would let a late result replace a sealed outcome.
+    assert (storage_failure_dir / "production-terminal-state.json").is_file()
+    assert (storage_failure_dir / "production-terminal-report.json").is_file()
+    assert (storage_failure_dir / "production-terminal-verification.json").is_file()
     monkeypatch.setattr(adapter, "_read_private_bytes", original_read)
 
     proof, report_sha256 = adapter._produce_terminal_verification(
@@ -713,6 +796,82 @@ def test_outer_adapter_builds_stores_rereads_and_verifies_terminal_v2(
         assert proof_path.stat().st_mode & 0o777 == 0o600
     assert "2026-07-01" in report_path.read_text(encoding="utf-8")
     assert "2026-07-01" not in proof_path.read_text(encoding="utf-8")
+
+    replayed_proof, replayed_report_sha256 = adapter._produce_terminal_verification(
+        dispatch=dispatch,
+        report=report,
+        run_dir=run_dir,
+        qualification=qualification,
+        private_key=private_key,
+        verified_params=verified_params,
+        dispatch_binding_sha256=binding,
+    )
+    assert hosted.canonical_json(replayed_proof) == hosted.canonical_json(proof)
+    assert replayed_report_sha256 == report_sha256
+
+    late_report = report.model_copy(update={"total_ms": report.total_ms + 1})
+    with pytest.raises(ValueError, match="different terminal outcome"):
+        adapter._produce_terminal_verification(
+            dispatch=dispatch,
+            report=late_report,
+            run_dir=run_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=binding,
+        )
+    assert proof_path.read_bytes() == hosted.canonical_json(proof)
+
+    race_dir = tmp_path / "terminal-race"
+    race_dir.mkdir(mode=0o700)
+
+    def terminalize_once(_index):
+        return adapter._produce_terminal_verification(
+            dispatch=dispatch,
+            report=report,
+            run_dir=race_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=binding,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        raced = list(pool.map(terminalize_once, range(4)))
+    assert {hosted.canonical_json(item[0]) for item in raced} == {
+        hosted.canonical_json(proof)
+    }
+    assert {item[1] for item in raced} == {report_sha256}
+
+    advancing_race_dir = tmp_path / "advancing-terminal-race"
+    advancing_race_dir.mkdir(mode=0o700)
+
+    class AdvancingDatetime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            value = fixed_now.replace(second=2 + cls.calls)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(hosted, "datetime", AdvancingDatetime)
+
+    def advancing_terminalize_once(_index):
+        return adapter._produce_terminal_verification(
+            dispatch=dispatch,
+            report=report,
+            run_dir=advancing_race_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=binding,
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        advancing_raced = list(pool.map(advancing_terminalize_once, range(4)))
+    assert len({hosted.canonical_json(item[0]) for item in advancing_raced}) == 1
+    assert {item[1] for item in advancing_raced} == {report_sha256}
 
 
 def test_terminal_admission_is_revalidated_after_child_execution(
@@ -845,6 +1004,453 @@ def test_hosted_uncertain_delivery_fault_never_replays(
         "receipt_unavailable",
         "malformed_terminal_report",
     }
+
+
+@pytest.mark.parametrize(
+    ("execution", "expected_loss_code"),
+    [
+        (RuntimeError("child exit result lost"), "runner_exception"),
+        (OSError("child transport result lost"), "runner_exception"),
+        (
+            ManagedExecution(returncode=1, report_bytes=None),
+            "report_missing",
+        ),
+    ],
+    ids=("runtime-exception", "transport-exception", "missing-report"),
+)
+def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
+    monkeypatch,
+    tmp_path,
+    config,
+    sealed,
+    execution,
+    expected_loss_code,
+) -> None:
+    workflow, _ = sealed
+    calls = 0
+
+    def runner(_argv, _run_dir, _child_env):
+        nonlocal calls
+        calls += 1
+        if isinstance(execution, Exception):
+            raise execution
+        return execution
+
+    adapter, dispatch = _prepared_adapter(
+        monkeypatch, tmp_path, config, workflow, runner
+    )
+    payload = dispatch.payload.model_copy(
+        update={
+            "run_id": IDS["run_id"],
+            "workflow_id": IDS["workflow_id"],
+        }
+    )
+    payload = payload.model_copy(
+        update={
+            "dispatch_binding_sha256": dispatch_binding_sha256(
+                IDS["run_id"], payload.authorization
+            )
+        }
+    )
+    dispatch = HostedDispatch.model_validate(
+        {
+            **dispatch.model_dump(mode="json"),
+            "run_id": IDS["run_id"],
+            "workflow_id": IDS["workflow_id"],
+            "payload": payload.model_dump(mode="json"),
+        }
+    )
+    proof = sign_production_terminal_verification(
+        _managed_result_loss_payload(), _private_key()
+    )
+    report = _production_report()
+    seen_loss_codes: list[str] = []
+
+    def produce_loss(**kwargs):
+        seen_loss_codes.append(kwargs["loss_code"])
+        return proof, proof.payload.run_report_sha256, report
+
+    monkeypatch.setattr(adapter, "_produce_managed_result_loss", produce_loss)
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+
+    result = adapter.execute(
+        dispatch,
+        runner_config=tmp_path / "runner.toml",
+        run_dir=tmp_path / "run",
+        authority=authority,
+        closure_authority=SimpleNamespace(),
+    )
+    callback = adapter.callback_request(dispatch, result)
+
+    assert calls == 1
+    assert seen_loss_codes == [expected_loss_code]
+    assert result.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
+    assert result.uncertain_delivery is True
+    assert result.terminal_verification == proof
+    assert (
+        len(
+            [
+                event
+                for event in callback.events
+                if event.get("schema_version") == "openadapt.hosted-runner-terminal/v1"
+            ]
+        )
+        == 1
+    )
+    assert callback.events[-1]["outcome"] == "RECONCILIATION_REQUIRED"
+    assert callback.events[-1]["uncertain_delivery"] is True
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run-again",
+            authority=authority,
+        )
+    assert calls == 1
+
+
+def test_managed_result_loss_report_is_outer_recovery_only(tmp_path, sealed) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    marker = hosted.ManagedChildStartEvidence.create(
+        started_at="2026-08-26T12:00:00Z",
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_session_id=dispatch.dispatch_session_id,
+        run_id=dispatch.run_id,
+        managed_dispatch_binding_sha256=dispatch.payload.dispatch_binding_sha256,
+        authenticated_runner_id_sha256=hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest(),
+        authenticated_session_id_sha256=hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest(),
+        execution_authority_id=dispatch.execution_authority_id,
+        execution_authority_sha256=dispatch.execution_authority_sha256,
+        execution_authority_signer_sha256=(dispatch.execution_authority_signer_sha256),
+        run_store_identity_sha256=adapter._run_store_identity_sha256(run_dir),
+    )
+    loss = hosted.ManagedResultLossEvidence.create(
+        loss_code="report_missing",
+        child_started_at=marker.started_at,
+        child_start_evidence_sha256=marker.marker_sha256,
+        run_store_identity_sha256=marker.run_store_identity_sha256,
+        observed_at="2026-08-26T12:00:02Z",
+        run_id=dispatch.run_id,
+        flow_run_id_sha256=hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest(),
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_session_id=dispatch.dispatch_session_id,
+        managed_dispatch_binding_sha256=dispatch.payload.dispatch_binding_sha256,
+        idempotency_key_sha256=hosted.managed_result_loss_idempotency_sha256(
+            dispatch.idempotency_key
+        ),
+        authenticated_runner_id_sha256=marker.authenticated_runner_id_sha256,
+        authenticated_session_id_sha256=(marker.authenticated_session_id_sha256),
+        execution_authority_id=dispatch.execution_authority_id,
+        execution_authority_sha256=dispatch.execution_authority_sha256,
+        execution_authority_signer_sha256=(dispatch.execution_authority_signer_sha256),
+        delivery_result_loss_closure_artifact_sha256="d" * 64,
+        pending_permit_artifact_sha256="a" * 64,
+        run_request_sha256="b" * 64,
+        pending_action_request_sha256="c" * 64,
+    )
+    manifest = SimpleNamespace(
+        governed_authorization=dispatch.payload.authorization.model_copy(
+            update={"execution_profile": "standard"}
+        ),
+        model_calls=0,
+    )
+
+    report = adapter._managed_result_loss_report(
+        dispatch=dispatch,
+        workflow=workflow,
+        manifest=manifest,
+        marker=marker,
+        evidence=loss,
+        verified_params=dict(dispatch.payload.params.values),
+        runtime_substrate="web",
+    )
+
+    assert report.managed_result_loss is not None
+    assert report.managed_result_loss.report_provenance == "outer_runner_recovery"
+    assert report.execution_outcome == "HALTED"
+    assert report.transaction_outcome == "RECONCILIATION_REQUIRED"
+    assert report.transaction_billable is False
+    assert report.effect_journal == []
+    assert report.outcome_envelope is not None
+    assert report.outcome_envelope.required_contracts.model_dump() == {
+        "authorization": 1,
+        "identity": 0,
+        "postcondition": 0,
+        "effect": 0,
+    }
+    invalid = report.model_dump(mode="json")
+    invalid["success"] = True
+    with pytest.raises(ValueError, match="managed result loss report contract"):
+        hosted.RunReport.model_validate(invalid)
+
+
+def test_concurrent_managed_result_loss_terminalizers_reuse_one_exact_record(
+    monkeypatch, tmp_path, sealed
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    binding = dispatch.payload.dispatch_binding_sha256
+    marker = hosted.ManagedChildStartEvidence.create(
+        started_at="2026-08-26T11:59:59Z",
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_session_id=dispatch.dispatch_session_id,
+        run_id=dispatch.run_id,
+        managed_dispatch_binding_sha256=binding,
+        authenticated_runner_id_sha256=hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest(),
+        authenticated_session_id_sha256=hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest(),
+        execution_authority_id=dispatch.execution_authority_id,
+        execution_authority_sha256=dispatch.execution_authority_sha256,
+        execution_authority_signer_sha256=(dispatch.execution_authority_signer_sha256),
+        run_store_identity_sha256=adapter._run_store_identity_sha256(run_dir),
+    )
+    adapter._write_private_bytes_atomic_exclusive(
+        run_dir / "managed-child-started.json", hosted.canonical_json(marker)
+    )
+    acknowledged = _terminal_delivery_chain(
+        dispatch,
+        admission_sha256="d" * 64,
+        evidence_identity_sha256="e" * 64,
+        environment_digest="a" * 64,
+        registry_sha256="e" * 64,
+    )
+    assert acknowledged.entries
+    permit = acknowledged.entries[0].permit_artifact
+
+    class Store:
+        def __init__(self, _run_dir):
+            pass
+
+        def read_manifest(self):
+            return SimpleNamespace()
+
+    class ClosureAuthority:
+        requests: list[hosted.ProductionDeliveryResultLossClosureRequest] = []
+
+        def close_result_loss(self, run_id, lease_token, request):
+            assert run_id == dispatch.run_id
+            assert lease_token == dispatch.lease_token
+            assert "oal_" not in request.canonical_bytes().decode("utf-8")
+            self.requests.append(request)
+            pending = ProductionPendingDeliveryPermit.build(
+                permit,
+                receipt_absence_observed_at=request.result_loss_observed_at,
+            )
+            chain = ProductionDeliveryPermitChain.build((), pending=pending)
+            return _result_loss_closure_result(dispatch, marker, request, chain)
+
+    closure_authority = ClosureAuthority()
+
+    class RacingDatetime(datetime):
+        calls = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls.calls += 1
+            second = 1 + cls.calls
+            value = datetime(2026, 8, 26, 12, 0, second, tzinfo=timezone.utc)
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr(hosted, "CheckpointStore", Store)
+    monkeypatch.setattr(hosted, "datetime", RacingDatetime)
+    monkeypatch.setattr(
+        adapter,
+        "_managed_result_loss_report",
+        lambda **kwargs: kwargs["evidence"],
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_produce_terminal_verification",
+        lambda **kwargs: (
+            kwargs["report"],
+            kwargs["report"].evidence_sha256,
+        ),
+    )
+    qualification = SimpleNamespace(
+        expected=SimpleNamespace(
+            runtime_build_identity=SimpleNamespace(substrate="web")
+        )
+    )
+
+    def terminalize(loss_code, closer=closure_authority):
+        return adapter._produce_managed_result_loss(
+            dispatch=dispatch,
+            workflow=workflow,
+            run_dir=run_dir,
+            qualification=qualification,
+            private_key=object(),
+            verified_params=dict(dispatch.payload.params.values),
+            dispatch_binding_sha256=binding,
+            closure_authority=closer,
+            loss_code=loss_code,
+        )
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(
+            pool.map(
+                terminalize,
+                ("runner_exception", "report_missing", "recovered_after_restart"),
+            )
+        )
+
+    retained = (run_dir / "managed-result-loss.json").read_bytes()
+    snapshot = hosted.ManagedResultLossSnapshot.model_validate_json(retained)
+    evidence_bytes = hosted.canonical_json(snapshot.evidence)
+    assert hosted.canonical_json(snapshot) == retained
+    assert {hosted.canonical_json(item[0]) for item in results} == {evidence_bytes}
+    assert {hosted.canonical_json(item[2]) for item in results} == {evidence_bytes}
+    assert {item[1] for item in results} == {snapshot.evidence.evidence_sha256}
+    assert closure_authority.requests
+    assert len({item.request_sha256() for item in closure_authority.requests}) == 1
+
+    class RefuseClosureReplay:
+        def close_result_loss(self, *_args, **_kwargs):
+            raise AssertionError("retained result loss requested a second closure")
+
+    replayed = terminalize("recovered_after_restart", RefuseClosureReplay())
+    assert hosted.canonical_json(replayed[0]) == evidence_bytes
+    assert hosted.canonical_json(replayed[2]) == evidence_bytes
+    if os.name != "nt":
+        assert (run_dir / "managed-result-loss.json").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("pending", [True, False], ids=("pending", "ack-won"))
+def test_result_loss_closure_response_binds_exact_request_and_chain(
+    tmp_path, sealed, pending
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    marker = hosted.ManagedChildStartEvidence.create(
+        started_at="2026-08-26T11:59:59Z",
+        dispatch_id=dispatch.dispatch_id,
+        dispatch_session_id=dispatch.dispatch_session_id,
+        run_id=dispatch.run_id,
+        managed_dispatch_binding_sha256=dispatch.payload.dispatch_binding_sha256,
+        authenticated_runner_id_sha256=hashlib.sha256(
+            dispatch.runner_id.encode("utf-8")
+        ).hexdigest(),
+        authenticated_session_id_sha256=hashlib.sha256(
+            dispatch.runner_session_id.encode("utf-8")
+        ).hexdigest(),
+        execution_authority_id=dispatch.execution_authority_id,
+        execution_authority_sha256=dispatch.execution_authority_sha256,
+        execution_authority_signer_sha256=(dispatch.execution_authority_signer_sha256),
+        run_store_identity_sha256=adapter._run_store_identity_sha256(run_dir),
+    )
+    request = hosted.ProductionDeliveryResultLossClosureRequest(
+        child_start_evidence=marker,
+        result_loss_observed_at="2026-08-26T12:00:02Z",
+    )
+    acknowledged = _terminal_delivery_chain(
+        dispatch,
+        admission_sha256="d" * 64,
+        evidence_identity_sha256="e" * 64,
+        environment_digest="a" * 64,
+        registry_sha256="e" * 64,
+    )
+    if pending:
+        permit = acknowledged.entries[0].permit_artifact
+        chain = ProductionDeliveryPermitChain.build(
+            (),
+            pending=ProductionPendingDeliveryPermit.build(
+                permit,
+                receipt_absence_observed_at=request.result_loss_observed_at,
+            ),
+        )
+    else:
+        chain = acknowledged
+
+    result = _result_loss_closure_result(dispatch, marker, request, chain)
+    artifact, retained_chain = result.artifacts()
+
+    assert retained_chain == chain
+    assert artifact.payload.closure_request_sha256 == request.request_sha256()
+    assert artifact.payload.pending_permit_count == (1 if pending else 0)
+    assert dispatch.lease_token not in request.canonical_bytes().decode("utf-8")
+    assert dispatch.delivery_authority_token not in request.canonical_bytes().decode(
+        "utf-8"
+    )
+    invalid = result.model_dump(mode="json")
+    invalid["permit_chain_sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="closure response"):
+        hosted.ProductionDeliveryResultLossClosureResult.model_validate(invalid)
+
+
+def test_unavailable_result_loss_fence_never_returns_a_callback_or_retries(
+    monkeypatch, tmp_path, config, sealed
+) -> None:
+    workflow, _ = sealed
+    calls = 0
+
+    def runner(_argv, _run_dir, _child_env):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("child result lost")
+
+    adapter, dispatch = _prepared_adapter(
+        monkeypatch, tmp_path, config, workflow, runner
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_revalidate_terminal_authority",
+        lambda **_kwargs: (object(), object()),
+    )
+
+    def refuse_unsigned_result_loss(**_kwargs):
+        raise ValueError("hosted result-loss closure is unavailable")
+
+    monkeypatch.setattr(
+        adapter,
+        "_produce_managed_result_loss",
+        refuse_unsigned_result_loss,
+    )
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run",
+            authority=authority,
+            closure_authority=SimpleNamespace(),
+        )
+
+    reservation = adapter._ledger.lookup(
+        f"{dispatch.tenant_id}:{dispatch.idempotency_key}"
+    )
+    assert reservation is not None
+    assert reservation["outcome"] == "RECONCILIATION_REQUIRED"
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run-again",
+            authority=authority,
+            closure_authority=SimpleNamespace(),
+        )
+    assert calls == 1
 
 
 def test_params_reference_resolves_only_from_protected_local_root(
@@ -1302,22 +1908,56 @@ def test_safe_halt_callback_requires_signed_terminal_proof() -> None:
         )
 
 
-def test_terminal_callback_refuses_conflicting_uncertainty_state() -> None:
-    proof = sign_production_terminal_verification(
-        _reconciliation_payload(), _private_key()
-    )
+@pytest.mark.parametrize(
+    ("payload_factory", "uncertain_delivery"),
+    [
+        (_reconciliation_payload, False),
+        (_acknowledged_reconciliation_payload, True),
+    ],
+)
+def test_terminal_callback_refuses_conflicting_uncertainty_state(
+    payload_factory, uncertain_delivery
+) -> None:
+    proof = sign_production_terminal_verification(payload_factory(), _private_key())
     with pytest.raises(ValueError, match="uncertainty conflicts"):
         HostedTerminalEvent(
             run_id=proof.payload.run_id,
             outcome="RECONCILIATION_REQUIRED",
             report_sha256=proof.payload.run_report_sha256,
             started=True,
-            uncertain_delivery=False,
+            uncertain_delivery=uncertain_delivery,
             terminal_verification_artifact_bytes_base64=b64encode(
                 hosted.canonical_json(proof)
             ).decode("ascii"),
             terminal_verification_artifact_sha256=proof.artifact_sha256(),
         )
+
+
+@pytest.mark.parametrize(
+    ("payload_factory", "uncertain_delivery"),
+    [
+        (_reconciliation_payload, True),
+        (_acknowledged_reconciliation_payload, False),
+        (_managed_result_loss_payload, True),
+        (_managed_result_loss_acknowledged_payload, False),
+    ],
+)
+def test_terminal_callback_derives_uncertainty_from_pending_permit_count(
+    payload_factory, uncertain_delivery
+) -> None:
+    proof = sign_production_terminal_verification(payload_factory(), _private_key())
+    terminal = HostedTerminalEvent(
+        run_id=proof.payload.run_id,
+        outcome="RECONCILIATION_REQUIRED",
+        report_sha256=proof.payload.run_report_sha256,
+        started=True,
+        uncertain_delivery=uncertain_delivery,
+        terminal_verification_artifact_bytes_base64=b64encode(
+            hosted.canonical_json(proof)
+        ).decode("ascii"),
+        terminal_verification_artifact_sha256=proof.artifact_sha256(),
+    )
+    assert terminal.uncertain_delivery is uncertain_delivery
 
 
 def test_callback_rejects_confirmed_summary_for_reconciliation() -> None:

@@ -13,29 +13,43 @@ from cryptography.hazmat.primitives import serialization
 
 from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.terminal_verification_v2 import (
+    RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN,
+    RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
     SIGNATURE_DOMAIN,
     evidence_runner_key_id,
     evidence_runner_signer_sha256,
     sign_production_terminal_verification,
 )
 from tests.test_terminal_verification_v2 import (
+    _acknowledged_reconciliation_payload,
     _halted_payload,
+    _managed_result_loss_acknowledged_payload,
+    _managed_result_loss_payload,
+    _payload,
     _private_key,
     _reconciliation_payload,
+    _result_loss_request,
 )
 
 DEFAULT_OUTPUT = Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json")
 
 
 def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
-    payload = (
-        _halted_payload()
-        if name == "halted-before-effect-zero-permit"
-        else _reconciliation_payload()
-    )
+    payload = {
+        "verified-complete": _payload,
+        "halted-before-effect-zero-permit": _halted_payload,
+        "reconciliation-required-pending-permit": _reconciliation_payload,
+        "reconciliation-required-acknowledged-inconclusive": (
+            _acknowledged_reconciliation_payload
+        ),
+        "reconciliation-required-managed-result-loss": _managed_result_loss_payload,
+        "reconciliation-required-managed-result-loss-acknowledged": (
+            _managed_result_loss_acknowledged_payload
+        ),
+    }[name]()
     envelope = sign_production_terminal_verification(payload, _private_key())
     raw = canonical_json(envelope)
-    effect_state = payload.evidence_manifests.effect.records[0]
+    effect_records = payload.evidence_manifests.effect.records
     return {
         "callback": {
             "artifact_bytes_source": "envelope_canonical_base64",
@@ -46,7 +60,9 @@ def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
             "started": True,
             "uncertain_delivery": uncertain_delivery,
         },
-        "effect_state": effect_state.model_dump(mode="json"),
+        "effect_state": (
+            effect_records[0].model_dump(mode="json") if effect_records else None
+        ),
         "envelope_canonical_base64": b64encode(raw).decode("ascii"),
         "name": name,
         "payload_canonical_sha256": hashlib.sha256(
@@ -54,6 +70,11 @@ def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
         ).hexdigest(),
         "signature": envelope.signature,
         "terminal_verification_artifact_sha256": envelope.artifact_sha256(),
+        "managed_result_loss": (
+            payload.managed_result_loss.model_dump(mode="json")
+            if payload.managed_result_loss is not None
+            else None
+        ),
     }
 
 
@@ -68,6 +89,22 @@ def build_fixture() -> dict[str, object]:
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
+    managed = _managed_result_loss_payload()
+    request = _result_loss_request()
+    closure = managed.delivery_result_loss_closure
+    assert closure is not None
+    closure_raw = canonical_json(closure)
+    chain_raw = canonical_json(managed.permit_chain)
+    closure_result = {
+        "schema_version": (
+            "openadapt.production-delivery-result-loss-closure-result/v2"
+        ),
+        "status": "closed",
+        "closure_artifact_bytes_base64": b64encode(closure_raw).decode("ascii"),
+        "closure_artifact_sha256": closure.artifact_sha256(),
+        "permit_chain_bytes_base64": b64encode(chain_raw).decode("ascii"),
+        "permit_chain_sha256": managed.permit_chain.permit_chain_sha256,
+    }
     return {
         "key_id": evidence_runner_key_id(public_bytes),
         "private_key_base64": b64encode(private_bytes).decode("ascii"),
@@ -75,7 +112,34 @@ def build_fixture() -> dict[str, object]:
         "schema_version": "openadapt.production-terminal-cross-language-vectors/v2",
         "signature_domain_base64": b64encode(SIGNATURE_DOMAIN).decode("ascii"),
         "signer_sha256": evidence_runner_signer_sha256(public_bytes),
+        "managed_result_loss_closure_vector": {
+            "http_method": "POST",
+            "http_route": "/api/internal/managed-delivery-result-loss-closure",
+            "authorization_credential_source": "hosted_dispatch.lease_token",
+            "request_digest_domain_base64": b64encode(
+                RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
+            ).decode("ascii"),
+            "request_canonical_base64": b64encode(request.canonical_bytes()).decode(
+                "ascii"
+            ),
+            "request_sha256": request.request_sha256(),
+            "payload_signature_domain_base64": b64encode(
+                RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
+            ).decode("ascii"),
+            "closure_payload_sha256": closure.payload_sha256,
+            "closure_artifact_canonical_base64": b64encode(closure_raw).decode("ascii"),
+            "closure_artifact_sha256": closure.artifact_sha256(),
+            "permit_chain_canonical_base64": b64encode(chain_raw).decode("ascii"),
+            "permit_chain_sha256": managed.permit_chain.permit_chain_sha256,
+            "result_canonical_base64": b64encode(canonical_json(closure_result)).decode(
+                "ascii"
+            ),
+        },
         "vectors": [
+            _vector(
+                "verified-complete",
+                uncertain_delivery=False,
+            ),
             _vector(
                 "halted-before-effect-zero-permit",
                 uncertain_delivery=False,
@@ -83,6 +147,18 @@ def build_fixture() -> dict[str, object]:
             _vector(
                 "reconciliation-required-pending-permit",
                 uncertain_delivery=True,
+            ),
+            _vector(
+                "reconciliation-required-acknowledged-inconclusive",
+                uncertain_delivery=False,
+            ),
+            _vector(
+                "reconciliation-required-managed-result-loss",
+                uncertain_delivery=True,
+            ),
+            _vector(
+                "reconciliation-required-managed-result-loss-acknowledged",
+                uncertain_delivery=False,
             ),
         ],
     }

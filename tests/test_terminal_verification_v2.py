@@ -17,6 +17,7 @@ from openadapt_flow.ir import (
     EffectVerificationEvidence,
     ExecutionOutcomeEnvelope,
     IdentityCheck,
+    ManagedResultLossEvidence,
     OutcomeContractCounts,
     PostconditionContractEvidence,
     RunReport,
@@ -25,13 +26,22 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.receipt import RunReceipt
+from openadapt_flow.runner.hosted_adapter import (
+    ManagedChildStartEvidence,
+    ProductionDeliveryResultLossClosureRequest,
+    ProductionDeliveryResultLossClosureResult,
+)
 from openadapt_flow.terminal_verification_v2 import (
+    RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN,
+    RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
     SIGNATURE_DOMAIN,
     ProductionAuthorizationEvidenceManifest,
     ProductionDeliveryPermit,
     ProductionDeliveryPermitChain,
     ProductionDeliveryPermitPayload,
     ProductionDeliveryReceiptPayload,
+    ProductionDeliveryResultLossClosureArtifact,
+    ProductionDeliveryResultLossClosurePayload,
     ProductionEffectEvidence,
     ProductionEffectEvidenceManifest,
     ProductionEvidenceManifests,
@@ -57,6 +67,7 @@ from openadapt_flow.terminal_verification_v2 import (
     rebuild_production_delivery_permit_chain_from_artifacts,
     sign_production_delivery_permit,
     sign_production_delivery_receipt,
+    sign_production_delivery_result_loss_closure,
     sign_production_terminal_verification,
     verify_production_terminal_verification,
 )
@@ -761,6 +772,288 @@ def _reconciliation_payload() -> ProductionTerminalVerificationPayload:
     )
 
 
+def _acknowledged_reconciliation_payload() -> ProductionTerminalVerificationPayload:
+    pending_payload = _reconciliation_payload()
+    chain = _permit_chain()
+    assert chain.entries
+    payload = pending_payload.model_dump(mode="json")
+    payload.update(
+        {
+            "permit_chain": chain.model_dump(mode="json"),
+            "permit_count": 1,
+            "acknowledged_permit_count": 1,
+            "pending_permit_count": 0,
+            "final_authority_sequence": chain.entries[-1].authority_sequence,
+            "final_runtime_delivery_sequence": (
+                chain.entries[-1].runtime_delivery_sequence
+            ),
+            "execution_authority_signer_sha256": (
+                chain.entries[-1].authority_signer_sha256
+            ),
+            "evidence_manifests": _reconciliation_manifests(chain).model_dump(
+                mode="json"
+            ),
+            "run_report_object_version": "version:reconciliation:acknowledged:1",
+        }
+    )
+    return ProductionTerminalVerificationPayload.model_validate(payload)
+
+
+def _result_loss_request() -> ProductionDeliveryResultLossClosureRequest:
+    marker = ManagedChildStartEvidence.create(
+        started_at="2026-08-18T12:00:00Z",
+        dispatch_id="00000000-0000-4000-8000-000000000009",
+        dispatch_session_id="00000000-0000-4000-8000-000000000010",
+        run_id=IDS["run_id"],
+        managed_dispatch_binding_sha256="sha256:" + SHA_C,
+        authenticated_runner_id_sha256=SHA_A,
+        authenticated_session_id_sha256=SHA_B,
+        execution_authority_id=IDS["execution_authority_id"],
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=(_permit_entry().authority_signer_sha256),
+        run_store_identity_sha256=SHA_B,
+    )
+    return ProductionDeliveryResultLossClosureRequest(
+        child_start_evidence=marker,
+        result_loss_observed_at="2026-08-18T12:00:02Z",
+    )
+
+
+def _result_loss_closure(
+    chain: ProductionDeliveryPermitChain,
+) -> ProductionDeliveryResultLossClosureArtifact:
+    request = _result_loss_request()
+    all_permits = (*chain.entries, *((chain.pending,) if chain.pending else ()))
+    assert all_permits
+    first = all_permits[0]
+    final = all_permits[-1]
+    pending = chain.pending
+    acknowledged = chain.entries[-1] if chain.entries else None
+    return sign_production_delivery_result_loss_closure(
+        ProductionDeliveryResultLossClosurePayload(
+            closure_id="00000000-0000-4000-8000-000000000011",
+            closure_request_sha256=request.request_sha256(),
+            closed_at="2026-08-18T12:00:02Z",
+            result_loss_observed_at="2026-08-18T12:00:02Z",
+            receipt_absence_observed_at=(
+                pending.receipt_absence_observed_at if pending else None
+            ),
+            tenant_id=IDS["tenant_id"],
+            run_id=IDS["run_id"],
+            flow_run_id_sha256=hashlib.sha256(
+                IDS["run_id"].encode("utf-8")
+            ).hexdigest(),
+            dispatch_id="00000000-0000-4000-8000-000000000009",
+            dispatch_session_id="00000000-0000-4000-8000-000000000010",
+            managed_dispatch_binding_sha256="sha256:" + SHA_C,
+            idempotency_key_sha256=SHA_D,
+            authenticated_runner_id_sha256=SHA_A,
+            authenticated_session_id_sha256=SHA_B,
+            execution_authority_id=IDS["execution_authority_id"],
+            execution_authority_sha256=SHA_A,
+            execution_authority_signer_sha256=final.authority_signer_sha256,
+            child_started_at="2026-08-18T12:00:00Z",
+            child_start_evidence_sha256=(request.child_start_evidence.marker_sha256),
+            run_store_identity_sha256=SHA_B,
+            permit_chain_sha256=chain.permit_chain_sha256,
+            permit_count=len(all_permits),
+            acknowledged_permit_count=len(chain.entries),
+            pending_permit_count=1 if pending else 0,
+            pending_permit_artifact_sha256=(
+                pending.permit_artifact_sha256 if pending else None
+            ),
+            run_request_sha256=first.run_request_sha256,
+            pending_action_request_sha256=(
+                pending.action_request_sha256 if pending else None
+            ),
+            final_input_edge_sequence=final.input_edge_sequence,
+            final_authority_sequence=final.authority_sequence,
+            final_runtime_delivery_sequence=(
+                acknowledged.runtime_delivery_sequence if acknowledged else 0
+            ),
+        ),
+        _authority_key(),
+    )
+
+
+def _managed_result_loss_payload(
+    chain: ProductionDeliveryPermitChain | None = None,
+) -> ProductionTerminalVerificationPayload:
+    chain = chain or _pending_permit_chain()
+    all_permits = (*chain.entries, *((chain.pending,) if chain.pending else ()))
+    assert all_permits
+    first = all_permits[0]
+    final = all_permits[-1]
+    pending = chain.pending
+    acknowledged = chain.entries[-1] if chain.entries else None
+    request = _result_loss_request()
+    closure = _result_loss_closure(chain)
+    loss = ManagedResultLossEvidence.create(
+        loss_code="report_missing",
+        child_started_at="2026-08-18T12:00:00Z",
+        child_start_evidence_sha256=request.child_start_evidence.marker_sha256,
+        run_store_identity_sha256=SHA_B,
+        observed_at=request.result_loss_observed_at,
+        run_id=IDS["run_id"],
+        flow_run_id_sha256=hashlib.sha256(IDS["run_id"].encode("utf-8")).hexdigest(),
+        dispatch_id="00000000-0000-4000-8000-000000000009",
+        dispatch_session_id="00000000-0000-4000-8000-000000000010",
+        managed_dispatch_binding_sha256="sha256:" + SHA_C,
+        idempotency_key_sha256=SHA_D,
+        authenticated_runner_id_sha256=SHA_A,
+        authenticated_session_id_sha256=SHA_B,
+        execution_authority_id=IDS["execution_authority_id"],
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=final.authority_signer_sha256,
+        delivery_result_loss_closure_artifact_sha256=closure.artifact_sha256(),
+        pending_permit_artifact_sha256=(
+            pending.permit_artifact_sha256 if pending else None
+        ),
+        run_request_sha256=first.run_request_sha256,
+        pending_action_request_sha256=(
+            pending.action_request_sha256 if pending else None
+        ),
+    )
+    outcome = ProductionExecutionOutcome(
+        outcome="HALTED",
+        profile="standard",
+        production_eligible=False,
+        execution_completed=False,
+        required_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=0,
+            postcondition=0,
+            effect=0,
+        ),
+        passed_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=0,
+            postcondition=0,
+            effect=0,
+        ),
+        workflow_contract_sha256=SHA_A,
+        postcondition_evidence=(),
+        evidence_classes=("authorization",),
+        model_calls=0,
+        external_network_calls="none",
+        managed_result_loss_evidence_sha256=loss.evidence_sha256,
+    )
+    receipt = ProductionRunReceipt(
+        source_schema_version="openadapt.run-report/v1",
+        outcome="HALTED",
+        transaction_outcome="RECONCILIATION_REQUIRED",
+        profile="standard",
+        production_eligible=False,
+        steps_total=1,
+        steps_ok=0,
+        heals=0,
+        model_calls=0,
+        est_cost_microusd=0,
+        duration_ms=0,
+        rung_histogram={},
+        evidence_classes=("authorization",),
+        effect_tier_reached="none",
+        authorization_required=1,
+        authorization_confirmed=1,
+        identity_required=0,
+        identity_confirmed=0,
+        postconditions_required=0,
+        postconditions_confirmed=0,
+        effects_required=0,
+        effects_confirmed=0,
+        identity_armed=0,
+        identity_applicable=0,
+        over_halt_count=0,
+        substrate="web",
+        provenance="production",
+        receipt_builder_version="1.2.3",
+        external_network_calls="none",
+        bundle_digest=SHA_A,
+        source_receipt_digest=SHA_B,
+        source_receipt_sha256=SHA_B,
+        generated_at="2026-08-18T12:00:00Z",
+        managed_result_loss_evidence_sha256=loss.evidence_sha256,
+    )
+    base = _halted_manifests(chain)
+    manifests = base.model_copy(
+        update={
+            "identity": build_evidence_manifest(
+                ProductionIdentityEvidenceManifest,
+                identity_contract_sha256=SHA_D,
+                workflow_contract_sha256=SHA_A,
+                required=0,
+                confirmed=0,
+                results=(),
+            ),
+            "postcondition": build_evidence_manifest(
+                ProductionPostconditionEvidenceManifest,
+                workflow_contract_sha256=SHA_A,
+                required=0,
+                confirmed=0,
+                records=(),
+            ),
+            "effect": build_evidence_manifest(
+                ProductionEffectEvidenceManifest,
+                effect_contract_sha256=SHA_E,
+                workflow_contract_sha256=SHA_A,
+                required=0,
+                confirmed=0,
+                records=(),
+            ),
+        }
+    )
+    return ProductionTerminalVerificationPayload(
+        **IDS,
+        flow_run_id_sha256=loss.flow_run_id_sha256,
+        bundle_artifact_sha256=SHA_B,
+        bundle_content_digest=SHA_A,
+        environment_digest=SHA_A,
+        environment_contract_sha256=SHA_B,
+        runtime_environment_sha256=SHA_C,
+        identity_contract_sha256=SHA_D,
+        effect_contract_sha256=SHA_E,
+        runtime_substrate="web",
+        admission_artifact_sha256=SHA_D,
+        admission_policy_sha256=SHA_A,
+        evidence_identity_sha256=SHA_E,
+        admitted_runtime_build_sha256=SHA_C,
+        evidence_runner_signer_sha256=evidence_runner_signer_sha256(_public_key()),
+        qualification_signer_registry_sha256=SHA_E,
+        qualification_signer_registry_revision=7,
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=final.authority_signer_sha256,
+        permit_chain=chain,
+        permit_count=len(all_permits),
+        acknowledged_permit_count=len(chain.entries),
+        pending_permit_count=1 if pending else 0,
+        final_authority_sequence=final.authority_sequence,
+        final_runtime_delivery_sequence=(
+            acknowledged.runtime_delivery_sequence if acknowledged else 0
+        ),
+        workflow_contract_sha256=SHA_A,
+        execution_outcome=outcome,
+        execution_outcome_sha256=outcome.artifact_sha256(),
+        run_receipt=receipt,
+        run_receipt_sha256=hashlib.sha256(
+            canonical_json(receipt.model_dump(mode="json"))
+        ).hexdigest(),
+        run_report_sha256=SHA_B,
+        run_report_object_version="version:managed-result-loss:1",
+        run_report_object_sha256=SHA_B,
+        evidence_manifests=manifests,
+        managed_result_loss=loss,
+        delivery_result_loss_closure=closure,
+        verified_at="2026-08-18T12:00:02Z",
+        issued_at="2026-08-18T12:00:03Z",
+    )
+
+
+def _managed_result_loss_acknowledged_payload() -> (
+    ProductionTerminalVerificationPayload
+):
+    return _managed_result_loss_payload(_permit_chain())
+
+
 def _payload() -> ProductionTerminalVerificationPayload:
     receipt = _receipt()
     chain = _permit_chain()
@@ -869,6 +1162,8 @@ def _expected(
         run_report_object_version=payload.run_report_object_version,
         run_report_object_sha256=payload.run_report_object_sha256,
         evidence_manifests=payload.evidence_manifests,
+        managed_result_loss=payload.managed_result_loss,
+        delivery_result_loss_closure=payload.delivery_result_loss_closure,
     )
 
 
@@ -994,6 +1289,65 @@ def test_terminal_v2_signs_and_verifies_reconciliation_proof() -> None:
     assert isinstance(record, ProductionTerminalEffectState)
     assert record.attempt_state == "delivery_uncertain"
     assert record.observed_effect == "unknown"
+
+
+def test_terminal_v2_signs_managed_result_loss_without_effect_absence() -> None:
+    payload = _managed_result_loss_payload()
+    envelope = sign_production_terminal_verification(payload, _private_key())
+    loss = payload.managed_result_loss
+
+    assert loss is not None
+    assert payload.run_receipt.transaction_outcome == "RECONCILIATION_REQUIRED"
+    assert payload.pending_permit_count == 1
+    assert payload.evidence_manifests.effect.required == 0
+    assert payload.evidence_manifests.effect.records == ()
+    assert loss.delivery_state == "CLOSED_UNRESOLVED_RESULT_LOSS"
+    assert loss.child_report_retained is False
+    assert loss.effect_absence_claimed is False
+    assert loss.not_received_claimed is False
+    assert loss.blind_retry_authorized is False
+    assert loss.actuation_replay_authorized is False
+    assert envelope.payload.managed_result_loss == loss
+
+
+def test_terminal_v2_signs_ack_won_managed_result_loss_without_uncertainty() -> None:
+    payload = _managed_result_loss_acknowledged_payload()
+    envelope = sign_production_terminal_verification(payload, _private_key())
+
+    digest = verify_production_terminal_verification(
+        envelope,
+        expected=_expected(payload),
+        now=NOW,
+    )
+
+    assert digest == envelope.artifact_sha256()
+    assert payload.acknowledged_permit_count == 1
+    assert payload.pending_permit_count == 0
+    assert payload.permit_chain.pending is None
+    assert payload.managed_result_loss is not None
+    assert payload.managed_result_loss.pending_permit_artifact_sha256 is None
+    assert payload.managed_result_loss.pending_action_request_sha256 is None
+    assert payload.evidence_manifests.effect.records == ()
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "child_report_retained",
+        "effect_absence_claimed",
+        "not_received_claimed",
+        "blind_retry_authorized",
+        "actuation_replay_authorized",
+    ],
+)
+def test_managed_result_loss_refuses_a_positive_prohibited_claim(field: str) -> None:
+    loss = _managed_result_loss_payload().managed_result_loss
+    assert loss is not None
+    raw = loss.model_dump(mode="json")
+    raw[field] = True
+
+    with pytest.raises(ValidationError):
+        ManagedResultLossEvidence.model_validate(raw)
 
 
 def test_pending_delivery_chain_rebuilds_from_exact_retained_permit() -> None:
@@ -1419,8 +1773,16 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
         b64decode(fixture["private_key_base64"], validate=True)
     )
     payloads = {
+        "verified-complete": _payload(),
         "halted-before-effect-zero-permit": _halted_payload(),
         "reconciliation-required-pending-permit": _reconciliation_payload(),
+        "reconciliation-required-acknowledged-inconclusive": (
+            _acknowledged_reconciliation_payload()
+        ),
+        "reconciliation-required-managed-result-loss": (_managed_result_loss_payload()),
+        "reconciliation-required-managed-result-loss-acknowledged": (
+            _managed_result_loss_acknowledged_payload()
+        ),
     }
 
     for vector in fixture["vectors"]:
@@ -1440,17 +1802,64 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
             envelope.artifact_sha256()
             == (vector["terminal_verification_artifact_sha256"])
         )
+        effect_records = envelope.payload.evidence_manifests.effect.records
         assert (
-            envelope.payload.evidence_manifests.effect.records[0].model_dump(
-                mode="json"
-            )
-            == vector["effect_state"]
-        )
+            effect_records[0].model_dump(mode="json") if effect_records else None
+        ) == vector["effect_state"]
+        assert (
+            envelope.payload.managed_result_loss.model_dump(mode="json")
+            if envelope.payload.managed_result_loss is not None
+            else None
+        ) == vector["managed_result_loss"]
         callback = vector["callback"]
         assert callback["run_id"] == payload.run_id
         assert callback["outcome"] == payload.run_receipt.transaction_outcome
         assert callback["report_sha256"] == payload.run_report_sha256
         assert callback["artifact_bytes_source"] == "envelope_canonical_base64"
+
+
+def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    vector = fixture["managed_result_loss_closure_vector"]
+    request_raw = b64decode(vector["request_canonical_base64"], validate=True)
+    closure_raw = b64decode(
+        vector["closure_artifact_canonical_base64"], validate=True
+    )
+    chain_raw = b64decode(vector["permit_chain_canonical_base64"], validate=True)
+    result_raw = b64decode(vector["result_canonical_base64"], validate=True)
+    request = ProductionDeliveryResultLossClosureRequest.model_validate_json(
+        request_raw
+    )
+    closure = ProductionDeliveryResultLossClosureArtifact.model_validate_json(
+        closure_raw
+    )
+    chain = ProductionDeliveryPermitChain.model_validate_json(chain_raw)
+    result = ProductionDeliveryResultLossClosureResult.model_validate_json(result_raw)
+
+    assert vector["http_method"] == "POST"
+    assert vector["http_route"] == (
+        "/api/internal/managed-delivery-result-loss-closure"
+    )
+    assert vector["authorization_credential_source"] == "hosted_dispatch.lease_token"
+    assert b64decode(vector["request_digest_domain_base64"], validate=True) == (
+        RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
+    )
+    assert b64decode(vector["payload_signature_domain_base64"], validate=True) == (
+        RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
+    )
+    assert request.canonical_bytes() == request_raw
+    assert request.request_sha256() == vector["request_sha256"]
+    assert closure.canonical_bytes() == closure_raw
+    assert closure.payload_sha256 == vector["closure_payload_sha256"]
+    assert closure.artifact_sha256() == vector["closure_artifact_sha256"]
+    assert canonical_json(chain) == chain_raw
+    assert chain.permit_chain_sha256 == vector["permit_chain_sha256"]
+    assert canonical_json(result) == result_raw
+    assert result.artifacts() == (closure, chain)
 
 
 def test_delivery_artifact_rebuild_rejects_noncanonical_stored_bytes() -> None:

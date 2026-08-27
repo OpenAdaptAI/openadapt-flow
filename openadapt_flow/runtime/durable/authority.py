@@ -2418,7 +2418,9 @@ class DurableAuthority:
         self._emit_synthetic_delivery_marker(marker_payload)
         return entry
 
-    def production_delivery_permit_chain(self) -> ProductionDeliveryPermitChain:
+    def production_delivery_permit_chain(
+        self, *, allow_empty: bool = False
+    ) -> ProductionDeliveryPermitChain:
         """Rebuild the exact acknowledged chain from protected retained bytes."""
 
         with self._transaction() as connection:
@@ -2433,6 +2435,8 @@ class DurableAuthority:
                 (self.path_key,),
             ).fetchall()
         if not rows:
+            if allow_empty:
+                return ProductionDeliveryPermitChain.build(())
             raise DurableAuthorityBusy(
                 "the production delivery permit chain is unavailable"
             )

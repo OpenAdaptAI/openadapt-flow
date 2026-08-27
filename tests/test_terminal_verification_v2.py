@@ -12,14 +12,21 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
 from openadapt_flow.ir import (
+    ActionDeliveryUncertainty,
     ActionKind,
+    EffectVerificationEvidence,
+    ExecutionOutcomeEnvelope,
+    IdentityCheck,
+    OutcomeContractCounts,
     PostconditionContractEvidence,
+    RunReport,
     postcondition_contract_sha256,
     postcondition_step_contract_sha256,
 )
 from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.receipt import RunReceipt
 from openadapt_flow.terminal_verification_v2 import (
+    SIGNATURE_DOMAIN,
     ProductionAuthorizationEvidenceManifest,
     ProductionDeliveryPermit,
     ProductionDeliveryPermitChain,
@@ -35,11 +42,15 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionPolicyEvidenceManifest,
     ProductionPostconditionEvidenceManifest,
     ProductionRunReceipt,
+    ProductionTerminalEffectState,
+    ProductionTerminalVerificationContext,
+    ProductionTerminalVerificationEnvelope,
     ProductionTerminalVerificationError,
     ProductionTerminalVerificationExpected,
     ProductionTerminalVerificationPayload,
     TerminalContractCounts,
     build_evidence_manifest,
+    build_production_terminal_verification,
     evidence_runner_signer_sha256,
     project_production_run_receipt,
     rebuild_production_delivery_permit_chain_from_artifacts,
@@ -48,6 +59,7 @@ from openadapt_flow.terminal_verification_v2 import (
     sign_production_terminal_verification,
     verify_production_terminal_verification,
 )
+from tests.test_run_receipt import _report as _production_report
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -134,6 +146,220 @@ def _outcome() -> ProductionExecutionOutcome:
         ),
         model_calls=0,
         external_network_calls="none",
+    )
+
+
+def _terminal_postcondition(
+    verdict: str,
+) -> PostconditionContractEvidence:
+    return _postcondition().model_copy(update={"verdict": verdict})
+
+
+def _halted_outcome() -> ProductionExecutionOutcome:
+    return ProductionExecutionOutcome(
+        outcome="HALTED",
+        profile="standard",
+        production_eligible=False,
+        execution_completed=False,
+        required_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=1,
+            effect=1,
+        ),
+        passed_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=0,
+            effect=0,
+        ),
+        workflow_contract_sha256=SHA_A,
+        postcondition_evidence=(_terminal_postcondition("unverifiable"),),
+        evidence_classes=("authorization", "identity"),
+        model_calls=0,
+        external_network_calls="none",
+    )
+
+
+def _halted_receipt() -> ProductionRunReceipt:
+    return ProductionRunReceipt(
+        source_schema_version="openadapt.run-report/v1",
+        outcome="HALTED",
+        transaction_outcome="HALTED_BEFORE_EFFECT",
+        profile="standard",
+        production_eligible=False,
+        steps_total=1,
+        steps_ok=0,
+        heals=0,
+        model_calls=0,
+        est_cost_microusd=0,
+        duration_ms=100,
+        rung_histogram={},
+        evidence_classes=("authorization", "identity"),
+        effect_tier_reached="none",
+        authorization_required=1,
+        authorization_confirmed=1,
+        identity_required=1,
+        identity_confirmed=1,
+        postconditions_required=1,
+        postconditions_confirmed=0,
+        effects_required=1,
+        effects_confirmed=0,
+        identity_armed=1,
+        identity_applicable=1,
+        over_halt_count=0,
+        substrate="web",
+        provenance="production",
+        receipt_builder_version="1.2.3",
+        external_network_calls="none",
+        bundle_digest=SHA_A,
+        source_receipt_digest=SHA_B,
+        source_receipt_sha256=SHA_B,
+        generated_at="2026-08-18T12:00:00Z",
+    )
+
+
+def _reconciliation_outcome() -> ProductionExecutionOutcome:
+    return ProductionExecutionOutcome(
+        outcome="HALTED",
+        profile="standard",
+        production_eligible=False,
+        execution_completed=False,
+        required_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=1,
+            effect=1,
+        ),
+        passed_contracts=TerminalContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=0,
+            effect=0,
+        ),
+        workflow_contract_sha256=SHA_A,
+        postcondition_evidence=(_terminal_postcondition("unverifiable"),),
+        evidence_classes=("authorization", "identity"),
+        model_calls=0,
+        external_network_calls="none",
+    )
+
+
+def _reconciliation_receipt() -> ProductionRunReceipt:
+    return _halted_receipt().model_copy(
+        update={
+            "transaction_outcome": "RECONCILIATION_REQUIRED",
+            "evidence_classes": ("authorization", "identity"),
+            "identity_confirmed": 1,
+        }
+    )
+
+
+def _actual_non_success_report(
+    transaction_outcome: str,
+) -> RunReport:
+    base = _production_report()
+    assert base.outcome_envelope is not None
+    base_result = base.results[0]
+    postcondition = base.outcome_envelope.postcondition_evidence[0].model_copy(
+        update={"verdict": "unverifiable"}
+    )
+    if transaction_outcome == "HALTED_BEFORE_EFFECT":
+        identity = IdentityCheck(
+            status="verified",
+            mode="structured",
+            coverage=1.0,
+        )
+        result = base_result.model_copy(
+            update={
+                "risk": "irreversible",
+                "ok": False,
+                "identity": identity,
+                "postconditions_ok": None,
+                "effect_verified": False,
+                "effect_evidence": [],
+                "delivery_attempted": False,
+                "safety_halt": True,
+            }
+        )
+        passed = OutcomeContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=0,
+            effect=0,
+        )
+        evidence_classes = ["authorization", "identity"]
+    else:
+        uncertainty = ActionDeliveryUncertainty(
+            operation="guarded_coordinate_click",
+            native=False,
+            observed_at="2026-07-27T15:34:57+00:00",
+            cause_type="ConnectionResetError",
+            verification_attempted=True,
+            postconditions_confirmed=False,
+            effects_confirmed=False,
+            resolved_by_contract=False,
+        )
+        effect = EffectVerificationEvidence(
+            effect_contract_hash=base_result.effect_contract_hashes[0],
+            substrate="rest",
+            verifier_identity="sha256:" + SHA_B,
+            verification_tier=1,
+            initial_verdict="indeterminate",
+            final_verdict="indeterminate",
+            observed_effect="unknown",
+        )
+        result = base_result.model_copy(
+            update={
+                "risk": "irreversible",
+                "ok": False,
+                "postconditions_ok": False,
+                "effect_verified": False,
+                "effect_evidence": [effect],
+                "delivery_attempted": True,
+                "delivery_uncertainty": uncertainty,
+                "safety_halt": True,
+            }
+        )
+        passed = OutcomeContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=0,
+            effect=0,
+        )
+        evidence_classes = ["authorization", "identity"]
+    envelope = ExecutionOutcomeEnvelope(
+        outcome="HALTED",
+        profile="standard",
+        production_eligible=False,
+        execution_completed=False,
+        required_contracts=OutcomeContractCounts(
+            authorization=1,
+            identity=1,
+            postcondition=1,
+            effect=1,
+        ),
+        passed_contracts=passed,
+        workflow_contract_sha256=base.workflow_contract_sha256,
+        postcondition_evidence=[postcondition],
+        evidence_classes=evidence_classes,
+        model_calls=0,
+        external_network_calls="observed",
+    )
+    return RunReport.model_validate(
+        base.model_dump(mode="json")
+        | {
+            "run_id_sha256": hashlib.sha256(IDS["run_id"].encode()).hexdigest(),
+            "execution_outcome": "HALTED",
+            "transaction_outcome": transaction_outcome,
+            "transaction_billable": False,
+            "transaction_platform_fault": False,
+            "production_eligible": False,
+            "execution_completed": False,
+            "outcome_envelope": envelope.model_dump(mode="json"),
+            "success": False,
+            "results": [result.model_dump(mode="json")],
+        }
     )
 
 
@@ -319,6 +545,208 @@ def _manifests(
     )
 
 
+def _halted_manifests(
+    chain: ProductionDeliveryPermitChain,
+) -> ProductionEvidenceManifests:
+    success = _manifests(_permit_chain())
+    authorization = build_evidence_manifest(
+        ProductionAuthorizationEvidenceManifest,
+        governed_authorization_id_sha256=SHA_A,
+        admission_id=IDS["admission_id"],
+        admission_artifact_sha256=SHA_D,
+        execution_authority_id=IDS["execution_authority_id"],
+        execution_authority_sha256=SHA_A,
+        permit_chain_sha256=chain.permit_chain_sha256,
+    )
+    identity = build_evidence_manifest(
+        ProductionIdentityEvidenceManifest,
+        identity_contract_sha256=SHA_D,
+        workflow_contract_sha256=SHA_A,
+        required=1,
+        confirmed=1,
+        results=(
+            ProductionIdentityResult(
+                result_index=0,
+                status="verified",
+                mode="structured",
+                signals=(),
+            ),
+        ),
+    )
+    postcondition = build_evidence_manifest(
+        ProductionPostconditionEvidenceManifest,
+        workflow_contract_sha256=SHA_A,
+        required=1,
+        confirmed=0,
+        records=(_terminal_postcondition("unverifiable"),),
+    )
+    effect = build_evidence_manifest(
+        ProductionEffectEvidenceManifest,
+        effect_contract_sha256=SHA_E,
+        workflow_contract_sha256=SHA_A,
+        required=1,
+        confirmed=0,
+        records=(
+            ProductionTerminalEffectState(
+                result_index=0,
+                effect_contract_hash="sha256:" + SHA_A,
+                attempt_state="not_actuated",
+                observed_effect="absent",
+                effect_verified=False,
+                verification_performed=False,
+                verifier_identity=None,
+                verification_tier=None,
+                final_verdict=None,
+                resolved_delivery_uncertainty=False,
+                absence_basis="not_actuated",
+                reconciliation_completed=False,
+                reconciliation_actions=0,
+            ),
+        ),
+    )
+    return ProductionEvidenceManifests(
+        policy=success.policy,
+        authorization=authorization,
+        identity=identity,
+        postcondition=postcondition,
+        effect=effect,
+    )
+
+
+def _reconciliation_manifests(
+    chain: ProductionDeliveryPermitChain,
+) -> ProductionEvidenceManifests:
+    halted = _halted_manifests(chain)
+    identity = build_evidence_manifest(
+        ProductionIdentityEvidenceManifest,
+        identity_contract_sha256=SHA_D,
+        workflow_contract_sha256=SHA_A,
+        required=1,
+        confirmed=1,
+        results=(
+            ProductionIdentityResult(
+                result_index=0,
+                status="verified",
+                mode="structured",
+                signals=(),
+            ),
+        ),
+    )
+    effect = build_evidence_manifest(
+        ProductionEffectEvidenceManifest,
+        effect_contract_sha256=SHA_E,
+        workflow_contract_sha256=SHA_A,
+        required=1,
+        confirmed=0,
+        records=(
+            ProductionTerminalEffectState(
+                result_index=0,
+                effect_contract_hash="sha256:" + SHA_A,
+                attempt_state="delivery_uncertain",
+                observed_effect="unknown",
+                effect_verified=False,
+                verification_performed=False,
+                verifier_identity=None,
+                verification_tier=None,
+                final_verdict=None,
+                resolved_delivery_uncertainty=False,
+                absence_basis="none",
+                reconciliation_completed=False,
+                reconciliation_actions=0,
+            ),
+        ),
+    )
+    return halted.model_copy(update={"identity": identity, "effect": effect})
+
+
+def _halted_payload() -> ProductionTerminalVerificationPayload:
+    receipt = _halted_receipt()
+    outcome = _halted_outcome()
+    chain = ProductionDeliveryPermitChain.build(())
+    return ProductionTerminalVerificationPayload(
+        **IDS,
+        flow_run_id_sha256=hashlib.sha256(IDS["run_id"].encode("utf-8")).hexdigest(),
+        bundle_artifact_sha256=SHA_B,
+        bundle_content_digest=SHA_A,
+        environment_digest=SHA_A,
+        environment_contract_sha256=SHA_B,
+        runtime_environment_sha256=SHA_C,
+        identity_contract_sha256=SHA_D,
+        effect_contract_sha256=SHA_E,
+        runtime_substrate="web",
+        admission_artifact_sha256=SHA_D,
+        admission_policy_sha256=SHA_A,
+        evidence_identity_sha256=SHA_E,
+        admitted_runtime_build_sha256=SHA_C,
+        evidence_runner_signer_sha256=evidence_runner_signer_sha256(_public_key()),
+        qualification_signer_registry_sha256=SHA_E,
+        qualification_signer_registry_revision=7,
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=SHA_C,
+        permit_chain=chain,
+        permit_count=0,
+        final_authority_sequence=0,
+        final_runtime_delivery_sequence=0,
+        workflow_contract_sha256=SHA_A,
+        execution_outcome=outcome,
+        execution_outcome_sha256=outcome.artifact_sha256(),
+        run_receipt=receipt,
+        run_receipt_sha256=hashlib.sha256(
+            canonical_json(receipt.model_dump(mode="json"))
+        ).hexdigest(),
+        run_report_sha256=SHA_B,
+        run_report_object_version="version:halted:1",
+        run_report_object_sha256=SHA_B,
+        evidence_manifests=_halted_manifests(chain),
+        verified_at="2026-08-18T12:00:02Z",
+        issued_at="2026-08-18T12:00:03Z",
+    )
+
+
+def _reconciliation_payload() -> ProductionTerminalVerificationPayload:
+    chain = _permit_chain()
+    receipt = _reconciliation_receipt()
+    outcome = _reconciliation_outcome()
+    return ProductionTerminalVerificationPayload(
+        **IDS,
+        flow_run_id_sha256=hashlib.sha256(IDS["run_id"].encode("utf-8")).hexdigest(),
+        bundle_artifact_sha256=SHA_B,
+        bundle_content_digest=SHA_A,
+        environment_digest=SHA_A,
+        environment_contract_sha256=SHA_B,
+        runtime_environment_sha256=SHA_C,
+        identity_contract_sha256=SHA_D,
+        effect_contract_sha256=SHA_E,
+        runtime_substrate="web",
+        admission_artifact_sha256=SHA_D,
+        admission_policy_sha256=SHA_A,
+        evidence_identity_sha256=SHA_E,
+        admitted_runtime_build_sha256=SHA_C,
+        evidence_runner_signer_sha256=evidence_runner_signer_sha256(_public_key()),
+        qualification_signer_registry_sha256=SHA_E,
+        qualification_signer_registry_revision=7,
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=chain.entries[0].authority_signer_sha256,
+        permit_chain=chain,
+        permit_count=1,
+        final_authority_sequence=0,
+        final_runtime_delivery_sequence=9,
+        workflow_contract_sha256=SHA_A,
+        execution_outcome=outcome,
+        execution_outcome_sha256=outcome.artifact_sha256(),
+        run_receipt=receipt,
+        run_receipt_sha256=hashlib.sha256(
+            canonical_json(receipt.model_dump(mode="json"))
+        ).hexdigest(),
+        run_report_sha256=SHA_B,
+        run_report_object_version="version:reconciliation:1",
+        run_report_object_sha256=SHA_B,
+        evidence_manifests=_reconciliation_manifests(chain),
+        verified_at="2026-08-18T12:00:02Z",
+        issued_at="2026-08-18T12:00:03Z",
+    )
+
+
 def _payload() -> ProductionTerminalVerificationPayload:
     receipt = _receipt()
     chain = _permit_chain()
@@ -365,6 +793,16 @@ def _payload() -> ProductionTerminalVerificationPayload:
 def _expected(
     payload: ProductionTerminalVerificationPayload,
 ) -> ProductionTerminalVerificationExpected:
+    if payload.permit_chain.entries:
+        authenticated_runner_id_sha256 = payload.permit_chain.entries[
+            0
+        ].authenticated_runner_id_sha256
+        authenticated_session_id_sha256 = payload.permit_chain.entries[
+            0
+        ].authenticated_session_id_sha256
+    else:
+        authenticated_runner_id_sha256 = SHA_B
+        authenticated_session_id_sha256 = SHA_C
     return ProductionTerminalVerificationExpected(
         run_id=payload.run_id,
         flow_run_id_sha256=payload.flow_run_id_sha256,
@@ -396,12 +834,8 @@ def _expected(
         permit_count=payload.permit_count,
         final_authority_sequence=payload.final_authority_sequence,
         final_runtime_delivery_sequence=payload.final_runtime_delivery_sequence,
-        authenticated_runner_id_sha256=(
-            payload.permit_chain.entries[0].authenticated_runner_id_sha256
-        ),
-        authenticated_session_id_sha256=(
-            payload.permit_chain.entries[0].authenticated_session_id_sha256
-        ),
+        authenticated_runner_id_sha256=authenticated_runner_id_sha256,
+        authenticated_session_id_sha256=authenticated_session_id_sha256,
         acknowledged_one_use_claim_ids=tuple(
             entry.one_use_claim_id for entry in payload.permit_chain.entries
         ),
@@ -427,6 +861,173 @@ def test_terminal_v2_signs_and_verifies_exact_production_success() -> None:
     assert (
         envelope.signature
         == sign_production_terminal_verification(payload, _private_key()).signature
+    )
+
+
+def test_terminal_v2_signs_and_verifies_zero_permit_safe_halt() -> None:
+    payload = _halted_payload()
+    envelope = sign_production_terminal_verification(payload, _private_key())
+
+    digest = verify_production_terminal_verification(
+        envelope,
+        expected=_expected(payload),
+        now=NOW,
+    )
+
+    assert digest == envelope.artifact_sha256()
+    assert payload.execution_outcome.outcome == "HALTED"
+    assert payload.run_receipt.transaction_outcome == "HALTED_BEFORE_EFFECT"
+    assert payload.permit_count == 0
+    assert payload.permit_chain.entries == ()
+    assert all(
+        isinstance(record, ProductionTerminalEffectState)
+        and record.absence_basis in {"not_actuated", "verifier_refuted"}
+        for record in payload.evidence_manifests.effect.records
+    )
+
+
+def test_terminal_v2_refuses_zero_permit_verified_claim() -> None:
+    data = _halted_payload().model_dump(mode="json")
+    data["run_receipt"]["transaction_outcome"] = "VERIFIED"
+
+    with pytest.raises(ValidationError):
+        ProductionTerminalVerificationPayload.model_validate(data)
+
+
+def test_terminal_v2_refuses_safe_halt_without_effect_absence() -> None:
+    data = _halted_payload().model_dump(mode="json")
+    effect = data["evidence_manifests"]["effect"]
+    record = effect["records"][0]
+    record.update(
+        {
+            "attempt_state": "delivery_uncertain",
+            "observed_effect": "unknown",
+            "absence_basis": "none",
+        }
+    )
+    unsigned = {key: value for key, value in effect.items() if key != "manifest_sha256"}
+    effect["manifest_sha256"] = hashlib.sha256(
+        b"openadapt-production-effect-evidence-v1\0" + canonical_json(unsigned)
+    ).hexdigest()
+
+    with pytest.raises(ValidationError, match="effect absence"):
+        ProductionTerminalVerificationPayload.model_validate(data)
+
+
+def test_terminal_effect_state_requires_exact_verifier_and_verdict_binding() -> None:
+    record = _halted_payload().evidence_manifests.effect.records[0]
+    assert isinstance(record, ProductionTerminalEffectState)
+    data = record.model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="verified state"):
+        ProductionTerminalEffectState.model_validate(data | {"effect_verified": True})
+    with pytest.raises(ValidationError, match="verifier identity"):
+        ProductionTerminalEffectState.model_validate(
+            data
+            | {
+                "attempt_state": "delivered",
+                "verification_performed": True,
+                "verification_tier": 1,
+                "final_verdict": "refuted",
+                "absence_basis": "verifier_refuted",
+            }
+        )
+
+    refuted = ProductionTerminalEffectState.model_validate(
+        data
+        | {
+            "attempt_state": "delivered",
+            "verification_performed": True,
+            "verifier_identity": "sha256:" + SHA_B,
+            "verification_tier": 1,
+            "final_verdict": "refuted",
+            "absence_basis": "verifier_refuted",
+        }
+    )
+    assert refuted.effect_verified is False
+
+
+def test_terminal_v2_signs_and_verifies_reconciliation_proof() -> None:
+    payload = _reconciliation_payload()
+    envelope = sign_production_terminal_verification(payload, _private_key())
+
+    digest = verify_production_terminal_verification(
+        envelope,
+        expected=_expected(payload),
+        now=NOW,
+    )
+
+    assert digest == envelope.artifact_sha256()
+    assert payload.run_receipt.transaction_outcome == "RECONCILIATION_REQUIRED"
+    assert payload.permit_count == 1
+    record = payload.evidence_manifests.effect.records[0]
+    assert isinstance(record, ProductionTerminalEffectState)
+    assert record.attempt_state == "delivery_uncertain"
+    assert record.observed_effect == "unknown"
+
+
+@pytest.mark.parametrize(
+    "transaction_outcome",
+    ["HALTED_BEFORE_EFFECT", "RECONCILIATION_REQUIRED"],
+)
+def test_terminal_v2_builds_non_success_proof_from_exact_run_report(
+    transaction_outcome: str,
+) -> None:
+    report = _actual_non_success_report(transaction_outcome)
+    chain = (
+        ProductionDeliveryPermitChain.build(())
+        if transaction_outcome == "HALTED_BEFORE_EFFECT"
+        else _permit_chain()
+    )
+    context = ProductionTerminalVerificationContext(
+        run_id=IDS["run_id"],
+        tenant_id=IDS["tenant_id"],
+        workflow_id=IDS["workflow_id"],
+        workflow_version_id=IDS["workflow_version_id"],
+        bundle_version_id=IDS["bundle_version_id"],
+        bundle_artifact_sha256=SHA_B,
+        environment_digest=SHA_A,
+        environment_contract_sha256=SHA_B,
+        runtime_environment_sha256=SHA_C,
+        identity_contract_sha256=SHA_D,
+        effect_contract_sha256=SHA_E,
+        runtime_validation_id=IDS["runtime_validation_id"],
+        runtime_substrate="web",
+        admission_id=IDS["admission_id"],
+        admission_artifact_sha256=SHA_D,
+        admission_policy_sha256=SHA_A,
+        evidence_identity_sha256=SHA_E,
+        admitted_runtime_build_sha256=SHA_C,
+        evidence_runner_signer_sha256=evidence_runner_signer_sha256(_public_key()),
+        qualification_signer_registry_sha256=SHA_E,
+        qualification_signer_registry_revision=7,
+        execution_authority_id=IDS["execution_authority_id"],
+        execution_authority_sha256=SHA_A,
+        execution_authority_signer_sha256=(
+            chain.entries[0].authority_signer_sha256 if chain.entries else SHA_C
+        ),
+        permit_chain=chain,
+        run_report_object_version="version:terminal-report:1",
+        verified_at="2026-08-18T12:00:02Z",
+        issued_at="2026-08-18T12:00:03Z",
+    )
+
+    built = build_production_terminal_verification(
+        report,
+        context=context,
+        private_key=_private_key(),
+    )
+    payload = built.envelope.payload
+
+    assert payload.run_receipt.transaction_outcome == transaction_outcome
+    assert payload.run_report_sha256 == hashlib.sha256(built.report_bytes).hexdigest()
+    assert (
+        verify_production_terminal_verification(
+            built.envelope,
+            expected=_expected(payload),
+            now=NOW,
+        )
+        == built.envelope.artifact_sha256()
     )
 
 
@@ -695,6 +1296,53 @@ def test_delivery_cross_language_vector_is_exact() -> None:
         ((permit_artifact.canonical_bytes(), receipt_artifact.canonical_bytes()),)
     )
     assert rebuilt == chain
+
+
+def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
+    fixture = json.loads(
+        Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert b64decode(fixture["signature_domain_base64"], validate=True) == (
+        SIGNATURE_DOMAIN
+    )
+    key = Ed25519PrivateKey.from_private_bytes(
+        b64decode(fixture["private_key_base64"], validate=True)
+    )
+    payloads = {
+        "halted-before-effect-zero-permit": _halted_payload(),
+        "reconciliation-required-nonempty-permit": _reconciliation_payload(),
+    }
+
+    for vector in fixture["vectors"]:
+        raw = b64decode(vector["envelope_canonical_base64"], validate=True)
+        envelope = ProductionTerminalVerificationEnvelope.model_validate_json(raw)
+        payload = payloads[vector["name"]]
+        expected = sign_production_terminal_verification(payload, key)
+
+        assert canonical_json(envelope) == raw
+        assert envelope == expected
+        assert (
+            hashlib.sha256(payload.canonical_bytes()).hexdigest()
+            == (vector["payload_canonical_sha256"])
+        )
+        assert envelope.signature == vector["signature"]
+        assert (
+            envelope.artifact_sha256()
+            == (vector["terminal_verification_artifact_sha256"])
+        )
+        assert (
+            envelope.payload.evidence_manifests.effect.records[0].model_dump(
+                mode="json"
+            )
+            == vector["effect_state"]
+        )
+        callback = vector["callback"]
+        assert callback["run_id"] == payload.run_id
+        assert callback["outcome"] == payload.run_receipt.transaction_outcome
+        assert callback["report_sha256"] == payload.run_report_sha256
+        assert callback["artifact_bytes_source"] == "envelope_canonical_base64"
 
 
 def test_delivery_artifact_rebuild_rejects_noncanonical_stored_bytes() -> None:

@@ -235,6 +235,9 @@ class HostedDispatch(_Closed):
     run_id: str = Field(pattern=_UUID)
     workflow_id: str = Field(pattern=_UUID)
     workflow_version_id: str = Field(pattern=_UUID)
+    execution_authority_id: str = Field(pattern=_UUID)
+    execution_authority_sha256: str = Field(pattern=_HEX64)
+    execution_authority_signer_sha256: str = Field(pattern=_HEX64)
     idempotency_key: str = Field(pattern=_IDEMPOTENCY)
     lease_token: str = Field(pattern=_LEASE_TOKEN, repr=False)
     lease_expires_at: str
@@ -306,14 +309,22 @@ class HostedTerminalEvent(_Closed):
     )
 
     @model_validator(mode="after")
-    def _verified_requires_exact_proof(self) -> "HostedTerminalEvent":
+    def _terminal_outcome_requires_exact_proof(self) -> "HostedTerminalEvent":
         has_proof = self.terminal_verification_artifact_bytes_base64 is not None
         if has_proof != (self.terminal_verification_artifact_sha256 is not None):
             raise ValueError("terminal verification binding is incomplete")
-        if self.outcome == "VERIFIED" and not has_proof:
-            raise ValueError("VERIFIED requires exact terminal verification")
-        if self.outcome != "VERIFIED" and has_proof:
-            raise ValueError("non-VERIFIED callback cannot carry a success proof")
+        if self.outcome in {"VERIFIED", "HALTED_BEFORE_EFFECT"} and not has_proof:
+            raise ValueError(f"{self.outcome} requires exact terminal verification")
+        if (
+            self.outcome
+            not in {
+                "VERIFIED",
+                "HALTED_BEFORE_EFFECT",
+                "RECONCILIATION_REQUIRED",
+            }
+            and has_proof
+        ):
+            raise ValueError("terminal callback outcome cannot carry a v2 proof")
         if has_proof:
             assert self.terminal_verification_artifact_bytes_base64 is not None
             assert self.terminal_verification_artifact_sha256 is not None
@@ -339,6 +350,8 @@ class HostedTerminalEvent(_Closed):
                 or proof.payload.run_report_object_sha256 != self.report_sha256
             ):
                 raise ValueError("terminal verification names a different run report")
+            if proof.payload.run_receipt.transaction_outcome != self.outcome:
+                raise ValueError("terminal verification names a different outcome")
         return self
 
 
@@ -355,14 +368,24 @@ class HostedRunResult(_Closed):
 
     @model_validator(mode="after")
     def _closed_terminal(self) -> "HostedRunResult":
-        if (self.outcome is TransactionOutcome.VERIFIED) != (
-            self.terminal_verification is not None
+        if (
+            self.outcome
+            in {
+                TransactionOutcome.VERIFIED,
+                TransactionOutcome.HALTED_BEFORE_EFFECT,
+            }
+            and self.terminal_verification is None
         ):
-            raise ValueError("only a terminally verified result can be VERIFIED")
-        if self.uncertain_delivery and self.outcome not in {
-            TransactionOutcome.RECONCILIATION_REQUIRED,
+            raise ValueError("closed terminal outcome requires a signed v2 proof")
+        if self.terminal_verification is not None and self.outcome not in {
             TransactionOutcome.VERIFIED,
+            TransactionOutcome.HALTED_BEFORE_EFFECT,
+            TransactionOutcome.RECONCILIATION_REQUIRED,
         }:
+            raise ValueError("terminal outcome cannot carry a signed v2 proof")
+        if self.uncertain_delivery != (
+            self.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
+        ):
             raise ValueError("uncertain delivery has an invalid terminal outcome")
         if self.terminal_verification is not None and (
             self.terminal_verification.payload.run_id != self.run_id
@@ -370,8 +393,12 @@ class HostedRunResult(_Closed):
             != self.report_sha256
             or self.terminal_verification.payload.run_report_object_sha256
             != self.report_sha256
+            or self.terminal_verification.payload.run_receipt.transaction_outcome
+            != self.outcome.value
         ):
-            raise ValueError("terminal verification names a different run report")
+            raise ValueError(
+                "terminal verification names a different run report or outcome"
+            )
         return self
 
 
@@ -1171,8 +1198,13 @@ class HostedRunnerAdapter:
         ):
             raise ValueError("run report differs from retained governed inputs")
 
-        chain = DurableAuthority(run_dir, store).production_delivery_permit_chain()
-        first = chain.entries[0]
+        prepared = prepare_production_terminal_evidence(report)
+        chain = DurableAuthority(run_dir, store).production_delivery_permit_chain(
+            allow_empty=(
+                prepared.transaction_outcome is TransactionOutcome.HALTED_BEFORE_EFFECT
+            )
+        )
+        first = chain.entries[0] if chain.entries else None
         expected = qualification.expected
         runtime = expected.runtime_build_identity
         flow_run_id_sha256 = hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest()
@@ -1182,9 +1214,13 @@ class HostedRunnerAdapter:
         runner_session_id_sha256 = hashlib.sha256(
             dispatch.runner_session_id.encode("utf-8")
         ).hexdigest()
-        if (
+        if first is not None and (
             first.run_id != dispatch.run_id
             or first.flow_run_id_sha256 != flow_run_id_sha256
+            or first.execution_authority_id != dispatch.execution_authority_id
+            or first.execution_authority_sha256 != dispatch.execution_authority_sha256
+            or first.authority_signer_sha256
+            != dispatch.execution_authority_signer_sha256
             or first.admission_artifact_sha256
             != qualification.qualification_admission_sha256
             or first.evidence_identity_sha256
@@ -1199,7 +1235,6 @@ class HostedRunnerAdapter:
         ):
             raise ValueError("retained delivery chain differs from admitted live state")
 
-        prepared = prepare_production_terminal_evidence(report)
         now = datetime.now(timezone.utc).replace(microsecond=0)
         now_text = now.isoformat().replace("+00:00", "Z")
         context = ProductionTerminalVerificationContext(
@@ -1228,9 +1263,11 @@ class HostedRunnerAdapter:
             qualification_signer_registry_revision=(
                 qualification.qualification_signer_registry.revision
             ),
-            execution_authority_id=first.execution_authority_id,
-            execution_authority_sha256=first.execution_authority_sha256,
-            execution_authority_signer_sha256=first.authority_signer_sha256,
+            execution_authority_id=dispatch.execution_authority_id,
+            execution_authority_sha256=dispatch.execution_authority_sha256,
+            execution_authority_signer_sha256=(
+                dispatch.execution_authority_signer_sha256
+            ),
             permit_chain=chain,
             run_report_object_version="sha256:" + prepared.report_sha256,
             verified_at=now_text,
@@ -1248,7 +1285,7 @@ class HostedRunnerAdapter:
             raise ValueError("terminal report changed during proof production")
         envelope_bytes = canonical_json(built.envelope)
         payload = built.envelope.payload
-        final = chain.entries[-1]
+        final = chain.entries[-1] if chain.entries else None
         live_expected = ProductionTerminalVerificationExpected(
             run_id=dispatch.run_id,
             flow_run_id_sha256=flow_run_id_sha256,
@@ -1277,13 +1314,19 @@ class HostedRunnerAdapter:
             qualification_signer_registry_revision=(
                 qualification.qualification_signer_registry.revision
             ),
-            execution_authority_id=first.execution_authority_id,
-            execution_authority_sha256=first.execution_authority_sha256,
-            execution_authority_signer_sha256=first.authority_signer_sha256,
+            execution_authority_id=dispatch.execution_authority_id,
+            execution_authority_sha256=dispatch.execution_authority_sha256,
+            execution_authority_signer_sha256=(
+                dispatch.execution_authority_signer_sha256
+            ),
             permit_chain_sha256=chain.permit_chain_sha256,
             permit_count=len(chain.entries),
-            final_authority_sequence=final.authority_sequence,
-            final_runtime_delivery_sequence=final.runtime_delivery_sequence,
+            final_authority_sequence=(
+                final.authority_sequence if final is not None else 0
+            ),
+            final_runtime_delivery_sequence=(
+                final.runtime_delivery_sequence if final is not None else 0
+            ),
             authenticated_runner_id_sha256=runner_id_sha256,
             authenticated_session_id_sha256=runner_session_id_sha256,
             acknowledged_one_use_claim_ids=tuple(
@@ -1624,8 +1667,12 @@ class HostedRunnerAdapter:
             proof: ProductionTerminalVerificationEnvelope | None = None
             if execution.terminal_verification is not None:
                 raise ValueError("managed child supplied an untrusted terminal proof")
-            if outcome is TransactionOutcome.VERIFIED:
-                if execution.returncode != 0:
+            if outcome in {
+                TransactionOutcome.VERIFIED,
+                TransactionOutcome.HALTED_BEFORE_EFFECT,
+                TransactionOutcome.RECONCILIATION_REQUIRED,
+            }:
+                if outcome is TransactionOutcome.VERIFIED and execution.returncode != 0:
                     raise ValueError("managed child exited unsuccessfully")
                 terminal_config = load_runner_config(runner_config, protected=True)
                 if self._protected_runner_origin(terminal_config) != configured_origin:
@@ -1653,11 +1700,20 @@ class HostedRunnerAdapter:
                     verified_params=params,
                     dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
                 )
+                if proof.payload.run_receipt.transaction_outcome != outcome.value:
+                    raise ValueError("terminal proof outcome differs from the report")
         except Exception:  # noqa: BLE001 - post-delivery terminalization fails closed
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             proof = None
-        if outcome is not TransactionOutcome.VERIFIED:
-            proof = None
+        if (
+            outcome
+            in {
+                TransactionOutcome.VERIFIED,
+                TransactionOutcome.HALTED_BEFORE_EFFECT,
+            }
+            and proof is None
+        ):
+            outcome = TransactionOutcome.RECONCILIATION_REQUIRED
         self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
         if report is None:
             events = tuple(
@@ -1681,10 +1737,7 @@ class HostedRunnerAdapter:
                     ),
                 )
             )
-        uncertain = outcome is TransactionOutcome.RECONCILIATION_REQUIRED or any(
-            result.delivery_uncertainty is not None
-            for result in (report.results if report is not None else ())
-        )
+        uncertain = outcome is TransactionOutcome.RECONCILIATION_REQUIRED
         return HostedRunResult(
             dispatch_id=parsed.dispatch_id,
             run_id=parsed.run_id,

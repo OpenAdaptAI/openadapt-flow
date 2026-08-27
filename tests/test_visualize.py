@@ -533,3 +533,28 @@ def test_projection_drops_values_outside_a_closed_vocabulary() -> None:
     assert out.postconditions == ["text_present"]
     assert out.badges == ["irreversible", "3 authorized roles"]
     assert "4417" not in projected.model_dump_json()
+
+
+def test_projection_refuses_an_out_of_vocabulary_effect_fact() -> None:
+    """A required governance field has no safe silent fallback: emitting the
+    unenumerated value risks leaking free text, and substituting the default
+    would understate risk. It fails closed instead."""
+    import pytest
+
+    from openadapt_flow.visualize.projection import ProjectionBoundaryError
+
+    source = build_program_graph(_mixed_workflow())
+    effect = next(n for n in source.nodes if n.effects).effects[0]
+    effect.risk = "irreversible"
+    projected = project_program_graph(source, PresentationProfile.REMOTE_SAFE)
+    assert (
+        next(n for n in projected.nodes if n.effects).effects[0].risk == "irreversible"
+    )
+
+    effect.risk = "sort-of reversible, ask Acme"
+    with pytest.raises(ProjectionBoundaryError) as excinfo:
+        project_program_graph(source, PresentationProfile.REMOTE_SAFE)
+    assert "EffectInfo.risk" in str(excinfo.value)
+    # The rejected value is never echoed: an exception message travels into
+    # logs, and that value is the very thing suspected of carrying local data.
+    assert "Acme" not in str(excinfo.value)

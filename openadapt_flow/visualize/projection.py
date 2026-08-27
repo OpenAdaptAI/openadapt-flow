@@ -342,9 +342,37 @@ def _safe_halts(node: GraphNode) -> list[str]:
 
 
 def _in_vocabulary(value: Optional[str], vocabulary: frozenset[str]) -> Optional[str]:
-    """Return ``value`` when the closed vocabulary admits it, else ``None``."""
+    """Return ``value`` when the closed vocabulary admits it, else ``None``.
+
+    For an OPTIONAL field, dropping to ``None`` is truthful: the projection
+    states nothing rather than stating something unenumerated.
+    """
 
     return value if value in vocabulary else None
+
+
+def _require_vocabulary(value: str, vocabulary: frozenset[str], field: str) -> str:
+    """Return ``value``, or raise if the closed vocabulary does not admit it.
+
+    Used for a REQUIRED governance field, where the two silent options are both
+    wrong: emitting the unenumerated value risks leaking free text, and
+    substituting a default misstates a system-of-record fact (substituting the
+    ``risk`` default would actively understate risk). An out-of-vocabulary value
+    here means the spec has drifted from this module, which is the condition
+    this module exists to catch, so it fails closed and loudly.
+    """
+
+    if value not in vocabulary:
+        # The rejected value is NOT echoed: it is the very thing suspected of
+        # carrying recorded data, and an exception message travels into logs
+        # and error reports.
+        raise ProjectionBoundaryError(
+            f"{field}: value is outside the closed vocabulary "
+            f"{sorted(vocabulary)}. Widen the vocabulary in "
+            "openadapt_flow/visualize/projection.py only after confirming the "
+            "new value can never carry recorded application data."
+        )
+    return value
 
 
 def _safe_badges(badges: list[str]) -> list[str]:
@@ -391,9 +419,9 @@ def _project_identity(identity: IdentityInfo) -> IdentityInfo:
 
 def _project_effect(effect: EffectInfo) -> EffectInfo:
     return EffectInfo(
-        kind=effect.kind if effect.kind in _EFFECT_KINDS else "record_written",
+        kind=_require_vocabulary(effect.kind, _EFFECT_KINDS, "EffectInfo.kind"),
         summary="Independent effect contract",
-        risk=effect.risk if effect.risk in _RISKS else "reversible",
+        risk=_require_vocabulary(effect.risk, _RISKS, "EffectInfo.risk"),
         needs_operator_confirmation=effect.needs_operator_confirmation,
     )
 

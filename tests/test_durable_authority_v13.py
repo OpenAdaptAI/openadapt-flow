@@ -524,6 +524,8 @@ def test_v2_permit_remains_pending_until_signed_receipt_commits_edge(
         authority.before_initial_delivery(manifest)
     with pytest.raises(DurableAuthorityBusy, match="remains uncertain"):
         authority.production_delivery_permit_chain()
+    with pytest.raises(DurableAuthorityBusy, match="remains uncertain"):
+        authority.production_delivery_permit_chain(allow_empty=True)
 
     entry = authority.acknowledge_remote_delivery(manifest, permit)
 
@@ -533,6 +535,23 @@ def test_v2_permit_remains_pending_until_signed_receipt_commits_edge(
     assert entry.input_edge_sequence == 1
     assert entry.authority_sequence == 0
     assert entry.runtime_delivery_sequence == 0
+
+
+def test_pre_actuation_terminal_can_retain_an_empty_delivery_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, authority = _remote_initial_authority(
+        tmp_path,
+        monkeypatch,
+        _issued_permit_transport("unused", "4" * 64),
+    )
+
+    chain = authority.production_delivery_permit_chain(allow_empty=True)
+
+    assert chain.entries == ()
+    assert authority.validate(manifest).delivery_sequence == 0
+    with pytest.raises(DurableAuthorityBusy, match="unavailable"):
+        authority.production_delivery_permit_chain()
 
 
 def test_remote_permit_refuses_a_different_hosted_dispatch_session(

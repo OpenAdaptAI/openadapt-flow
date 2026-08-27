@@ -1,9 +1,9 @@
 """Production terminal-verification v2 contracts and producer.
 
-Flow builds one success-only artifact after it revalidates a complete VERIFIED
-report, run receipt, signed permit chain, and class-separated evidence. The
-acceptor must reconstruct every value from immutable storage before it admits
-the result as Production success.
+Flow builds one signed terminal artifact after it revalidates a complete
+VERIFIED, HALTED_BEFORE_EFFECT, or RECONCILIATION_REQUIRED report. The
+acceptor reconstructs every value from immutable storage. Only a VERIFIED
+artifact can authorize a Production success or a billable result.
 """
 
 from __future__ import annotations
@@ -32,13 +32,31 @@ from pydantic import (
     model_validator,
 )
 
-from openadapt_flow.ir import PostconditionContractEvidence, RunReport
+from openadapt_flow.ir import (
+    EffectVerificationEvidence,
+    PostconditionContractEvidence,
+    RunReport,
+)
 from openadapt_flow.qualification_admission_v2 import (
     MAX_PERMIT_SNAPSHOT_AGE,
     ClosedSignedModel,
     canonical_json,
 )
-from openadapt_flow.receipt import ReceiptError, RunReceipt, build_receipt
+from openadapt_flow.receipt import (
+    ReceiptError,
+    RunReceipt,
+    _hour_utc,
+    _over_halt_count,
+    _receipt_builder_version,
+    build_receipt,
+)
+from openadapt_flow.transaction import (
+    TransactionOutcome,
+    _attempt_state,
+    _effect_absence_proven,
+    _is_consequential_result,
+    classify_transaction_outcome,
+)
 
 SCHEMA: Final[Literal["openadapt.production-terminal-verification/v2"]] = (
     "openadapt.production-terminal-verification/v2"
@@ -104,6 +122,7 @@ class PreparedProductionTerminalEvidence:
     execution_outcome: "ProductionExecutionOutcome"
     run_receipt: "ProductionRunReceipt"
     run_receipt_sha256: str
+    transaction_outcome: TransactionOutcome
     report: RunReport = dataclass_field(repr=False)
 
 
@@ -130,10 +149,10 @@ def evidence_runner_signer_sha256(public_key: bytes) -> str:
 
 
 class TerminalContractCounts(ClosedSignedModel):
-    authorization: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    identity: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    postcondition: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    effect: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    authorization: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    identity: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    postcondition: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    effect: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
 
 
 class ProductionExecutionOutcome(ClosedSignedModel):
@@ -142,11 +161,16 @@ class ProductionExecutionOutcome(ClosedSignedModel):
     version: Literal["openadapt.execution-outcome/v1"] = (
         "openadapt.execution-outcome/v1"
     )
-    outcome: Literal["VERIFIED"] = "VERIFIED"
+    outcome: Literal[
+        "VERIFIED",
+        "HALTED",
+        "FAILED",
+        "ROLLED_BACK",
+    ] = "VERIFIED"
     profile: Literal["standard", "regulated"]
-    production_eligible: Literal[True] = True
+    production_eligible: StrictBool = True
     qualification_evidence_only: Literal[False] = False
-    execution_completed: Literal[True] = True
+    execution_completed: StrictBool = True
     required_contracts: TerminalContractCounts
     passed_contracts: TerminalContractCounts
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
@@ -164,27 +188,33 @@ class ProductionExecutionOutcome(ClosedSignedModel):
             "model",
         ],
         ...,
-    ] = Field(min_length=4, max_length=7)
+    ] = Field(min_length=1, max_length=7)
     model_calls: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     external_network_calls: Literal["none", "observed"]
-    compensation_actions: Literal[0] = 0
+    compensation_actions: StrictInt = Field(default=0, ge=0, le=JS_MAX_SAFE_INTEGER)
 
     @model_validator(mode="after")
-    def _complete_verified_outcome(self) -> "ProductionExecutionOutcome":
-        if self.passed_contracts != self.required_contracts:
-            raise ValueError(
-                "terminal VERIFIED outcome lacks complete contract coverage"
-            )
+    def _complete_terminal_outcome(self) -> "ProductionExecutionOutcome":
+        required = self.required_contracts.model_dump(mode="python")
+        passed = self.passed_contracts.model_dump(mode="python")
+        if any(passed[key] > required[key] for key in required):
+            raise ValueError("terminal passed contract counts exceed required counts")
         if self.required_contracts.authorization != 1:
-            raise ValueError("terminal VERIFIED outcome requires one authorization")
+            raise ValueError("terminal outcome requires one authorization")
+        if self.passed_contracts.authorization != 1:
+            raise ValueError("terminal outcome requires one passed authorization")
         if len(self.postcondition_evidence) != self.required_contracts.postcondition:
             raise ValueError("terminal postcondition evidence cardinality is invalid")
+        if (
+            sum(item.verdict == "passed" for item in self.postcondition_evidence)
+            != self.passed_contracts.postcondition
+        ):
+            raise ValueError("terminal postcondition evidence count is invalid")
         if any(
-            item.verdict != "passed"
-            or item.workflow_contract_sha256 != self.workflow_contract_sha256
+            item.workflow_contract_sha256 != self.workflow_contract_sha256
             for item in self.postcondition_evidence
         ):
-            raise ValueError("terminal postcondition evidence is not fully verified")
+            raise ValueError("terminal postcondition evidence binding is invalid")
         keys = tuple(
             (item.result_index, item.contract_kind, item.contract_index)
             for item in self.postcondition_evidence
@@ -202,20 +232,47 @@ class ProductionExecutionOutcome(ClosedSignedModel):
             self.evidence_classes
         ) != len(set(self.evidence_classes)):
             raise ValueError("terminal evidence classes must be unique and ordered")
-        required_classes = {"authorization", "identity", "postcondition"}
-        if not required_classes.issubset(self.evidence_classes):
-            raise ValueError(
-                "terminal VERIFIED outcome lacks required evidence classes"
-            )
+        if "authorization" not in self.evidence_classes:
+            raise ValueError("terminal outcome lacks authorization evidence")
+        if (self.passed_contracts.identity > 0) != (
+            "identity" in self.evidence_classes
+        ):
+            raise ValueError("terminal identity evidence class is invalid")
+        if (self.passed_contracts.postcondition > 0) != (
+            "postcondition" in self.evidence_classes
+        ):
+            raise ValueError("terminal postcondition evidence class is invalid")
         effect_classes = {
             item for item in self.evidence_classes if item.startswith("effect_tier_")
         }
-        if len(effect_classes) != 1:
-            raise ValueError("terminal VERIFIED outcome requires one effect tier")
+        if (self.passed_contracts.effect > 0) != bool(effect_classes) or len(
+            effect_classes
+        ) > 1:
+            raise ValueError("terminal effect evidence classes are invalid")
         if (self.model_calls > 0) != ("model" in self.evidence_classes):
             raise ValueError("terminal model evidence does not match its call count")
         if self.model_calls > 0 and self.external_network_calls != "observed":
             raise ValueError("terminal model calls require observed network evidence")
+        if (self.compensation_actions > 0) != (self.outcome == "ROLLED_BACK"):
+            raise ValueError("terminal compensation evidence is invalid")
+        if self.outcome == "VERIFIED":
+            if self.passed_contracts != self.required_contracts:
+                raise ValueError(
+                    "terminal VERIFIED outcome lacks complete contract coverage"
+                )
+            if not self.production_eligible or not self.execution_completed:
+                raise ValueError("terminal VERIFIED outcome is not production complete")
+            required_classes = {"authorization", "identity", "postcondition"}
+            if not required_classes.issubset(self.evidence_classes):
+                raise ValueError(
+                    "terminal VERIFIED outcome lacks required evidence classes"
+                )
+            if len(effect_classes) != 1:
+                raise ValueError("terminal VERIFIED outcome requires one effect tier")
+        elif self.production_eligible:
+            raise ValueError("only a VERIFIED terminal outcome is production eligible")
+        elif self.outcome == "HALTED" and self.execution_completed:
+            raise ValueError("terminal HALTED outcome cannot claim completed execution")
         return self
 
     def artifact_sha256(self) -> str:
@@ -225,20 +282,25 @@ class ProductionExecutionOutcome(ClosedSignedModel):
 
 
 class ProductionRunReceipt(ClosedSignedModel):
-    """Cross-language integer projection of every current RunReceipt field."""
+    """Cross-language integer projection of one terminal report."""
 
     schema_version: Literal["openadapt.production-run-receipt/v1"] = (
         "openadapt.production-run-receipt/v1"
     )
-    source_schema_version: Literal["openadapt.run-receipt/v2"] = (
-        "openadapt.run-receipt/v2"
-    )
-    outcome: Literal["VERIFIED"]
-    transaction_outcome: Literal["VERIFIED"]
+    source_schema_version: Literal[
+        "openadapt.run-receipt/v2",
+        "openadapt.run-report/v1",
+    ]
+    outcome: Literal["VERIFIED", "HALTED", "FAILED", "ROLLED_BACK"]
+    transaction_outcome: Literal[
+        "VERIFIED",
+        "HALTED_BEFORE_EFFECT",
+        "RECONCILIATION_REQUIRED",
+    ]
     profile: Literal["standard", "regulated"]
-    production_eligible: Literal[True]
+    production_eligible: StrictBool
     steps_total: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    steps_ok: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    steps_ok: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     heals: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     model_calls: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     est_cost_microusd: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
@@ -266,8 +328,9 @@ class ProductionRunReceipt(ClosedSignedModel):
             "model",
         ],
         ...,
-    ] = Field(min_length=4, max_length=7)
+    ] = Field(min_length=1, max_length=7)
     effect_tier_reached: Literal[
+        "none",
         "independent_system",
         "independent_session",
         "persisted_state_reacquisition",
@@ -275,14 +338,14 @@ class ProductionRunReceipt(ClosedSignedModel):
     authorization_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
     authorization_confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
     identity_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    identity_confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    identity_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     postconditions_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    postconditions_confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    effects_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    effects_confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    identity_armed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    identity_applicable: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    over_halt_count: Literal[0]
+    postconditions_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    effects_required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    effects_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    identity_armed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    identity_applicable: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    over_halt_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     substrate: Literal["web", "windows", "macos", "linux", "rdp", "citrix"]
     provenance: Literal["production"]
     receipt_builder_version: str = Field(
@@ -310,14 +373,14 @@ class ProductionRunReceipt(ClosedSignedModel):
             ),
             ("effect", self.effects_required, self.effects_confirmed),
         ):
-            if required != confirmed:
-                raise ValueError(f"production receipt lacks complete {label} coverage")
+            if confirmed > required:
+                raise ValueError(f"terminal receipt exceeds required {label} coverage")
         if self.authorization_required != 1:
-            raise ValueError("production receipt requires one authorization")
-        if self.steps_ok != self.steps_total:
-            raise ValueError("production receipt requires all steps to succeed")
-        if self.identity_armed != self.identity_applicable:
-            raise ValueError("production receipt requires complete identity arming")
+            raise ValueError("terminal receipt requires one authorization")
+        if self.authorization_confirmed != 1:
+            raise ValueError("terminal receipt requires one passed authorization")
+        if self.steps_ok > self.steps_total:
+            raise ValueError("terminal receipt successful step count is invalid")
         if self.evidence_classes != tuple(sorted(self.evidence_classes)) or len(
             self.evidence_classes
         ) != len(set(self.evidence_classes)):
@@ -327,6 +390,67 @@ class ProductionRunReceipt(ClosedSignedModel):
             for value in self.rung_histogram.values()
         ):
             raise ValueError("production receipt rung counts are invalid")
+        effect_classes = {
+            item for item in self.evidence_classes if item.startswith("effect_tier_")
+        }
+        expected_effect_tier = {
+            "effect_tier_1": "independent_system",
+            "effect_tier_2": "independent_session",
+            "effect_tier_3": "persisted_state_reacquisition",
+        }
+        if self.effects_confirmed == 0:
+            if effect_classes or self.effect_tier_reached != "none":
+                raise ValueError("terminal receipt effect evidence is inconsistent")
+        elif (
+            len(effect_classes) != 1
+            or self.effect_tier_reached
+            != (expected_effect_tier[next(iter(effect_classes))])
+        ):
+            raise ValueError("terminal receipt effect tier is inconsistent")
+        if self.transaction_outcome == "VERIFIED":
+            if (
+                self.outcome != "VERIFIED"
+                or not self.production_eligible
+                or self.source_schema_version != "openadapt.run-receipt/v2"
+                or self.steps_ok != self.steps_total
+                or self.identity_armed != self.identity_applicable
+                or self.over_halt_count != 0
+                or self.effect_tier_reached == "none"
+            ):
+                raise ValueError("VERIFIED terminal receipt is incomplete")
+            for label, required, confirmed in (
+                (
+                    "authorization",
+                    self.authorization_required,
+                    self.authorization_confirmed,
+                ),
+                ("identity", self.identity_required, self.identity_confirmed),
+                (
+                    "postcondition",
+                    self.postconditions_required,
+                    self.postconditions_confirmed,
+                ),
+                ("effect", self.effects_required, self.effects_confirmed),
+            ):
+                if required != confirmed:
+                    raise ValueError(
+                        f"VERIFIED terminal receipt lacks complete {label} coverage"
+                    )
+        elif self.production_eligible:
+            raise ValueError(
+                "non-VERIFIED terminal receipt cannot be production eligible"
+            )
+        elif self.source_schema_version != "openadapt.run-report/v1":
+            raise ValueError(
+                "non-VERIFIED terminal receipt must derive from its report"
+            )
+        elif self.transaction_outcome == "HALTED_BEFORE_EFFECT":
+            if (
+                self.outcome != "HALTED"
+                or self.effects_confirmed != 0
+                or self.effect_tier_reached != "none"
+            ):
+                raise ValueError("HALTED terminal receipt does not prove no effect")
         return self
 
 
@@ -347,6 +471,7 @@ def project_production_run_receipt(receipt: RunReceipt) -> ProductionRunReceipt:
     # instead of a static cast; a value outside the production subset raises.
     return ProductionRunReceipt.model_validate(
         {
+            "source_schema_version": "openadapt.run-receipt/v2",
             "outcome": receipt.outcome,
             "transaction_outcome": receipt.transaction_outcome,
             "profile": receipt.profile,
@@ -383,10 +508,128 @@ def project_production_run_receipt(receipt: RunReceipt) -> ProductionRunReceipt:
     )
 
 
+def project_production_terminal_run_receipt(
+    report: RunReport,
+    *,
+    transaction_outcome: TransactionOutcome,
+) -> ProductionRunReceipt:
+    """Project a non-success terminal report without creating a success receipt."""
+
+    if transaction_outcome not in {
+        TransactionOutcome.HALTED_BEFORE_EFFECT,
+        TransactionOutcome.RECONCILIATION_REQUIRED,
+    }:
+        raise ProductionTerminalVerificationError(
+            "non-success terminal receipt has an invalid transaction outcome"
+        )
+    envelope = report.outcome_envelope
+    if (
+        envelope is None
+        or report.execution_outcome not in {"HALTED", "FAILED", "ROLLED_BACK"}
+        or report.execution_profile not in {"standard", "regulated"}
+        or report.production_eligible
+        or report.execution_completed is True
+        and report.execution_outcome == "HALTED"
+        or report.transaction_outcome != transaction_outcome.value
+        or report.transaction_billable is not False
+        or report.bundle_content_digest is None
+    ):
+        raise ProductionTerminalVerificationError(
+            "terminal report lacks its closed non-success transaction contract"
+        )
+    if not report.results:
+        raise ProductionTerminalVerificationError(
+            "terminal report contains no retained step result"
+        )
+    report_bytes = canonical_json(report.model_dump(mode="json"))
+    report_sha256 = hashlib.sha256(report_bytes).hexdigest()
+    try:
+        micros = Decimal(str(round(float(report.est_model_cost_usd), 6))) * Decimal(
+            1_000_000
+        )
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ProductionTerminalVerificationError(
+            "terminal report cost is not an exact integer microusd value"
+        ) from exc
+    if micros != micros.to_integral_value():
+        raise ProductionTerminalVerificationError(
+            "terminal report cost is not an exact integer microusd value"
+        )
+    required = envelope.required_contracts
+    passed = envelope.passed_contracts
+    confirmed_tiers = [
+        int(item.verification_tier)
+        for result in report.results
+        for item in result.effect_evidence
+        if item.final_verdict == "confirmed"
+        and item.observed_effect == "present"
+        and item.verification_tier is not None
+    ]
+    if int(passed.effect) > 0 and len(confirmed_tiers) != int(passed.effect):
+        raise ProductionTerminalVerificationError(
+            "terminal report lacks exact confirmed effect tiers"
+        )
+    effect_tier_reached = (
+        {
+            1: "independent_system",
+            2: "independent_session",
+            3: "persisted_state_reacquisition",
+        }.get(max(confirmed_tiers))
+        if confirmed_tiers
+        else "none"
+    )
+    if effect_tier_reached is None:
+        raise ProductionTerminalVerificationError(
+            "terminal report effect tier is outside the production range"
+        )
+    try:
+        return ProductionRunReceipt.model_validate(
+            {
+                "source_schema_version": "openadapt.run-report/v1",
+                "outcome": report.execution_outcome,
+                "transaction_outcome": transaction_outcome.value,
+                "profile": report.execution_profile,
+                "production_eligible": False,
+                "steps_total": len(report.results),
+                "steps_ok": sum(1 for result in report.results if result.ok),
+                "heals": int(report.heal_count),
+                "model_calls": int(report.model_calls),
+                "est_cost_microusd": int(micros),
+                "duration_ms": int(round(float(report.total_ms))),
+                "rung_histogram": dict(report.rung_counts),
+                "evidence_classes": tuple(sorted(envelope.evidence_classes)),
+                "effect_tier_reached": effect_tier_reached,
+                "authorization_required": int(required.authorization),
+                "authorization_confirmed": int(passed.authorization),
+                "identity_required": int(required.identity),
+                "identity_confirmed": int(passed.identity),
+                "postconditions_required": int(required.postcondition),
+                "postconditions_confirmed": int(passed.postcondition),
+                "effects_required": int(required.effect),
+                "effects_confirmed": int(passed.effect),
+                "identity_armed": int(report.identity_armed_steps),
+                "identity_applicable": int(report.identity_applicable_steps),
+                "over_halt_count": _over_halt_count(report),
+                "substrate": report.execution_target_kind,
+                "provenance": "production",
+                "receipt_builder_version": _receipt_builder_version(),
+                "external_network_calls": envelope.external_network_calls,
+                "bundle_digest": report.bundle_content_digest,
+                "source_receipt_digest": report_sha256,
+                "source_receipt_sha256": report_sha256,
+                "generated_at": _hour_utc(report.started_at),
+            }
+        )
+    except (TypeError, ValueError) as exc:
+        raise ProductionTerminalVerificationError(
+            "terminal report cannot produce a closed non-success receipt"
+        ) from exc
+
+
 def prepare_production_terminal_evidence(
     report: RunReport,
 ) -> PreparedProductionTerminalEvidence:
-    """Revalidate the exact report and build the only terminal-safe projections.
+    """Revalidate the exact report and build its terminal-safe projections.
 
     The returned report bytes are the bytes that the runner must store as the
     immutable report object. The production proof later binds the storage
@@ -404,12 +647,42 @@ def prepare_production_terminal_evidence(
         envelope is None
         or validated.run_id_sha256 is None
         or validated.bundle_content_digest is None
+        or validated.workflow_contract_sha256 is None
     ):
         raise ProductionTerminalVerificationError(
             "terminal report lacks its run or bundle binding"
         )
+    transaction_outcome = classify_transaction_outcome(validated)
+    if transaction_outcome not in {
+        TransactionOutcome.VERIFIED,
+        TransactionOutcome.HALTED_BEFORE_EFFECT,
+        TransactionOutcome.RECONCILIATION_REQUIRED,
+    }:
+        raise ProductionTerminalVerificationError(
+            "terminal report does not have an admitted terminal transaction outcome"
+        )
+    if (
+        validated.transaction_outcome != transaction_outcome.value
+        or validated.transaction_billable is not transaction_outcome.is_billable
+    ):
+        raise ProductionTerminalVerificationError(
+            "terminal report transaction fields differ from its retained evidence"
+        )
+    if transaction_outcome is TransactionOutcome.HALTED_BEFORE_EFFECT and any(
+        _is_consequential_result(result) and not _effect_absence_proven(result)
+        for result in validated.results
+    ):
+        raise ProductionTerminalVerificationError(
+            "terminal HALTED report lacks exact effect-absence evidence"
+        )
     try:
-        receipt = project_production_run_receipt(build_receipt(validated))
+        if transaction_outcome is TransactionOutcome.VERIFIED:
+            receipt = project_production_run_receipt(build_receipt(validated))
+        else:
+            receipt = project_production_terminal_run_receipt(
+                validated,
+                transaction_outcome=transaction_outcome,
+            )
         outcome = ProductionExecutionOutcome.model_validate(
             {
                 "version": envelope.version,
@@ -435,7 +708,7 @@ def prepare_production_terminal_evidence(
         )
     except (ReceiptError, ValueError) as exc:
         raise ProductionTerminalVerificationError(
-            "terminal report is not a complete production VERIFIED outcome"
+            "terminal report is not a complete production terminal outcome"
         ) from exc
     report_bytes = canonical_json(validated.model_dump(mode="json"))
     report_sha256 = hashlib.sha256(report_bytes).hexdigest()
@@ -448,6 +721,7 @@ def prepare_production_terminal_evidence(
         execution_outcome=outcome,
         run_receipt=receipt,
         run_receipt_sha256=receipt_sha256,
+        transaction_outcome=transaction_outcome,
         report=validated,
     )
 
@@ -538,7 +812,7 @@ class ProductionIdentitySignal(ClosedSignedModel):
 
 class ProductionIdentityResult(ClosedSignedModel):
     result_index: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
-    status: Literal["verified"]
+    status: Literal["verified", "mismatch", "abstain", "unreadable"]
     mode: Literal["context", "param", "structured", "pixel", "vlm", "signal_quorum"]
     signals: tuple[ProductionIdentitySignal, ...] = Field(max_length=32)
 
@@ -559,17 +833,17 @@ class ProductionIdentityEvidenceManifest(ClosedSignedModel):
     )
     identity_contract_sha256: str = Field(pattern=_SHA256_RE)
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
-    required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    results: tuple[ProductionIdentityResult, ...] = Field(
-        min_length=1, max_length=10_000
-    )
+    required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    results: tuple[ProductionIdentityResult, ...] = Field(max_length=10_000)
     manifest_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
     def _digest(self) -> "ProductionIdentityEvidenceManifest":
-        if self.required != self.confirmed or len(self.results) != self.required:
-            raise ValueError("production identity evidence coverage is incomplete")
+        if self.confirmed > self.required or len(self.results) > self.required:
+            raise ValueError("production identity evidence coverage is invalid")
+        if sum(item.status == "verified" for item in self.results) != self.confirmed:
+            raise ValueError("production identity confirmed count is invalid")
         indices = tuple(item.result_index for item in self.results)
         if indices != tuple(sorted(indices)) or len(indices) != len(set(indices)):
             raise ValueError("production identity evidence results are invalid")
@@ -586,23 +860,22 @@ class ProductionPostconditionEvidenceManifest(ClosedSignedModel):
         "openadapt.production-postcondition-evidence/v1"
     )
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
-    required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    records: tuple[PostconditionContractEvidence, ...] = Field(
-        min_length=1, max_length=10_000
-    )
+    required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    records: tuple[PostconditionContractEvidence, ...] = Field(max_length=10_000)
     manifest_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
     def _digest(self) -> "ProductionPostconditionEvidenceManifest":
-        if self.required != self.confirmed or len(self.records) != self.required:
-            raise ValueError("production postcondition evidence coverage is incomplete")
+        if self.confirmed > self.required or len(self.records) != self.required:
+            raise ValueError("production postcondition evidence coverage is invalid")
         if any(
-            item.verdict != "passed"
-            or item.workflow_contract_sha256 != self.workflow_contract_sha256
+            item.workflow_contract_sha256 != self.workflow_contract_sha256
             for item in self.records
         ):
             raise ValueError("production postcondition evidence is invalid")
+        if sum(item.verdict == "passed" for item in self.records) != self.confirmed:
+            raise ValueError("production postcondition confirmed count is invalid")
         expected = _evidence_manifest_sha256(
             b"openadapt-production-postcondition-evidence-v1\0", self
         )
@@ -624,23 +897,98 @@ class ProductionEffectEvidence(ClosedSignedModel):
     reconciliation_actions: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
 
 
+class ProductionTerminalEffectState(ClosedSignedModel):
+    """Remote-safe state for one effect contract on a non-success terminal."""
+
+    record_kind: Literal["terminal_effect_state"] = "terminal_effect_state"
+    result_index: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    effect_contract_hash: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    attempt_state: Literal[
+        "not_actuated",
+        "delivered",
+        "actuated_api",
+        "delivery_uncertain",
+    ]
+    observed_effect: Literal["present", "absent", "conflicting", "unknown"]
+    effect_verified: StrictBool
+    verification_performed: StrictBool
+    verifier_identity: str | None = Field(
+        default=None, pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+    verification_tier: StrictInt | None = Field(default=None, ge=1, le=3)
+    final_verdict: Literal["confirmed", "refuted", "indeterminate"] | None
+    resolved_delivery_uncertainty: StrictBool
+    absence_basis: Literal["not_actuated", "verifier_refuted", "none"]
+    reconciliation_completed: StrictBool
+    reconciliation_actions: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+
+    @model_validator(mode="after")
+    def _closed_terminal_effect_state(self) -> "ProductionTerminalEffectState":
+        if self.verification_performed != (self.final_verdict is not None):
+            raise ValueError("terminal effect verification fields are inconsistent")
+        if self.verification_performed != (self.verification_tier is not None):
+            raise ValueError("terminal effect verification tier is inconsistent")
+        if self.verification_performed != (self.verifier_identity is not None):
+            raise ValueError("terminal effect verifier identity is inconsistent")
+        if self.effect_verified != (
+            self.final_verdict == "confirmed" and self.observed_effect == "present"
+        ):
+            raise ValueError("terminal effect verified state is inconsistent")
+        if self.absence_basis == "not_actuated":
+            if (
+                self.attempt_state != "not_actuated"
+                or self.observed_effect != "absent"
+                or self.verification_performed
+                or self.resolved_delivery_uncertainty
+            ):
+                raise ValueError("terminal non-actuation evidence is invalid")
+        elif self.absence_basis == "verifier_refuted":
+            if (
+                self.attempt_state == "not_actuated"
+                or self.observed_effect != "absent"
+                or self.final_verdict != "refuted"
+                or not self.verification_performed
+            ):
+                raise ValueError("terminal verifier absence evidence is invalid")
+        elif self.attempt_state == "not_actuated" or (
+            self.final_verdict == "refuted" and self.observed_effect == "absent"
+        ):
+            raise ValueError("terminal absence evidence must name its basis")
+        if self.reconciliation_completed != (self.reconciliation_actions > 0):
+            raise ValueError("terminal effect reconciliation fields are inconsistent")
+        return self
+
+
 class ProductionEffectEvidenceManifest(ClosedSignedModel):
     schema_version: Literal["openadapt.production-effect-evidence/v1"] = (
         "openadapt.production-effect-evidence/v1"
     )
     effect_contract_sha256: str = Field(pattern=_SHA256_RE)
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
-    required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    records: tuple[ProductionEffectEvidence, ...] = Field(
-        min_length=1, max_length=10_000
+    required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    records: tuple[ProductionEffectEvidence | ProductionTerminalEffectState, ...] = (
+        Field(max_length=10_000)
     )
     manifest_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
     def _digest(self) -> "ProductionEffectEvidenceManifest":
-        if self.required != self.confirmed or len(self.records) != self.required:
-            raise ValueError("production effect evidence coverage is incomplete")
+        if self.confirmed > self.required or len(self.records) != self.required:
+            raise ValueError("production effect evidence coverage is invalid")
+        if all(isinstance(item, ProductionEffectEvidence) for item in self.records):
+            if self.required != self.confirmed:
+                raise ValueError("production effect success coverage is incomplete")
+        elif (
+            sum(
+                isinstance(item, ProductionTerminalEffectState)
+                and item.final_verdict == "confirmed"
+                and item.observed_effect == "present"
+                for item in self.records
+            )
+            != self.confirmed
+        ):
+            raise ValueError("production effect confirmed count is invalid")
         keys = tuple(
             (item.result_index, item.effect_contract_hash) for item in self.records
         )
@@ -1196,9 +1544,7 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
     schema_version: Literal["openadapt.production-delivery-permit-chain/v2"] = (
         PERMIT_CHAIN_SCHEMA
     )
-    entries: tuple[ProductionDeliveryPermit, ...] = Field(
-        min_length=1, max_length=10_000
-    )
+    entries: tuple[ProductionDeliveryPermit, ...] = Field(max_length=10_000)
     permit_chain_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
@@ -1208,6 +1554,19 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
         # in-memory mutation cannot enter a trusted chain with a stale digest.
         for item in self.entries:
             ProductionDeliveryPermit.model_validate(item.model_dump(mode="json"))
+        expected = hashlib.sha256(
+            PERMIT_CHAIN_DOMAIN
+            + canonical_json(
+                {
+                    "schema_version": self.schema_version,
+                    "entries": [item.model_dump(mode="json") for item in self.entries],
+                }
+            )
+        ).hexdigest()
+        if self.permit_chain_sha256 != expected:
+            raise ValueError("delivery permit chain digest is invalid")
+        if not self.entries:
+            return self
         authority = self.entries[0].execution_authority_id
         authority_digest = self.entries[0].execution_authority_sha256
         admission_digest = self.entries[0].admission_artifact_sha256
@@ -1281,17 +1640,6 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
             for previous, current in zip(event_times, event_times[1:])
         ):
             raise ValueError("delivery permit chronology is invalid")
-        expected = hashlib.sha256(
-            PERMIT_CHAIN_DOMAIN
-            + canonical_json(
-                {
-                    "schema_version": self.schema_version,
-                    "entries": [item.model_dump(mode="json") for item in self.entries],
-                }
-            )
-        ).hexdigest()
-        if self.permit_chain_sha256 != expected:
-            raise ValueError("delivery permit chain digest is invalid")
         return self
 
     @classmethod
@@ -1410,24 +1758,108 @@ def build_production_evidence_manifests(
         confirmed=outcome.passed_contracts.postcondition,
         records=outcome.postcondition_evidence,
     )
-    effect_records: list[ProductionEffectEvidence] = []
+    effect_records: list[ProductionEffectEvidence | ProductionTerminalEffectState] = []
     for result_index, result in enumerate(report.results):
         if result.skipped or result.exception_handled:
             continue
-        for item in result.effect_evidence:
+        if prepared.transaction_outcome is TransactionOutcome.VERIFIED:
+            for effect_item in result.effect_evidence:
+                effect_records.append(
+                    ProductionEffectEvidence.model_validate(
+                        {
+                            "result_index": result_index,
+                            "effect_contract_hash": effect_item.effect_contract_hash,
+                            "verifier_identity": effect_item.verifier_identity,
+                            "verification_tier": effect_item.verification_tier,
+                            "final_verdict": effect_item.final_verdict,
+                            "observed_effect": effect_item.observed_effect,
+                            "reconciliation_completed": (
+                                effect_item.reconciliation_completed
+                            ),
+                            "reconciliation_actions": (
+                                effect_item.reconciliation_actions
+                            ),
+                        }
+                    )
+                )
+            continue
+        if not _is_consequential_result(result):
+            continue
+        evidence_by_hash: dict[str, list[EffectVerificationEvidence]] = {}
+        for effect_item in result.effect_evidence:
+            evidence_by_hash.setdefault(effect_item.effect_contract_hash, []).append(
+                effect_item
+            )
+        effect_hashes = tuple(sorted(set(result.effect_contract_hashes)))
+        if len(effect_hashes) != len(result.effect_contract_hashes):
+            raise ProductionTerminalVerificationError(
+                "terminal effect contract hashes are duplicated"
+            )
+        attempt_state = _attempt_state(result)
+        uncertainty_resolved = bool(
+            result.delivery_uncertainty is not None
+            and result.delivery_uncertainty.resolved_by_contract
+        )
+        for effect_hash in effect_hashes:
+            matches = evidence_by_hash.pop(effect_hash, [])
+            if len(matches) > 1:
+                raise ProductionTerminalVerificationError(
+                    "terminal effect evidence is duplicated"
+                )
+            terminal_item: EffectVerificationEvidence | None = (
+                matches[0] if matches else None
+            )
+            if terminal_item is None:
+                observed_effect = (
+                    "absent" if attempt_state == "not_actuated" else "unknown"
+                )
+                final_verdict = None
+                verification_tier = None
+                verifier_identity = None
+                reconciliation_completed = False
+                reconciliation_actions = 0
+                absence_basis = (
+                    "not_actuated" if attempt_state == "not_actuated" else "none"
+                )
+            else:
+                observed_effect = terminal_item.observed_effect
+                final_verdict = terminal_item.final_verdict
+                verification_tier = terminal_item.verification_tier
+                verifier_identity = terminal_item.verifier_identity
+                reconciliation_completed = terminal_item.reconciliation_completed
+                reconciliation_actions = terminal_item.reconciliation_actions
+                absence_basis = (
+                    "verifier_refuted"
+                    if terminal_item.final_verdict == "refuted"
+                    and terminal_item.observed_effect == "absent"
+                    else "none"
+                )
             effect_records.append(
-                ProductionEffectEvidence.model_validate(
+                ProductionTerminalEffectState.model_validate(
                     {
                         "result_index": result_index,
-                        "effect_contract_hash": item.effect_contract_hash,
-                        "verifier_identity": item.verifier_identity,
-                        "verification_tier": item.verification_tier,
-                        "final_verdict": item.final_verdict,
-                        "observed_effect": item.observed_effect,
-                        "reconciliation_completed": item.reconciliation_completed,
-                        "reconciliation_actions": item.reconciliation_actions,
+                        "effect_contract_hash": effect_hash,
+                        "attempt_state": attempt_state,
+                        "observed_effect": observed_effect,
+                        "effect_verified": bool(
+                            terminal_item is not None
+                            and terminal_item.final_verdict == "confirmed"
+                            and terminal_item.observed_effect == "present"
+                        ),
+                        "verification_performed": terminal_item is not None,
+                        "verifier_identity": verifier_identity,
+                        "verification_tier": verification_tier,
+                        "final_verdict": final_verdict,
+                        "resolved_delivery_uncertainty": uncertainty_resolved,
+                        "absence_basis": absence_basis,
+                        "reconciliation_completed": reconciliation_completed,
+                        "reconciliation_actions": reconciliation_actions,
                     }
                 )
+            )
+        if evidence_by_hash:
+            raise ProductionTerminalVerificationError(
+                "terminal effect evidence lacks a declared contract"
             )
     effect_records.sort(key=lambda item: (item.result_index, item.effect_contract_hash))
     effect = build_evidence_manifest(
@@ -1482,7 +1914,7 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
     execution_authority_sha256: str = Field(pattern=_SHA256_RE)
     execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
     permit_chain: ProductionDeliveryPermitChain
-    permit_count: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
@@ -1498,7 +1930,7 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
     issued_at: str
 
     @model_validator(mode="after")
-    def _closed_terminal_success(self) -> "ProductionTerminalVerificationPayload":
+    def _closed_terminal_outcome(self) -> "ProductionTerminalVerificationPayload":
         if hashlib.sha256(self.run_id.encode("utf-8")).hexdigest() != (
             self.flow_run_id_sha256
         ):
@@ -1508,49 +1940,63 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
         if self.workflow_version_id != self.bundle_version_id:
             raise ValueError("terminal workflow and bundle versions must match")
         chain = self.permit_chain
-        final = chain.entries[-1]
-        if (
-            self.execution_authority_id,
-            self.execution_authority_sha256,
-            self.execution_authority_signer_sha256,
-            self.admission_artifact_sha256,
-        ) != (
-            final.execution_authority_id,
-            final.execution_authority_sha256,
-            final.authority_signer_sha256,
-            final.admission_artifact_sha256,
-        ):
-            raise ValueError("terminal authority does not match its permit chain")
-        if (
-            self.run_id != final.run_id
-            or self.flow_run_id_sha256 != final.flow_run_id_sha256
-        ):
-            raise ValueError("terminal run identity does not match its permit chain")
-        if (
-            self.evidence_identity_sha256,
-            self.environment_digest,
-            self.qualification_signer_registry_sha256,
-            self.qualification_signer_registry_revision,
-        ) != (
-            final.evidence_identity_sha256,
-            final.environment_digest,
-            final.qualification_signer_registry_sha256,
-            final.qualification_signer_registry_revision,
-        ):
-            raise ValueError("terminal qualification state does not match its permits")
-        if (
-            self.permit_count,
-            self.final_authority_sequence,
-            self.final_runtime_delivery_sequence,
-        ) != (
-            len(chain.entries),
-            final.authority_sequence,
-            final.runtime_delivery_sequence,
-        ):
-            raise ValueError("terminal permit counts do not match the permit chain")
         receipt = self.run_receipt
         outcome = self.execution_outcome
         manifests = self.evidence_manifests
+        if chain.entries:
+            final = chain.entries[-1]
+            if (
+                self.execution_authority_id,
+                self.execution_authority_sha256,
+                self.execution_authority_signer_sha256,
+                self.admission_artifact_sha256,
+            ) != (
+                final.execution_authority_id,
+                final.execution_authority_sha256,
+                final.authority_signer_sha256,
+                final.admission_artifact_sha256,
+            ):
+                raise ValueError("terminal authority does not match its permit chain")
+            if (
+                self.run_id != final.run_id
+                or self.flow_run_id_sha256 != final.flow_run_id_sha256
+            ):
+                raise ValueError(
+                    "terminal run identity does not match its permit chain"
+                )
+            if (
+                self.evidence_identity_sha256,
+                self.environment_digest,
+                self.qualification_signer_registry_sha256,
+                self.qualification_signer_registry_revision,
+            ) != (
+                final.evidence_identity_sha256,
+                final.environment_digest,
+                final.qualification_signer_registry_sha256,
+                final.qualification_signer_registry_revision,
+            ):
+                raise ValueError(
+                    "terminal qualification state does not match its permits"
+                )
+            if (
+                self.permit_count,
+                self.final_authority_sequence,
+                self.final_runtime_delivery_sequence,
+            ) != (
+                len(chain.entries),
+                final.authority_sequence,
+                final.runtime_delivery_sequence,
+            ):
+                raise ValueError("terminal permit counts do not match the permit chain")
+        elif (
+            receipt.transaction_outcome != "HALTED_BEFORE_EFFECT"
+            or self.permit_count != 0
+            or self.final_authority_sequence != 0
+            or self.final_runtime_delivery_sequence != 0
+        ):
+            raise ValueError(
+                "only a HALTED_BEFORE_EFFECT terminal may use an empty permit chain"
+            )
         if (
             self.workflow_contract_sha256 != outcome.workflow_contract_sha256
             or self.execution_outcome_sha256 != outcome.artifact_sha256()
@@ -1622,17 +2068,56 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
             raise ValueError(
                 "terminal run receipt does not match its execution outcome"
             )
+        transaction_outcome = receipt.transaction_outcome
+        if transaction_outcome == "VERIFIED":
+            if (
+                outcome.outcome != "VERIFIED"
+                or not outcome.production_eligible
+                or not outcome.execution_completed
+                or not chain.entries
+            ):
+                raise ValueError("terminal VERIFIED proof is incomplete")
+        elif transaction_outcome == "HALTED_BEFORE_EFFECT":
+            if (
+                outcome.outcome != "HALTED"
+                or outcome.production_eligible
+                or outcome.execution_completed
+                or receipt.production_eligible
+                or any(
+                    not isinstance(item, ProductionTerminalEffectState)
+                    or item.absence_basis not in {"not_actuated", "verifier_refuted"}
+                    for item in manifests.effect.records
+                )
+            ):
+                raise ValueError("terminal HALTED proof lacks exact effect absence")
+        elif (
+            transaction_outcome != "RECONCILIATION_REQUIRED"
+            or outcome.outcome == "VERIFIED"
+            or outcome.production_eligible
+            or receipt.production_eligible
+            or not chain.entries
+        ):
+            raise ValueError("terminal reconciliation proof is invalid")
+        if transaction_outcome != "VERIFIED" and (
+            receipt.source_receipt_digest != self.run_report_sha256
+            or receipt.source_receipt_sha256 != self.run_report_sha256
+        ):
+            raise ValueError("terminal non-success receipt does not bind its report")
         verified = _parse_utc(self.verified_at, field="terminal verified_at")
         issued = _parse_utc(self.issued_at, field="terminal issued_at")
         if not verified <= issued <= verified + timedelta(minutes=5):
             raise ValueError("terminal proof issue time is invalid")
-        final_delivered = _parse_utc(final.delivered_at, field="permit delivered_at")
-        registry_expires = _parse_utc(
-            final.qualification_signer_registry_expires_at,
-            field="permit registry expires_at",
-        )
-        if not final_delivered <= verified < registry_expires:
-            raise ValueError("terminal verification is outside permit chronology")
+        if chain.entries:
+            final = chain.entries[-1]
+            final_delivered = _parse_utc(
+                final.delivered_at, field="permit delivered_at"
+            )
+            registry_expires = _parse_utc(
+                final.qualification_signer_registry_expires_at,
+                field="permit registry expires_at",
+            )
+            if not final_delivered <= verified < registry_expires:
+                raise ValueError("terminal verification is outside permit chronology")
         if self.run_report_object_sha256 != self.run_report_sha256:
             raise ValueError(
                 "terminal report object must contain the exact revalidated report bytes"
@@ -1734,14 +2219,12 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
     execution_authority_sha256: str = Field(pattern=_SHA256_RE)
     execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
     permit_chain_sha256: str = Field(pattern=_SHA256_RE)
-    permit_count: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     authenticated_runner_id_sha256: str = Field(pattern=_SHA256_RE)
     authenticated_session_id_sha256: str = Field(pattern=_SHA256_RE)
-    acknowledged_one_use_claim_ids: tuple[str, ...] = Field(
-        min_length=1, max_length=10_000
-    )
+    acknowledged_one_use_claim_ids: tuple[str, ...] = Field(max_length=10_000)
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
     execution_outcome_sha256: str = Field(pattern=_SHA256_RE)
     run_receipt_sha256: str = Field(pattern=_SHA256_RE)
@@ -1885,7 +2368,7 @@ def build_production_terminal_verification(
         execution_authority_sha256=context.execution_authority_sha256,
         permit_chain=context.permit_chain,
     )
-    final = context.permit_chain.entries[-1]
+    final = context.permit_chain.entries[-1] if context.permit_chain.entries else None
     payload = ProductionTerminalVerificationPayload(
         run_id=context.run_id,
         flow_run_id_sha256=prepared.flow_run_id_sha256,
@@ -1919,8 +2402,10 @@ def build_production_terminal_verification(
         execution_authority_signer_sha256=(context.execution_authority_signer_sha256),
         permit_chain=context.permit_chain,
         permit_count=len(context.permit_chain.entries),
-        final_authority_sequence=final.authority_sequence,
-        final_runtime_delivery_sequence=final.runtime_delivery_sequence,
+        final_authority_sequence=(final.authority_sequence if final is not None else 0),
+        final_runtime_delivery_sequence=(
+            final.runtime_delivery_sequence if final is not None else 0
+        ),
         workflow_contract_sha256=(prepared.execution_outcome.workflow_contract_sha256),
         execution_outcome=prepared.execution_outcome,
         execution_outcome_sha256=prepared.execution_outcome.artifact_sha256(),

@@ -34,6 +34,7 @@ from pydantic import (
 
 from openadapt_flow.ir import (
     EffectVerificationEvidence,
+    ManagedResultLossEvidence,
     PostconditionContractEvidence,
     RunReport,
 )
@@ -96,6 +97,18 @@ EXECUTION_AUTHORITY_DOMAIN: Final[bytes] = (
 EXECUTION_AUTHORITY_SCHEMA: Final[
     Literal["openadapt.production-execution-authority/v2"]
 ] = "openadapt.production-execution-authority/v2"
+RESULT_LOSS_CLOSURE_REQUEST_DOMAIN: Final[bytes] = (
+    b"openadapt.production-delivery-result-loss-closure-request.v2\0"
+)
+RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN: Final[bytes] = (
+    b"openadapt.production-delivery-result-loss-closure-payload.v2\0"
+)
+RESULT_LOSS_CLOSURE_PAYLOAD_SCHEMA: Final[
+    Literal["openadapt.production-delivery-result-loss-closure-payload/v2"]
+] = "openadapt.production-delivery-result-loss-closure-payload/v2"
+RESULT_LOSS_CLOSURE_ARTIFACT_SCHEMA: Final[
+    Literal["openadapt.production-delivery-result-loss-closure-artifact/v2"]
+] = "openadapt.production-delivery-result-loss-closure-artifact/v2"
 
 _SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
 _UUID_RE = re.compile(
@@ -178,7 +191,7 @@ class ProductionExecutionOutcome(ClosedSignedModel):
     passed_contracts: TerminalContractCounts
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
     postcondition_evidence: tuple[PostconditionContractEvidence, ...] = Field(
-        min_length=1, max_length=10_000
+        max_length=10_000
     )
     evidence_classes: tuple[
         Literal[
@@ -195,9 +208,15 @@ class ProductionExecutionOutcome(ClosedSignedModel):
     model_calls: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     external_network_calls: Literal["none", "observed"]
     compensation_actions: StrictInt = Field(default=0, ge=0, le=JS_MAX_SAFE_INTEGER)
+    managed_result_loss_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_RE,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def _complete_terminal_outcome(self) -> "ProductionExecutionOutcome":
+        result_loss = self.managed_result_loss_evidence_sha256 is not None
         required = self.required_contracts.model_dump(mode="python")
         passed = self.passed_contracts.model_dump(mode="python")
         if any(passed[key] > required[key] for key in required):
@@ -206,6 +225,8 @@ class ProductionExecutionOutcome(ClosedSignedModel):
             raise ValueError("terminal outcome requires one authorization")
         if self.passed_contracts.authorization != 1:
             raise ValueError("terminal outcome requires one passed authorization")
+        if not result_loss and not self.postcondition_evidence:
+            raise ValueError("ordinary terminal outcome requires a postcondition")
         if len(self.postcondition_evidence) != self.required_contracts.postcondition:
             raise ValueError("terminal postcondition evidence cardinality is invalid")
         if (
@@ -276,6 +297,22 @@ class ProductionExecutionOutcome(ClosedSignedModel):
             raise ValueError("only a VERIFIED terminal outcome is production eligible")
         elif self.outcome == "HALTED" and self.execution_completed:
             raise ValueError("terminal HALTED outcome cannot claim completed execution")
+        if result_loss and (
+            self.outcome != "HALTED"
+            or self.production_eligible
+            or self.execution_completed
+            or self.required_contracts
+            != TerminalContractCounts(
+                authorization=1,
+                identity=0,
+                postcondition=0,
+                effect=0,
+            )
+            or self.passed_contracts != self.required_contracts
+            or self.postcondition_evidence
+            or self.evidence_classes != ("authorization",)
+        ):
+            raise ValueError("managed result loss execution outcome is invalid")
         return self
 
     def artifact_sha256(self) -> str:
@@ -340,9 +377,9 @@ class ProductionRunReceipt(ClosedSignedModel):
     ]
     authorization_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
     authorization_confirmed: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
-    identity_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    identity_required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     identity_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
-    postconditions_required: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    postconditions_required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     postconditions_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     effects_required: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     effects_confirmed: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
@@ -359,9 +396,15 @@ class ProductionRunReceipt(ClosedSignedModel):
     source_receipt_digest: str = Field(pattern=_SHA256_RE)
     source_receipt_sha256: str = Field(pattern=_SHA256_RE)
     generated_at: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:00:00Z$")
+    managed_result_loss_evidence_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_RE,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def _closed_receipt(self) -> "ProductionRunReceipt":
+        result_loss = self.managed_result_loss_evidence_sha256 is not None
         for label, required, confirmed in (
             (
                 "authorization",
@@ -382,6 +425,12 @@ class ProductionRunReceipt(ClosedSignedModel):
             raise ValueError("terminal receipt requires one authorization")
         if self.authorization_confirmed != 1:
             raise ValueError("terminal receipt requires one passed authorization")
+        if not result_loss and (
+            self.identity_required < 1 or self.postconditions_required < 1
+        ):
+            raise ValueError(
+                "ordinary terminal receipt requires identity and postcondition contracts"
+            )
         if self.steps_ok > self.steps_total:
             raise ValueError("terminal receipt successful step count is invalid")
         if self.evidence_classes != tuple(sorted(self.evidence_classes)) or len(
@@ -454,6 +503,23 @@ class ProductionRunReceipt(ClosedSignedModel):
                 or self.effect_tier_reached != "none"
             ):
                 raise ValueError("HALTED terminal receipt does not prove no effect")
+        if result_loss and (
+            self.transaction_outcome != "RECONCILIATION_REQUIRED"
+            or self.outcome != "HALTED"
+            or self.production_eligible
+            or self.source_schema_version != "openadapt.run-report/v1"
+            or self.steps_total != 1
+            or self.steps_ok != 0
+            or self.identity_required != 0
+            or self.identity_confirmed != 0
+            or self.postconditions_required != 0
+            or self.postconditions_confirmed != 0
+            or self.effects_required != 0
+            or self.effects_confirmed != 0
+            or self.evidence_classes != ("authorization",)
+            or self.effect_tier_reached != "none"
+        ):
+            raise ValueError("managed result loss receipt is invalid")
         return self
 
 
@@ -621,6 +687,11 @@ def project_production_terminal_run_receipt(
                 "source_receipt_digest": report_sha256,
                 "source_receipt_sha256": report_sha256,
                 "generated_at": _hour_utc(report.started_at),
+                "managed_result_loss_evidence_sha256": (
+                    report.managed_result_loss.evidence_sha256
+                    if report.managed_result_loss is not None
+                    else None
+                ),
             }
         )
     except (TypeError, ValueError) as exc:
@@ -707,6 +778,11 @@ def prepare_production_terminal_evidence(
                 "model_calls": envelope.model_calls,
                 "external_network_calls": envelope.external_network_calls,
                 "compensation_actions": envelope.compensation_actions,
+                "managed_result_loss_evidence_sha256": (
+                    validated.managed_result_loss.evidence_sha256
+                    if validated.managed_result_loss is not None
+                    else None
+                ),
             }
         )
     except (ReceiptError, ValueError) as exc:
@@ -1309,6 +1385,149 @@ class ProductionDeliveryReceiptArtifact(ClosedSignedModel):
         return hashlib.sha256(self.canonical_bytes()).hexdigest()
 
 
+class ProductionDeliveryResultLossClosurePayload(ClosedSignedModel):
+    """Cloud authority fence for one managed child result loss."""
+
+    schema_version: Literal[
+        "openadapt.production-delivery-result-loss-closure-payload/v2"
+    ] = RESULT_LOSS_CLOSURE_PAYLOAD_SCHEMA
+    closure_id: str = Field(pattern=_UUID_RE)
+    closure_sequence: Literal[1] = 1
+    closure_request_sha256: str = Field(pattern=_SHA256_RE)
+    closed_at: str
+    result_loss_observed_at: str
+    receipt_absence_observed_at: str | None = None
+    tenant_id: str = Field(pattern=_UUID_RE)
+    run_id: str = Field(pattern=_UUID_RE)
+    flow_run_id_sha256: str = Field(pattern=_SHA256_RE)
+    dispatch_id: str = Field(pattern=_UUID_RE)
+    dispatch_session_id: str = Field(pattern=_UUID_RE)
+    managed_dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    idempotency_key_sha256: str = Field(pattern=_SHA256_RE)
+    authenticated_runner_id_sha256: str = Field(pattern=_SHA256_RE)
+    authenticated_session_id_sha256: str = Field(pattern=_SHA256_RE)
+    execution_authority_id: str = Field(pattern=_UUID_RE)
+    execution_authority_sha256: str = Field(pattern=_SHA256_RE)
+    execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
+    child_started_at: str
+    child_start_evidence_sha256: str = Field(pattern=_SHA256_RE)
+    run_store_identity_sha256: str = Field(pattern=_SHA256_RE)
+    permit_chain_sha256: str = Field(pattern=_SHA256_RE)
+    permit_count: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    acknowledged_permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    pending_permit_count: StrictInt = Field(ge=0, le=1)
+    pending_permit_artifact_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_RE,
+    )
+    run_request_sha256: str = Field(pattern=_SHA256_RE)
+    pending_action_request_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_RE,
+    )
+    final_input_edge_sequence: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    delivery_state: Literal["CLOSED_UNRESOLVED_RESULT_LOSS"] = (
+        "CLOSED_UNRESOLVED_RESULT_LOSS"
+    )
+    effect_absence_claimed: Literal[False] = False
+    not_received_claimed: Literal[False] = False
+    blind_retry_authorized: Literal[False] = False
+    actuation_replay_authorized: Literal[False] = False
+    new_permit_authorized: Literal[False] = False
+    delivery_acknowledgment_authorized: Literal[False] = False
+    terminal_callback_required: Literal[True] = True
+
+    @model_validator(mode="after")
+    def _closed_result_loss_fence(self) -> "ProductionDeliveryResultLossClosurePayload":
+        if hashlib.sha256(self.run_id.encode("utf-8")).hexdigest() != (
+            self.flow_run_id_sha256
+        ):
+            raise ValueError("result-loss closure run identity digest is invalid")
+        if self.permit_count != (
+            self.acknowledged_permit_count + self.pending_permit_count
+        ):
+            raise ValueError("result-loss closure permit counts are inconsistent")
+        has_pending = self.pending_permit_count == 1
+        if has_pending != (self.pending_permit_artifact_sha256 is not None):
+            raise ValueError("result-loss closure pending permit binding is incomplete")
+        if has_pending != (self.pending_action_request_sha256 is not None):
+            raise ValueError("result-loss closure pending action binding is incomplete")
+        if has_pending != (self.receipt_absence_observed_at is not None):
+            raise ValueError(
+                "result-loss closure receipt-absence binding is incomplete"
+            )
+        child_started = _parse_utc(
+            self.child_started_at,
+            field="result-loss closure child_started_at",
+        )
+        observed = _parse_utc(
+            self.result_loss_observed_at,
+            field="result-loss closure result_loss_observed_at",
+        )
+        closed = _parse_utc(self.closed_at, field="result-loss closure closed_at")
+        if not child_started <= observed <= closed:
+            raise ValueError("result-loss closure chronology is invalid")
+        if self.receipt_absence_observed_at is not None:
+            absence = _parse_utc(
+                self.receipt_absence_observed_at,
+                field="result-loss closure receipt_absence_observed_at",
+            )
+            if absence != observed:
+                raise ValueError(
+                    "result-loss closure receipt absence differs from observation"
+                )
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json(self)
+
+    def payload_sha256(self) -> str:
+        return hashlib.sha256(
+            RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN + self.canonical_bytes()
+        ).hexdigest()
+
+
+class ProductionDeliveryResultLossClosureArtifact(ClosedSignedModel):
+    schema_version: Literal[
+        "openadapt.production-delivery-result-loss-closure-artifact/v2"
+    ] = RESULT_LOSS_CLOSURE_ARTIFACT_SCHEMA
+    payload: ProductionDeliveryResultLossClosurePayload
+    payload_sha256: str = Field(pattern=_SHA256_RE)
+    signer: DeliveryAuthoritySigner
+    signature: str = Field(min_length=86, max_length=86)
+
+    @field_validator("signature")
+    @classmethod
+    def _canonical_signature(cls, value: str) -> str:
+        _decode_ed25519_signature(value, field="delivery result-loss closure")
+        return value
+
+    @model_validator(mode="after")
+    def _verify_artifact(self) -> "ProductionDeliveryResultLossClosureArtifact":
+        payload = ProductionDeliveryResultLossClosurePayload.model_validate(
+            self.payload.model_dump(mode="json")
+        )
+        if self.payload_sha256 != payload.payload_sha256():
+            raise ValueError("delivery result-loss closure payload digest is invalid")
+        if self.signer.signer_sha256() != payload.execution_authority_signer_sha256:
+            raise ValueError("delivery result-loss closure signer is invalid")
+        _verify_authority_signature(
+            self.signer,
+            self.signature,
+            RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN + payload.canonical_bytes(),
+            field="delivery result-loss closure",
+        )
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json(self)
+
+    def artifact_sha256(self) -> str:
+        return hashlib.sha256(self.canonical_bytes()).hexdigest()
+
+
 def _decode_ed25519_signature(value: str, *, field: str) -> bytes:
     try:
         decoded = urlsafe_b64decode(value + "==")
@@ -1375,6 +1594,26 @@ def sign_production_delivery_receipt(
         DELIVERY_RECEIPT_PAYLOAD_DOMAIN + payload.canonical_bytes()
     )
     return ProductionDeliveryReceiptArtifact(
+        payload=payload,
+        payload_sha256=payload.payload_sha256(),
+        signer=_authority_signer(private_key),
+        signature=urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+    )
+
+
+def sign_production_delivery_result_loss_closure(
+    payload: ProductionDeliveryResultLossClosurePayload,
+    private_key: Ed25519PrivateKey,
+) -> ProductionDeliveryResultLossClosureArtifact:
+    """Sign one monotonic result-loss closure with the delivery authority."""
+
+    payload = ProductionDeliveryResultLossClosurePayload.model_validate(
+        payload.model_dump(mode="json")
+    )
+    signature = private_key.sign(
+        RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN + payload.canonical_bytes()
+    )
+    return ProductionDeliveryResultLossClosureArtifact(
         payload=payload,
         payload_sha256=payload.payload_sha256(),
         signer=_authority_signer(private_key),
@@ -1819,6 +2058,153 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
         return cls(entries=entries, pending=pending, permit_chain_sha256=digest)
 
 
+def verify_production_delivery_result_loss_closure_binding(
+    artifact: ProductionDeliveryResultLossClosureArtifact,
+    *,
+    permit_chain: ProductionDeliveryPermitChain,
+    result_loss: ManagedResultLossEvidence,
+    tenant_id: str,
+    terminal_verified_at: str,
+) -> str:
+    """Verify one signed authority fence against the exact terminal snapshot."""
+
+    artifact = ProductionDeliveryResultLossClosureArtifact.model_validate(
+        artifact.model_dump(mode="json")
+    )
+    permit_chain = ProductionDeliveryPermitChain.model_validate(
+        permit_chain.model_dump(mode="json")
+    )
+    if not permit_chain.entries and permit_chain.pending is None:
+        raise ValueError("result-loss closure requires at least one permit")
+    payload = artifact.payload
+    all_permits: tuple[
+        ProductionDeliveryPermit | ProductionPendingDeliveryPermit, ...
+    ] = (
+        *permit_chain.entries,
+        *((permit_chain.pending,) if permit_chain.pending is not None else ()),
+    )
+    first = all_permits[0]
+    final = all_permits[-1]
+    final_acknowledged = permit_chain.entries[-1] if permit_chain.entries else None
+    pending = permit_chain.pending
+    expected_pending_digest = (
+        pending.permit_artifact_sha256 if pending is not None else None
+    )
+    expected_pending_action = pending.action_request_sha256 if pending else None
+    expected_receipt_absence = (
+        pending.receipt_absence_observed_at if pending is not None else None
+    )
+    if (
+        payload.tenant_id,
+        payload.run_id,
+        payload.flow_run_id_sha256,
+        payload.dispatch_id,
+        payload.dispatch_session_id,
+        payload.managed_dispatch_binding_sha256,
+        payload.idempotency_key_sha256,
+        payload.authenticated_runner_id_sha256,
+        payload.authenticated_session_id_sha256,
+        payload.execution_authority_id,
+        payload.execution_authority_sha256,
+        payload.execution_authority_signer_sha256,
+        payload.child_started_at,
+        payload.child_start_evidence_sha256,
+        payload.run_store_identity_sha256,
+    ) != (
+        tenant_id,
+        result_loss.run_id,
+        result_loss.flow_run_id_sha256,
+        result_loss.dispatch_id,
+        result_loss.dispatch_session_id,
+        result_loss.managed_dispatch_binding_sha256,
+        result_loss.idempotency_key_sha256,
+        result_loss.authenticated_runner_id_sha256,
+        result_loss.authenticated_session_id_sha256,
+        result_loss.execution_authority_id,
+        result_loss.execution_authority_sha256,
+        result_loss.execution_authority_signer_sha256,
+        result_loss.child_started_at,
+        result_loss.child_start_evidence_sha256,
+        result_loss.run_store_identity_sha256,
+    ):
+        raise ValueError("result-loss closure identity binding is invalid")
+    if (
+        payload.permit_chain_sha256,
+        payload.permit_count,
+        payload.acknowledged_permit_count,
+        payload.pending_permit_count,
+        payload.pending_permit_artifact_sha256,
+        payload.run_request_sha256,
+        payload.pending_action_request_sha256,
+        payload.final_input_edge_sequence,
+        payload.final_authority_sequence,
+        payload.final_runtime_delivery_sequence,
+        payload.receipt_absence_observed_at,
+    ) != (
+        permit_chain.permit_chain_sha256,
+        len(all_permits),
+        len(permit_chain.entries),
+        1 if pending is not None else 0,
+        expected_pending_digest,
+        first.run_request_sha256,
+        expected_pending_action,
+        final.input_edge_sequence,
+        final.authority_sequence,
+        final_acknowledged.runtime_delivery_sequence
+        if final_acknowledged is not None
+        else 0,
+        expected_receipt_absence,
+    ):
+        raise ValueError("result-loss closure delivery snapshot is invalid")
+    if (
+        result_loss.delivery_result_loss_closure_artifact_sha256
+        != artifact.artifact_sha256()
+        or result_loss.observed_at != payload.result_loss_observed_at
+        or result_loss.pending_permit_artifact_sha256 != expected_pending_digest
+        or result_loss.run_request_sha256 != first.run_request_sha256
+        or result_loss.pending_action_request_sha256 != expected_pending_action
+    ):
+        raise ValueError("result-loss evidence differs from its authority closure")
+    child_started = _parse_utc(
+        result_loss.child_started_at,
+        field="managed child started_at",
+    )
+    first_issued = _parse_utc(first.issued_at, field="first permit issued_at")
+    observed = _parse_utc(
+        result_loss.observed_at,
+        field="managed result loss observed_at",
+    )
+    closed = _parse_utc(payload.closed_at, field="result-loss closure closed_at")
+    terminal_verified = _parse_utc(
+        terminal_verified_at,
+        field="terminal verified_at",
+    )
+    registry_expires = _parse_utc(
+        first.qualification_signer_registry_expires_at,
+        field="result-loss closure registry expires_at",
+    )
+    if not child_started <= first_issued <= observed <= closed <= terminal_verified:
+        raise ValueError("result-loss closure chronology is invalid")
+    if not terminal_verified < registry_expires:
+        raise ValueError("result-loss closure signer registry is expired")
+    if any(
+        _parse_utc(item.issued_at, field="permit issued_at") > closed
+        or _parse_utc(item.delivered_at, field="permit delivered_at") > closed
+        for item in permit_chain.entries
+    ):
+        raise ValueError("result-loss closure excludes an acknowledged permit")
+    if (
+        pending is not None
+        and _parse_utc(
+            pending.issued_at,
+            field="pending permit issued_at",
+        )
+        > observed
+    ):
+        raise ValueError("result-loss closure pending permit chronology is invalid")
+    return artifact.artifact_sha256()
+
+
 def build_production_evidence_manifests(
     prepared: PreparedProductionTerminalEvidence,
     *,
@@ -2091,6 +2477,16 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
     run_report_object_version: str = Field(pattern=_ID_RE)
     run_report_object_sha256: str = Field(pattern=_SHA256_RE)
     evidence_manifests: ProductionEvidenceManifests
+    managed_result_loss: ManagedResultLossEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    delivery_result_loss_closure: ProductionDeliveryResultLossClosureArtifact | None = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+        )
+    )
     verified_at: str
     issued_at: str
 
@@ -2243,6 +2639,55 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 "terminal run receipt does not match its execution outcome"
             )
         transaction_outcome = receipt.transaction_outcome
+        result_loss = self.managed_result_loss
+        result_loss_closure = self.delivery_result_loss_closure
+        if (result_loss is not None) != (
+            receipt.managed_result_loss_evidence_sha256 is not None
+        ):
+            raise ValueError("managed result loss receipt binding is incomplete")
+        if (result_loss is not None) != (result_loss_closure is not None):
+            raise ValueError("managed result loss authority closure is incomplete")
+        if result_loss is not None:
+            pending = chain.pending
+            if (
+                transaction_outcome != "RECONCILIATION_REQUIRED"
+                or self.permit_count < 1
+                or result_loss.evidence_sha256
+                != receipt.managed_result_loss_evidence_sha256
+                or result_loss.evidence_sha256
+                != outcome.managed_result_loss_evidence_sha256
+                or result_loss.run_id != self.run_id
+                or result_loss.flow_run_id_sha256 != self.flow_run_id_sha256
+                or result_loss.execution_authority_id != self.execution_authority_id
+                or result_loss.execution_authority_sha256
+                != self.execution_authority_sha256
+                or result_loss.execution_authority_signer_sha256
+                != self.execution_authority_signer_sha256
+                or result_loss.pending_permit_artifact_sha256
+                != (pending.permit_artifact_sha256 if pending is not None else None)
+                or result_loss.run_request_sha256
+                != (chain.pending or chain.entries[0]).run_request_sha256
+                or result_loss.pending_action_request_sha256
+                != (pending.action_request_sha256 if pending is not None else None)
+                or manifests.identity.required != 0
+                or manifests.identity.confirmed != 0
+                or manifests.identity.results
+                or manifests.postcondition.required != 0
+                or manifests.postcondition.confirmed != 0
+                or manifests.postcondition.records
+                or manifests.effect.required != 0
+                or manifests.effect.confirmed != 0
+                or manifests.effect.records
+            ):
+                raise ValueError("managed result loss terminal binding is invalid")
+            assert result_loss_closure is not None
+            verify_production_delivery_result_loss_closure_binding(
+                result_loss_closure,
+                permit_chain=chain,
+                result_loss=result_loss,
+                tenant_id=self.tenant_id,
+                terminal_verified_at=self.verified_at,
+            )
         if transaction_outcome == "VERIFIED":
             if (
                 outcome.outcome != "VERIFIED"
@@ -2274,7 +2719,9 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 or self.permit_count < 1
             ):
                 raise ValueError("terminal reconciliation proof is invalid")
-            if chain.pending is not None:
+            if result_loss is not None:
+                pass
+            elif chain.pending is not None:
                 uncertain_records = tuple(
                     item
                     for item in manifests.effect.records
@@ -2464,6 +2911,16 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
     run_report_object_version: str = Field(pattern=_ID_RE)
     run_report_object_sha256: str = Field(pattern=_SHA256_RE)
     evidence_manifests: ProductionEvidenceManifests
+    managed_result_loss: ManagedResultLossEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    delivery_result_loss_closure: ProductionDeliveryResultLossClosureArtifact | None = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+        )
+    )
 
     @model_validator(mode="after")
     def _closed_delivery_state(self) -> "ProductionTerminalVerificationExpected":
@@ -2482,6 +2939,12 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
             self.pending_permit_count == 1
         ):
             raise ValueError("live pending delivery binding is inconsistent")
+        if (self.managed_result_loss is not None) != (
+            self.delivery_result_loss_closure is not None
+        ):
+            raise ValueError("live managed result loss closure is incomplete")
+        if self.managed_result_loss is not None and self.permit_count < 1:
+            raise ValueError("live managed result loss lacks a retained permit")
         for claim_id in self.acknowledged_one_use_claim_ids:
             if _UUID_RE.fullmatch(claim_id) is None:
                 raise ValueError("live delivery claim id is invalid")
@@ -2518,6 +2981,12 @@ class ProductionTerminalVerificationContext(ClosedSignedModel):
     execution_authority_sha256: str = Field(pattern=_SHA256_RE)
     execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
     permit_chain: ProductionDeliveryPermitChain
+    delivery_result_loss_closure: ProductionDeliveryResultLossClosureArtifact | None = (
+        Field(
+            default=None,
+            exclude_if=lambda value: value is None,
+        )
+    )
     run_report_object_version: str = Field(pattern=_ID_RE)
     verified_at: str
     issued_at: str
@@ -2670,6 +3139,8 @@ def build_production_terminal_verification(
         run_report_object_version=context.run_report_object_version,
         run_report_object_sha256=prepared.report_sha256,
         evidence_manifests=manifests,
+        managed_result_loss=prepared.report.managed_result_loss,
+        delivery_result_loss_closure=context.delivery_result_loss_closure,
         verified_at=context.verified_at,
         issued_at=context.issued_at,
     )

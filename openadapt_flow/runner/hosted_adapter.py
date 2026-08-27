@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 from base64 import b64decode, b64encode
@@ -25,7 +26,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from openadapt_flow.ir import RunReport, Workflow
+from openadapt_flow.bundle_validation import compute_parameter_schema_digest
+from openadapt_flow.execution_profiles import stamp_execution_outcome
+from openadapt_flow.ir import (
+    ManagedResultLossEvidence,
+    RunReport,
+    StepResult,
+    Workflow,
+    managed_result_loss_idempotency_sha256,
+)
 from openadapt_flow.private_file import (
     PrivateFileAclError,
     windows_descriptor_has_private_acl,
@@ -35,6 +44,7 @@ from openadapt_flow.production_qualification import (
     ProductionQualificationGuard,
     _read_private_json,
 )
+from openadapt_flow.qualification import workflow_contract_sha256
 from openadapt_flow.qualification_admission_v2 import (
     QualificationAdmissionEnvelope,
     QualificationAdmissionExpected,
@@ -72,12 +82,16 @@ from openadapt_flow.runtime.durable.authority import (
 )
 from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 from openadapt_flow.terminal_verification_v2 import (
+    RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
+    ProductionDeliveryPermitChain,
+    ProductionDeliveryResultLossClosureArtifact,
     ProductionTerminalVerificationContext,
     ProductionTerminalVerificationEnvelope,
     ProductionTerminalVerificationExpected,
     build_production_terminal_verification,
     evidence_runner_signer_sha256,
     prepare_production_terminal_evidence,
+    verify_production_delivery_result_loss_closure_binding,
     verify_production_terminal_verification_from_report,
 )
 from openadapt_flow.transaction import (
@@ -95,6 +109,12 @@ _RUNNER_TOKEN = r"^oar_[a-f0-9]{64}$"
 _SAFE_ID = r"^[A-Za-z0-9][A-Za-z0-9._:@/+\-]{0,199}$"
 _UTC_SECONDS = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 _MAX_ARTIFACT_BYTES = 2 * 1024 * 1024
+_MAX_RESULT_LOSS_CHAIN_BYTES = 1024 * 1024
+_MAX_RESULT_LOSS_SNAPSHOT_BYTES = 3 * 1024 * 1024
+_CHILD_START_DOMAIN = b"OpenAdapt managed child start v1\0"
+_RUN_STORE_IDENTITY_DOMAIN = b"OpenAdapt managed run store identity v1\0"
+_RESULT_LOSS_SNAPSHOT_DOMAIN = b"OpenAdapt managed result loss snapshot v1\0"
+_MAX_TERMINAL_STATE_BYTES = 2 * (4 * ((_MAX_ARTIFACT_BYTES + 2) // 3)) + 4096
 
 # The current runner credential is never part of a request model. Desktop may
 # project it into this header only for POST /api/runners/register on the exact
@@ -283,6 +303,197 @@ class HostedRecoveryBinding(_Closed):
     authorization_id: str = Field(min_length=1, max_length=128)
 
 
+class ManagedChildStartEvidence(_Closed):
+    """Durable outer-runner boundary written before managed child entry."""
+
+    schema_version: Literal["openadapt.managed-child-start/v1"] = (
+        "openadapt.managed-child-start/v1"
+    )
+    started_at: str
+    dispatch_id: str = Field(pattern=_UUID)
+    dispatch_session_id: str = Field(pattern=_UUID)
+    run_id: str = Field(pattern=_UUID)
+    managed_dispatch_binding_sha256: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    authenticated_runner_id_sha256: str = Field(pattern=_HEX64)
+    authenticated_session_id_sha256: str = Field(pattern=_HEX64)
+    execution_authority_id: str = Field(pattern=_UUID)
+    execution_authority_sha256: str = Field(pattern=_HEX64)
+    execution_authority_signer_sha256: str = Field(pattern=_HEX64)
+    run_store_identity_sha256: str = Field(pattern=_HEX64)
+    marker_sha256: str = Field(pattern=_HEX64)
+
+    def computed_sha256(self) -> str:
+        payload = self.model_dump(mode="json")
+        payload.pop("marker_sha256", None)
+        return hashlib.sha256(_CHILD_START_DOMAIN + canonical_json(payload)).hexdigest()
+
+    @model_validator(mode="after")
+    def _closed_marker(self) -> "ManagedChildStartEvidence":
+        _utc_seconds(self.started_at, label="managed child start")
+        if self.marker_sha256 != self.computed_sha256():
+            raise ValueError("managed child start digest is invalid")
+        return self
+
+    @classmethod
+    def create(cls, **values: Any) -> "ManagedChildStartEvidence":
+        candidate = cls.model_construct(**values, marker_sha256="0" * 64)
+        payload = candidate.model_dump(mode="json")
+        payload["marker_sha256"] = candidate.computed_sha256()
+        return cls.model_validate(payload)
+
+
+class ProductionDeliveryResultLossClosureRequest(_Closed):
+    """Credential-free request for one monotonic hosted result-loss fence."""
+
+    schema_version: Literal[
+        "openadapt.production-delivery-result-loss-closure-request/v2"
+    ] = "openadapt.production-delivery-result-loss-closure-request/v2"
+    child_start_evidence: ManagedChildStartEvidence
+    expected_closure_sequence: Literal[0] = 0
+    result_loss_observed_at: str
+
+    @model_validator(mode="after")
+    def _closed_request(self) -> "ProductionDeliveryResultLossClosureRequest":
+        observed = _utc_seconds(
+            self.result_loss_observed_at,
+            label="result loss observation",
+        )
+        started = _utc_seconds(
+            self.child_start_evidence.started_at,
+            label="managed child start",
+        )
+        if started > observed:
+            raise ValueError("result-loss closure request chronology is invalid")
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json(self)
+
+    def request_sha256(self) -> str:
+        return hashlib.sha256(
+            RESULT_LOSS_CLOSURE_REQUEST_DOMAIN + self.canonical_bytes()
+        ).hexdigest()
+
+
+class ProductionDeliveryResultLossClosureResult(_Closed):
+    """Exact Cloud authority closure and its atomically frozen permit chain."""
+
+    schema_version: Literal[
+        "openadapt.production-delivery-result-loss-closure-result/v2"
+    ] = "openadapt.production-delivery-result-loss-closure-result/v2"
+    status: Literal["closed"] = "closed"
+    closure_artifact_bytes_base64: str = Field(max_length=2_796_204)
+    closure_artifact_sha256: str = Field(pattern=_HEX64)
+    permit_chain_bytes_base64: str = Field(max_length=2_796_204)
+    permit_chain_sha256: str = Field(pattern=_HEX64)
+
+    @staticmethod
+    def _decode_canonical(
+        value: str,
+        *,
+        label: str,
+        maximum_bytes: int = _MAX_ARTIFACT_BYTES,
+    ) -> bytes:
+        try:
+            raw = b64decode(value, validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} is not canonical base64") from exc
+        if (
+            not raw
+            or len(raw) > maximum_bytes
+            or b64encode(raw).decode("ascii") != value
+        ):
+            raise ValueError(f"{label} is not canonical base64")
+        return raw
+
+    def artifacts(
+        self,
+    ) -> tuple[
+        ProductionDeliveryResultLossClosureArtifact,
+        ProductionDeliveryPermitChain,
+    ]:
+        closure_raw = self._decode_canonical(
+            self.closure_artifact_bytes_base64,
+            label="result-loss closure artifact",
+        )
+        chain_raw = self._decode_canonical(
+            self.permit_chain_bytes_base64,
+            label="result-loss closure permit chain",
+            maximum_bytes=_MAX_RESULT_LOSS_CHAIN_BYTES,
+        )
+        try:
+            closure = ProductionDeliveryResultLossClosureArtifact.model_validate_json(
+                closure_raw
+            )
+            chain = ProductionDeliveryPermitChain.model_validate_json(chain_raw)
+        except ValueError as exc:
+            raise ValueError("result-loss closure response is invalid") from exc
+        if (
+            canonical_json(closure) != closure_raw
+            or canonical_json(chain) != chain_raw
+            or hashlib.sha256(closure_raw).hexdigest() != self.closure_artifact_sha256
+            or closure.artifact_sha256() != self.closure_artifact_sha256
+            or chain.permit_chain_sha256 != self.permit_chain_sha256
+            or closure.payload.permit_chain_sha256 != self.permit_chain_sha256
+        ):
+            raise ValueError("result-loss closure response binding is invalid")
+        return closure, chain
+
+    @model_validator(mode="after")
+    def _closed_result(self) -> "ProductionDeliveryResultLossClosureResult":
+        self.artifacts()
+        return self
+
+
+class ManagedResultLossSnapshot(_Closed):
+    """One local CAS record for the loss evidence and exact permit-chain view."""
+
+    schema_version: Literal["openadapt.managed-result-loss-snapshot/v1"] = (
+        "openadapt.managed-result-loss-snapshot/v1"
+    )
+    evidence: ManagedResultLossEvidence
+    permit_chain: ProductionDeliveryPermitChain
+    closure_artifact: ProductionDeliveryResultLossClosureArtifact
+    snapshot_sha256: str = Field(pattern=_HEX64)
+
+    def computed_sha256(self) -> str:
+        payload = self.model_dump(mode="json")
+        payload.pop("snapshot_sha256", None)
+        return hashlib.sha256(
+            _RESULT_LOSS_SNAPSHOT_DOMAIN + canonical_json(payload)
+        ).hexdigest()
+
+    @model_validator(mode="after")
+    def _closed_snapshot(self) -> "ManagedResultLossSnapshot":
+        if (
+            self.snapshot_sha256 != self.computed_sha256()
+            or self.evidence.delivery_result_loss_closure_artifact_sha256
+            != self.closure_artifact.artifact_sha256()
+            or self.closure_artifact.payload.permit_chain_sha256
+            != self.permit_chain.permit_chain_sha256
+        ):
+            raise ValueError("managed result loss snapshot is invalid")
+        return self
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        evidence: ManagedResultLossEvidence,
+        permit_chain: ProductionDeliveryPermitChain,
+        closure_artifact: ProductionDeliveryResultLossClosureArtifact,
+    ) -> "ManagedResultLossSnapshot":
+        candidate = cls.model_construct(
+            evidence=evidence,
+            permit_chain=permit_chain,
+            closure_artifact=closure_artifact,
+            snapshot_sha256="0" * 64,
+        )
+        payload = candidate.model_dump(mode="json")
+        payload["snapshot_sha256"] = candidate.computed_sha256()
+        return cls.model_validate(payload)
+
+
 class HostedTerminalEvent(_Closed):
     schema_version: Literal["openadapt.hosted-runner-terminal/v1"] = (
         "openadapt.hosted-runner-terminal/v1"
@@ -323,8 +534,6 @@ class HostedTerminalEvent(_Closed):
             and not has_proof
         ):
             raise ValueError(f"{self.outcome} requires exact terminal verification")
-        if self.uncertain_delivery != (self.outcome == "RECONCILIATION_REQUIRED"):
-            raise ValueError("terminal uncertainty conflicts with its outcome")
         if (
             self.outcome
             not in {
@@ -362,6 +571,11 @@ class HostedTerminalEvent(_Closed):
                 raise ValueError("terminal verification names a different run report")
             if proof.payload.run_receipt.transaction_outcome != self.outcome:
                 raise ValueError("terminal verification names a different outcome")
+            expected_uncertainty = proof.payload.pending_permit_count == 1
+        else:
+            expected_uncertainty = False
+        if self.uncertain_delivery != expected_uncertainty:
+            raise ValueError("terminal uncertainty conflicts with its signed proof")
         return self
 
 
@@ -394,10 +608,12 @@ class HostedRunResult(_Closed):
             TransactionOutcome.RECONCILIATION_REQUIRED,
         }:
             raise ValueError("terminal outcome cannot carry a signed v2 proof")
-        if self.uncertain_delivery != (
-            self.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
-        ):
-            raise ValueError("uncertain delivery has an invalid terminal outcome")
+        expected_uncertainty = bool(
+            self.terminal_verification is not None
+            and self.terminal_verification.payload.pending_permit_count == 1
+        )
+        if self.uncertain_delivery != expected_uncertainty:
+            raise ValueError("uncertain delivery conflicts with its signed proof")
         if self.terminal_verification is not None and (
             self.terminal_verification.payload.run_id != self.run_id
             or self.terminal_verification.payload.run_report_sha256
@@ -482,6 +698,13 @@ class HostedRunnerTransport(Protocol):
     def register(self, request: RegisterRequest) -> RegisterResponse: ...
 
     def poll(self, request: PollRequest) -> HostedDispatch | None: ...
+
+    def close_result_loss(
+        self,
+        run_id: str,
+        lease_token: str,
+        request: ProductionDeliveryResultLossClosureRequest,
+    ) -> ProductionDeliveryResultLossClosureResult: ...
 
     def callback(self, run_id: str, request: CallbackRequest) -> CallbackResponse: ...
 
@@ -1018,6 +1241,515 @@ class HostedRunnerAdapter:
             os.close(descriptor)
         return path
 
+    @staticmethod
+    def _write_private_bytes_atomic_exclusive(path: Path, raw: bytes) -> Path:
+        """Publish complete owner-only bytes once, without an overwrite window."""
+
+        temporary = path.with_name(
+            f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        )
+        try:
+            HostedRunnerAdapter._write_private_bytes(temporary, raw)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                raise
+            try:
+                directory = os.open(path.parent, os.O_RDONLY)
+            except OSError:
+                directory = None
+            if directory is not None:
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+        return path
+
+    @staticmethod
+    def _run_store_identity_sha256(run_dir: Path) -> str:
+        resolved = Path(run_dir).resolve(strict=True)
+        value = resolved.lstat()
+        payload = {
+            "canonical_run_dir": str(resolved),
+            "device": int(value.st_dev),
+            "inode": int(value.st_ino),
+        }
+        return hashlib.sha256(
+            _RUN_STORE_IDENTITY_DOMAIN + canonical_json(payload)
+        ).hexdigest()
+
+    def _write_child_start_evidence(
+        self,
+        *,
+        dispatch: HostedDispatch,
+        run_dir: Path,
+        dispatch_binding_sha256: str,
+    ) -> ManagedChildStartEvidence:
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        marker = ManagedChildStartEvidence.create(
+            started_at=now.isoformat().replace("+00:00", "Z"),
+            dispatch_id=dispatch.dispatch_id,
+            dispatch_session_id=dispatch.dispatch_session_id,
+            run_id=dispatch.run_id,
+            managed_dispatch_binding_sha256=dispatch_binding_sha256,
+            authenticated_runner_id_sha256=hashlib.sha256(
+                dispatch.runner_id.encode("utf-8")
+            ).hexdigest(),
+            authenticated_session_id_sha256=hashlib.sha256(
+                dispatch.runner_session_id.encode("utf-8")
+            ).hexdigest(),
+            execution_authority_id=dispatch.execution_authority_id,
+            execution_authority_sha256=dispatch.execution_authority_sha256,
+            execution_authority_signer_sha256=(
+                dispatch.execution_authority_signer_sha256
+            ),
+            run_store_identity_sha256=self._run_store_identity_sha256(run_dir),
+        )
+        self._write_private_bytes_atomic_exclusive(
+            run_dir / "managed-child-started.json", canonical_json(marker)
+        )
+        return marker
+
+    def _read_child_start_evidence(
+        self,
+        *,
+        dispatch: HostedDispatch,
+        run_dir: Path,
+        dispatch_binding_sha256: str,
+    ) -> ManagedChildStartEvidence:
+        raw = self._read_private_bytes(
+            run_dir / "managed-child-started.json",
+            maximum_bytes=64 * 1024,
+            label="managed child start evidence",
+        )
+        try:
+            marker = ManagedChildStartEvidence.model_validate_json(raw)
+        except ValueError as exc:
+            raise ValueError("managed child start evidence is invalid") from exc
+        expected = (
+            dispatch.dispatch_id,
+            dispatch.dispatch_session_id,
+            dispatch.run_id,
+            dispatch_binding_sha256,
+            hashlib.sha256(dispatch.runner_id.encode("utf-8")).hexdigest(),
+            hashlib.sha256(dispatch.runner_session_id.encode("utf-8")).hexdigest(),
+            dispatch.execution_authority_id,
+            dispatch.execution_authority_sha256,
+            dispatch.execution_authority_signer_sha256,
+            self._run_store_identity_sha256(run_dir),
+        )
+        actual = (
+            marker.dispatch_id,
+            marker.dispatch_session_id,
+            marker.run_id,
+            marker.managed_dispatch_binding_sha256,
+            marker.authenticated_runner_id_sha256,
+            marker.authenticated_session_id_sha256,
+            marker.execution_authority_id,
+            marker.execution_authority_sha256,
+            marker.execution_authority_signer_sha256,
+            marker.run_store_identity_sha256,
+        )
+        if canonical_json(marker) != raw or actual != expected:
+            raise ValueError("managed child start evidence changed")
+        return marker
+
+    @staticmethod
+    def _managed_result_loss_report(
+        *,
+        dispatch: HostedDispatch,
+        workflow: Workflow,
+        manifest: object,
+        marker: ManagedChildStartEvidence,
+        evidence: ManagedResultLossEvidence,
+        verified_params: dict[str, RuntimeParamScalar],
+        runtime_substrate: Literal["web", "windows", "macos", "linux", "rdp", "citrix"],
+    ) -> RunReport:
+        authorization = getattr(manifest, "governed_authorization", None)
+        if (
+            workflow.manifest is None
+            or authorization is None
+            or authorization.execution_profile
+            not in {
+                "standard",
+                "regulated",
+            }
+        ):
+            raise ValueError("managed result loss lacks retained authorization")
+        qualification_case_id_sha256 = (
+            hashlib.sha256(
+                authorization.qualification_case_id.encode("utf-8")
+            ).hexdigest()
+            if authorization.qualification_case_id is not None
+            else None
+        )
+        report = RunReport(
+            workflow_name=workflow.name,
+            started_at=marker.started_at,
+            execution_profile=authorization.execution_profile,
+            execution_outcome="HALTED",
+            production_eligible=False,
+            execution_completed=False,
+            transaction_outcome="RECONCILIATION_REQUIRED",
+            transaction_billable=False,
+            transaction_platform_fault=False,
+            managed_result_loss=evidence,
+            execution_target_kind=runtime_substrate,
+            recorded_surface=workflow.surface,
+            bundle_content_digest=workflow.manifest.content_digest,
+            workflow_contract_sha256=workflow_contract_sha256(workflow),
+            source_recording_sha256=workflow.manifest.provenance.source_recording_sha256,
+            parameter_schema_sha256=compute_parameter_schema_digest(workflow),
+            governed_authorization_id=authorization.authorization_id,
+            governed_approval_source=authorization.approval_source,
+            governed_authorization_created_at=authorization.created_at,
+            governed_policy_name=authorization.admitted_policy_name,
+            governed_policy_contract_sha256=(
+                authorization.admitted_policy_contract_sha256
+            ),
+            governed_minimum_effect_tier=authorization.minimum_effect_tier,
+            governed_qualified_effect_requirements=list(
+                authorization.qualified_effect_requirements
+            ),
+            governed_runtime_inputs_digest=authorization.runtime_inputs_digest,
+            run_id_sha256=evidence.flow_run_id_sha256,
+            governed_qualification_project_id=authorization.qualification_project_id,
+            governed_qualification_project_revision=(
+                authorization.qualification_project_revision
+            ),
+            governed_qualification_project_contract_sha256=(
+                authorization.qualification_project_contract_sha256
+            ),
+            governed_qualification_campaign_id_sha256=(
+                authorization.qualification_campaign_id_sha256
+            ),
+            governed_qualification_case_id_sha256=qualification_case_id_sha256,
+            governed_qualification_case_input_sha256=(
+                authorization.qualification_case_input_sha256
+            ),
+            governed_qualification_run_id_sha256=(
+                authorization.qualification_run_id_sha256
+            ),
+            governed_qualification_case_kind=authorization.qualification_case_kind,
+            governed_qualification_case_action_paths=dict(
+                authorization.qualification_case_action_paths
+            ),
+            governed_qualification_fault_driver_id=(
+                authorization.qualification_fault_driver_id
+            ),
+            governed_qualification_fault_driver_contract_sha256=(
+                authorization.qualification_fault_driver_contract_sha256
+            ),
+            governed_qualification_fault_driver_key_id=(
+                authorization.qualification_fault_driver_key_id
+            ),
+            governed_qualification_fault_step_id_sha256=(
+                authorization.qualification_fault_step_id_sha256
+            ),
+            governed_authorized_effect_contracts={
+                approval.step_id: list(approval.effect_contract_hashes)
+                for approval in authorization.unverified_write_approvals
+            },
+            required_identity_step_ids=list(authorization.required_identity_step_ids),
+            approved_unverified_effect_step_ids=[
+                approval.step_id
+                for approval in authorization.unverified_write_approvals
+            ],
+            params=verified_params,
+            results=[
+                StepResult(
+                    step_id="<managed-result-loss>",
+                    intent="retain managed child result loss",
+                    ok=False,
+                    safety_halt=True,
+                    failure_category="safety_halt",
+                    delivery_attempted=None,
+                )
+            ],
+            success=False,
+            model_calls=int(getattr(manifest, "model_calls", 0)),
+            # The exact Cloud authority interaction proves that network I/O
+            # occurred even though the child report is unavailable.
+            external_network_calls="observed",
+        )
+        stamp_execution_outcome(
+            report,
+            workflow,
+            authorization.execution_profile,
+        )
+        if (
+            report.execution_outcome != "HALTED"
+            or report.transaction_outcome != "RECONCILIATION_REQUIRED"
+        ):
+            raise ValueError("managed result loss classification changed")
+        return RunReport.model_validate_json(report.model_dump_json())
+
+    def _produce_managed_result_loss(
+        self,
+        *,
+        dispatch: HostedDispatch,
+        workflow: Workflow,
+        run_dir: Path,
+        qualification: ProductionQualificationAuthority,
+        private_key: Ed25519PrivateKey,
+        verified_params: dict[str, RuntimeParamScalar],
+        dispatch_binding_sha256: str,
+        closure_authority: HostedRunnerTransport,
+        loss_code: Literal[
+            "runner_exception",
+            "report_missing",
+            "recovered_after_restart",
+        ],
+    ) -> tuple[ProductionTerminalVerificationEnvelope, str, RunReport]:
+        """Seal one result-loss report without resolving or replaying delivery."""
+
+        store = CheckpointStore(run_dir)
+        manifest = store.read_manifest()
+        if manifest is None:
+            raise ValueError("managed result loss lacks a retained run manifest")
+        marker = self._read_child_start_evidence(
+            dispatch=dispatch,
+            run_dir=run_dir,
+            dispatch_binding_sha256=dispatch_binding_sha256,
+        )
+
+        def snapshot_from_closure(
+            *,
+            request: ProductionDeliveryResultLossClosureRequest,
+            retained_loss_code: Literal[
+                "runner_exception",
+                "report_missing",
+                "recovered_after_restart",
+            ],
+            closure_artifact: ProductionDeliveryResultLossClosureArtifact,
+            retained_chain: ProductionDeliveryPermitChain,
+        ) -> ManagedResultLossSnapshot:
+            chain = ProductionDeliveryPermitChain.model_validate(
+                retained_chain.model_dump(mode="json")
+            )
+            if not chain.entries and chain.pending is None:
+                raise ValueError("managed result loss closure returned no permit")
+            closure_artifact = (
+                ProductionDeliveryResultLossClosureArtifact.model_validate(
+                    closure_artifact.model_dump(mode="json")
+                )
+            )
+            closure = closure_artifact.payload
+            if (
+                closure.closure_request_sha256 != request.request_sha256()
+                or closure.result_loss_observed_at != request.result_loss_observed_at
+                or request.child_start_evidence != marker
+            ):
+                raise ValueError("managed result loss closure changed its request")
+            first = chain.entries[0] if chain.entries else chain.pending
+            assert first is not None
+            pending = chain.pending
+            evidence = ManagedResultLossEvidence.create(
+                loss_code=retained_loss_code,
+                child_started_at=marker.started_at,
+                child_start_evidence_sha256=marker.marker_sha256,
+                run_store_identity_sha256=marker.run_store_identity_sha256,
+                observed_at=request.result_loss_observed_at,
+                run_id=dispatch.run_id,
+                flow_run_id_sha256=hashlib.sha256(
+                    dispatch.run_id.encode("utf-8")
+                ).hexdigest(),
+                dispatch_id=dispatch.dispatch_id,
+                dispatch_session_id=dispatch.dispatch_session_id,
+                managed_dispatch_binding_sha256=dispatch_binding_sha256,
+                idempotency_key_sha256=managed_result_loss_idempotency_sha256(
+                    dispatch.idempotency_key
+                ),
+                authenticated_runner_id_sha256=hashlib.sha256(
+                    dispatch.runner_id.encode("utf-8")
+                ).hexdigest(),
+                authenticated_session_id_sha256=hashlib.sha256(
+                    dispatch.runner_session_id.encode("utf-8")
+                ).hexdigest(),
+                execution_authority_id=dispatch.execution_authority_id,
+                execution_authority_sha256=dispatch.execution_authority_sha256,
+                execution_authority_signer_sha256=(
+                    dispatch.execution_authority_signer_sha256
+                ),
+                delivery_result_loss_closure_artifact_sha256=(
+                    closure_artifact.artifact_sha256()
+                ),
+                pending_permit_artifact_sha256=(
+                    pending.permit_artifact_sha256 if pending is not None else None
+                ),
+                run_request_sha256=first.run_request_sha256,
+                pending_action_request_sha256=(
+                    pending.action_request_sha256 if pending is not None else None
+                ),
+            )
+            verify_production_delivery_result_loss_closure_binding(
+                closure_artifact,
+                permit_chain=chain,
+                result_loss=evidence,
+                tenant_id=dispatch.tenant_id,
+                terminal_verified_at=closure.closed_at,
+            )
+            return ManagedResultLossSnapshot.create(
+                evidence=evidence,
+                permit_chain=chain,
+                closure_artifact=closure_artifact,
+            )
+
+        request_path = run_dir / "managed-result-loss-closure-request.json"
+
+        def read_retained_request() -> ProductionDeliveryResultLossClosureRequest:
+            raw = self._read_private_bytes(
+                request_path,
+                maximum_bytes=64 * 1024,
+                label="managed result loss closure request",
+            )
+            try:
+                retained = (
+                    ProductionDeliveryResultLossClosureRequest.model_validate_json(raw)
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "managed result loss closure request is invalid"
+                ) from exc
+            if (
+                canonical_json(retained) != raw
+                or retained.child_start_evidence != marker
+            ):
+                raise ValueError("managed result loss closure request changed")
+            return retained
+
+        try:
+            request_path.lstat()
+        except FileNotFoundError:
+            observed_at = (
+                datetime.now(timezone.utc)
+                .replace(microsecond=0)
+                .isoformat()
+                .replace("+00:00", "Z")
+            )
+            request = ProductionDeliveryResultLossClosureRequest(
+                child_start_evidence=marker,
+                result_loss_observed_at=observed_at,
+            )
+            try:
+                self._write_private_bytes_atomic_exclusive(
+                    request_path,
+                    request.canonical_bytes(),
+                )
+            except FileExistsError:
+                request = read_retained_request()
+        else:
+            request = read_retained_request()
+
+        evidence_path = run_dir / "managed-result-loss.json"
+
+        def read_retained_snapshot() -> ManagedResultLossSnapshot:
+            retained_bytes = self._read_private_bytes(
+                evidence_path,
+                maximum_bytes=_MAX_RESULT_LOSS_SNAPSHOT_BYTES,
+                label="managed result loss snapshot",
+            )
+            try:
+                retained = ManagedResultLossSnapshot.model_validate_json(retained_bytes)
+            except ValueError as exc:
+                raise ValueError("managed result loss snapshot is invalid") from exc
+            if canonical_json(retained) != retained_bytes:
+                raise ValueError("managed result loss snapshot is not canonical")
+            expected_retained = snapshot_from_closure(
+                request=request,
+                retained_loss_code=retained.evidence.loss_code,
+                closure_artifact=retained.closure_artifact,
+                retained_chain=retained.permit_chain,
+            )
+            if retained != expected_retained:
+                raise ValueError("managed result loss snapshot changed")
+            return retained
+
+        try:
+            evidence_path.lstat()
+        except FileNotFoundError:
+            raw_result = closure_authority.close_result_loss(
+                dispatch.run_id,
+                dispatch.lease_token,
+                request,
+            )
+            result = ProductionDeliveryResultLossClosureResult.model_validate(
+                raw_result
+            )
+            closure_artifact, permit_chain = result.artifacts()
+            snapshot = snapshot_from_closure(
+                request=request,
+                retained_loss_code=loss_code,
+                closure_artifact=closure_artifact,
+                retained_chain=permit_chain,
+            )
+            try:
+                self._write_private_bytes_atomic_exclusive(
+                    evidence_path, canonical_json(snapshot)
+                )
+            except FileExistsError:
+                snapshot = read_retained_snapshot()
+        else:
+            snapshot = read_retained_snapshot()
+        evidence = snapshot.evidence
+        observed_at = evidence.observed_at
+        expected = qualification.expected
+        report = self._managed_result_loss_report(
+            dispatch=dispatch,
+            workflow=workflow,
+            manifest=manifest,
+            marker=marker,
+            evidence=evidence,
+            verified_params=verified_params,
+            runtime_substrate=expected.runtime_build_identity.substrate,
+        )
+        proof, digest = self._produce_terminal_verification(
+            dispatch=dispatch,
+            report=report,
+            run_dir=run_dir,
+            qualification=qualification,
+            private_key=private_key,
+            verified_params=verified_params,
+            dispatch_binding_sha256=dispatch_binding_sha256,
+            result_loss_observed_at=observed_at,
+            retained_permit_chain=snapshot.permit_chain,
+            retained_result_loss_closure=snapshot.closure_artifact,
+        )
+        return proof, digest, report
+
+    def _revalidate_terminal_authority(
+        self,
+        *,
+        dispatch: HostedDispatch,
+        runner_config: Path,
+        configured_origin: str,
+        initial_qualification: ProductionQualificationAuthority,
+        initial_deployment_bytes: bytes,
+    ) -> tuple[Ed25519PrivateKey, ProductionQualificationAuthority]:
+        """Revalidate all live signing authority after managed execution."""
+
+        terminal_config = load_runner_config(runner_config, protected=True)
+        if self._protected_runner_origin(terminal_config) != configured_origin:
+            raise ValueError("protected runner origin changed during execution")
+        self._verify_product_release(dispatch, terminal_config)
+        terminal_key = self._load_evidence_private_key(terminal_config)
+        terminal_qualification, terminal_deployment = self._verify_workflow_admission(
+            dispatch,
+            terminal_config,
+            evidence_private_key=terminal_key,
+        )
+        if (
+            terminal_qualification != initial_qualification
+            or terminal_deployment != initial_deployment_bytes
+        ):
+            raise ValueError("production admission changed during execution")
+        return terminal_key, terminal_qualification
+
     def _resolve_params(
         self,
         dispatch: HostedDispatch,
@@ -1126,6 +1858,11 @@ class HostedRunnerAdapter:
         private_key: Ed25519PrivateKey,
         verified_params: dict[str, RuntimeParamScalar],
         dispatch_binding_sha256: str,
+        result_loss_observed_at: str | None = None,
+        retained_permit_chain: ProductionDeliveryPermitChain | None = None,
+        retained_result_loss_closure: (
+            ProductionDeliveryResultLossClosureArtifact | None
+        ) = None,
     ) -> tuple[ProductionTerminalVerificationEnvelope, str]:
         """Build, retain, reread, and verify one exact terminal-v2 proof."""
 
@@ -1239,22 +1976,45 @@ class HostedRunnerAdapter:
 
         prepared = prepare_production_terminal_evidence(report)
         now = datetime.now(timezone.utc).replace(microsecond=0)
+        if retained_result_loss_closure is not None:
+            closure_time = _utc_seconds(
+                retained_result_loss_closure.payload.closed_at,
+                label="managed result loss authority closure",
+            )
+            now = max(now, closure_time)
         now_text = now.isoformat().replace("+00:00", "Z")
-        chain = DurableAuthority(run_dir, store).production_delivery_permit_chain(
-            allow_empty=(
-                prepared.transaction_outcome is TransactionOutcome.HALTED_BEFORE_EFFECT
-            ),
-            allow_pending=(
-                prepared.transaction_outcome
-                is TransactionOutcome.RECONCILIATION_REQUIRED
-            ),
-            receipt_absence_observed_at=(
-                now_text
-                if prepared.transaction_outcome
-                is TransactionOutcome.RECONCILIATION_REQUIRED
-                else None
-            ),
+        chain = (
+            ProductionDeliveryPermitChain.model_validate(
+                retained_permit_chain.model_dump(mode="json")
+            )
+            if retained_permit_chain is not None
+            else DurableAuthority(run_dir, store).production_delivery_permit_chain(
+                allow_empty=(
+                    prepared.transaction_outcome
+                    is TransactionOutcome.HALTED_BEFORE_EFFECT
+                ),
+                allow_pending=(
+                    prepared.transaction_outcome
+                    is TransactionOutcome.RECONCILIATION_REQUIRED
+                ),
+                receipt_absence_observed_at=(
+                    now_text
+                    if prepared.transaction_outcome
+                    is TransactionOutcome.RECONCILIATION_REQUIRED
+                    else None
+                ),
+            )
         )
+        if retained_permit_chain is not None and report.managed_result_loss is None:
+            raise ValueError("only managed result loss can use a retained permit chain")
+        if (report.managed_result_loss is not None) != all(
+            (
+                result_loss_observed_at is not None,
+                retained_permit_chain is not None,
+                retained_result_loss_closure is not None,
+            )
+        ):
+            raise ValueError("managed result loss observation binding is incomplete")
         first = chain.entries[0] if chain.entries else chain.pending
         expected = qualification.expected
         runtime = expected.runtime_build_identity
@@ -1289,6 +2049,43 @@ class HostedRunnerAdapter:
             != runner_session_id_sha256
         ):
             raise ValueError("retained delivery chain differs from admitted live state")
+        if report.managed_result_loss is not None:
+            loss = report.managed_result_loss
+            pending = chain.pending
+            first_permit = chain.entries[0] if chain.entries else pending
+            pending_digest = (
+                pending.permit_artifact_sha256 if pending is not None else None
+            )
+            if (
+                first_permit is None
+                or loss.observed_at != result_loss_observed_at
+                or loss.pending_permit_artifact_sha256 != pending_digest
+                or loss.run_request_sha256 != first_permit.run_request_sha256
+                or loss.pending_action_request_sha256
+                != (pending.action_request_sha256 if pending is not None else None)
+                or loss.dispatch_id != dispatch.dispatch_id
+                or loss.dispatch_session_id != dispatch.dispatch_session_id
+                or loss.managed_dispatch_binding_sha256
+                != dispatch.payload.dispatch_binding_sha256
+                or loss.idempotency_key_sha256
+                != managed_result_loss_idempotency_sha256(dispatch.idempotency_key)
+                or loss.authenticated_runner_id_sha256 != runner_id_sha256
+                or loss.authenticated_session_id_sha256 != runner_session_id_sha256
+                or loss.execution_authority_id != dispatch.execution_authority_id
+                or loss.execution_authority_sha256
+                != dispatch.execution_authority_sha256
+                or loss.execution_authority_signer_sha256
+                != dispatch.execution_authority_signer_sha256
+            ):
+                raise ValueError("managed result loss differs from retained live state")
+            assert retained_result_loss_closure is not None
+            verify_production_delivery_result_loss_closure_binding(
+                retained_result_loss_closure,
+                permit_chain=chain,
+                result_loss=loss,
+                tenant_id=dispatch.tenant_id,
+                terminal_verified_at=now_text,
+            )
         context = ProductionTerminalVerificationContext(
             run_id=dispatch.run_id,
             tenant_id=dispatch.tenant_id,
@@ -1321,6 +2118,7 @@ class HostedRunnerAdapter:
                 dispatch.execution_authority_signer_sha256
             ),
             permit_chain=chain,
+            delivery_result_loss_closure=retained_result_loss_closure,
             run_report_object_version="sha256:" + prepared.report_sha256,
             verified_at=now_text,
             issued_at=now_text,
@@ -1336,6 +2134,8 @@ class HostedRunnerAdapter:
         ):
             raise ValueError("terminal report changed during proof production")
         envelope_bytes = canonical_json(built.envelope)
+        if len(envelope_bytes) > _MAX_ARTIFACT_BYTES:
+            raise ValueError("terminal verification exceeds the callback size limit")
         payload = built.envelope.payload
         final = chain.entries[-1] if chain.entries else None
         final_authority = chain.pending or final
@@ -1399,6 +2199,8 @@ class HostedRunnerAdapter:
             run_report_object_version=context.run_report_object_version,
             run_report_object_sha256=built.report_sha256,
             evidence_manifests=payload.evidence_manifests,
+            managed_result_loss=payload.managed_result_loss,
+            delivery_result_loss_closure=payload.delivery_result_loss_closure,
         )
         artifact_sha256 = verify_production_terminal_verification_from_report(
             built.envelope,
@@ -1409,50 +2211,145 @@ class HostedRunnerAdapter:
         if artifact_sha256 != hashlib.sha256(envelope_bytes).hexdigest():
             raise ValueError("terminal verification artifact digest changed")
 
-        # Final-named evidence exists only after the complete in-memory proof
-        # passes. If storage or the required reread fails, remove only files
-        # created by this call so no failed terminalization leaves success
-        # artifacts behind.
+        # One exact CAS object owns the terminal state. Once it exists, a late
+        # child result or a concurrent terminalizer can only return the same
+        # bytes; it can never replace reconciliation with another outcome.
         report_path = run_dir / "production-terminal-report.json"
         envelope_path = run_dir / "production-terminal-verification.json"
-        written: list[Path] = []
+        state_path = run_dir / "production-terminal-state.json"
+        state_bytes = canonical_json(
+            {
+                "schema_version": "openadapt.production-terminal-state/v1",
+                "report_bytes_base64": b64encode(built.report_bytes).decode("ascii"),
+                "report_sha256": built.report_sha256,
+                "terminal_verification_bytes_base64": b64encode(envelope_bytes).decode(
+                    "ascii"
+                ),
+                "terminal_verification_sha256": artifact_sha256,
+            }
+        )
         try:
-            self._write_private_bytes(report_path, built.report_bytes)
-            written.append(report_path)
-            self._write_private_bytes(envelope_path, envelope_bytes)
-            written.append(envelope_path)
-            stored_report = self._read_private_bytes(
-                report_path,
-                maximum_bytes=_MAX_ARTIFACT_BYTES,
-                label="production terminal report",
+            self._write_private_bytes_atomic_exclusive(state_path, state_bytes)
+        except FileExistsError:
+            retained_state = self._read_private_bytes(
+                state_path,
+                maximum_bytes=_MAX_TERMINAL_STATE_BYTES,
+                label="production terminal state",
             )
-            stored_envelope = self._read_private_bytes(
-                envelope_path,
-                maximum_bytes=_MAX_ARTIFACT_BYTES,
-                label="production terminal verification",
-            )
-            if stored_report != built.report_bytes or stored_envelope != envelope_bytes:
-                raise ValueError("stored terminal evidence changed after write")
-            reread = ProductionTerminalVerificationEnvelope.model_validate_json(
-                stored_envelope
-            )
-            if canonical_json(reread) != stored_envelope:
-                raise ValueError("stored terminal verification is not canonical")
-            reread_sha256 = verify_production_terminal_verification_from_report(
-                reread,
-                report_bytes=stored_report,
-                expected=live_expected,
-                now=now,
-            )
-            if reread_sha256 != artifact_sha256:
-                raise ValueError("stored terminal verification digest changed")
-        except Exception:
-            for path in reversed(written):
+            if retained_state != state_bytes:
                 try:
-                    path.unlink()
-                except OSError:
-                    pass
-            raise
+                    retained_value = json.loads(retained_state.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ValueError("retained terminal state is invalid") from exc
+                expected_state_keys = {
+                    "schema_version",
+                    "report_bytes_base64",
+                    "report_sha256",
+                    "terminal_verification_bytes_base64",
+                    "terminal_verification_sha256",
+                }
+                if (
+                    not isinstance(retained_value, dict)
+                    or set(retained_value) != expected_state_keys
+                    or retained_value["schema_version"]
+                    != "openadapt.production-terminal-state/v1"
+                    or not all(
+                        isinstance(retained_value[field], str)
+                        for field in expected_state_keys - {"schema_version"}
+                    )
+                    or canonical_json(retained_value) != retained_state
+                ):
+                    raise ValueError("retained terminal state is invalid")
+                try:
+                    retained_report = b64decode(
+                        retained_value["report_bytes_base64"], validate=True
+                    )
+                    retained_envelope = b64decode(
+                        retained_value["terminal_verification_bytes_base64"],
+                        validate=True,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("retained terminal state is invalid") from exc
+                if (
+                    len(retained_report) > _MAX_ARTIFACT_BYTES
+                    or len(retained_envelope) > _MAX_ARTIFACT_BYTES
+                    or retained_report != built.report_bytes
+                    or hashlib.sha256(retained_report).hexdigest()
+                    != retained_value["report_sha256"]
+                    or hashlib.sha256(retained_envelope).hexdigest()
+                    != retained_value["terminal_verification_sha256"]
+                ):
+                    raise ValueError("a different terminal outcome is already sealed")
+                try:
+                    retained_proof = (
+                        ProductionTerminalVerificationEnvelope.model_validate_json(
+                            retained_envelope
+                        )
+                    )
+                except ValueError as exc:
+                    raise ValueError("retained terminal state is invalid") from exc
+                retained_sha256 = verify_production_terminal_verification_from_report(
+                    retained_proof,
+                    report_bytes=retained_report,
+                    expected=live_expected,
+                    now=now,
+                )
+                if (
+                    canonical_json(retained_proof) != retained_envelope
+                    or retained_sha256 != retained_value["terminal_verification_sha256"]
+                ):
+                    raise ValueError("retained terminal state is invalid")
+                state_bytes = retained_state
+                envelope_bytes = retained_envelope
+                artifact_sha256 = retained_sha256
+        for path, raw, label in (
+            (report_path, built.report_bytes, "production terminal report"),
+            (envelope_path, envelope_bytes, "production terminal verification"),
+        ):
+            try:
+                self._write_private_bytes_atomic_exclusive(path, raw)
+            except FileExistsError:
+                retained = self._read_private_bytes(
+                    path,
+                    maximum_bytes=_MAX_ARTIFACT_BYTES,
+                    label=label,
+                )
+                if retained != raw:
+                    raise ValueError("a different terminal artifact is already sealed")
+        stored_report = self._read_private_bytes(
+            report_path,
+            maximum_bytes=_MAX_ARTIFACT_BYTES,
+            label="production terminal report",
+        )
+        stored_envelope = self._read_private_bytes(
+            envelope_path,
+            maximum_bytes=_MAX_ARTIFACT_BYTES,
+            label="production terminal verification",
+        )
+        if stored_report != built.report_bytes or stored_envelope != envelope_bytes:
+            raise ValueError("stored terminal evidence changed after write")
+        reread = ProductionTerminalVerificationEnvelope.model_validate_json(
+            stored_envelope
+        )
+        if canonical_json(reread) != stored_envelope:
+            raise ValueError("stored terminal verification is not canonical")
+        reread_sha256 = verify_production_terminal_verification_from_report(
+            reread,
+            report_bytes=stored_report,
+            expected=live_expected,
+            now=now,
+        )
+        if reread_sha256 != artifact_sha256:
+            raise ValueError("stored terminal verification digest changed")
+        if (
+            self._read_private_bytes(
+                state_path,
+                maximum_bytes=_MAX_TERMINAL_STATE_BYTES,
+                label="production terminal state",
+            )
+            != state_bytes
+        ):
+            raise ValueError("stored terminal state changed")
         return reread, built.report_sha256
 
     @staticmethod
@@ -1519,6 +2416,113 @@ class HostedRunnerAdapter:
             raise ValueError("reconciliation code is invalid")
         raise RuntimeError("managed run requires signed terminal reconciliation")
 
+    def recover_uncertain_run(
+        self,
+        dispatch: HostedDispatch | Mapping[str, object],
+        *,
+        runner_config: Path,
+        run_dir: Path,
+        closure_authority: HostedRunnerTransport,
+    ) -> HostedRunResult:
+        """Return or create the one signed terminal for a lost managed result.
+
+        This path never invokes the managed child. It accepts only the exact
+        original dispatch, protected run store, live admissions, child-start
+        marker, and unresolved terminal permit.
+        """
+
+        parsed = HostedDispatch.model_validate(dispatch)
+        config = load_runner_config(runner_config, protected=True)
+        self._protected_runner_origin(config)
+        self._verify_product_release(parsed, config)
+        key = self._load_evidence_private_key(config)
+        qualification, deployment_bytes = self._verify_workflow_admission(
+            parsed,
+            config,
+            evidence_private_key=key,
+        )
+        params = self._resolve_params(parsed, config)
+        run_dir = Path(run_dir)
+        run_stat = run_dir.lstat()
+        if (
+            not stat.S_ISDIR(run_stat.st_mode)
+            or stat.S_ISLNK(run_stat.st_mode)
+            or (
+                os.name != "nt"
+                and (
+                    run_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(run_stat.st_mode) != 0o700
+                )
+            )
+        ):
+            raise ValueError("hosted recovery run directory is not protected")
+        profile_path = run_dir / "deployment.yaml"
+        if (
+            self._read_private_bytes(
+                profile_path,
+                maximum_bytes=1024 * 1024,
+                label="staged hosted deployment profile",
+            )
+            != deployment_bytes
+        ):
+            raise ValueError("staged hosted deployment profile changed")
+        staged_profiles = dict(config.profiles)
+        staged_profiles[parsed.payload.deployment_profile_id] = profile_path
+        verified = verify_dispatch(
+            parsed.payload,
+            replace(config, profiles=staged_profiles),
+            resolved_params=params,
+        )
+        if isinstance(verified, Refusal):
+            raise ValueError("hosted recovery dispatch no longer verifies")
+        self._read_child_start_evidence(
+            dispatch=parsed,
+            run_dir=run_dir,
+            dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+        )
+        reservation_key = f"{parsed.tenant_id}:{parsed.idempotency_key}"
+        reservation = self._ledger.lookup(reservation_key)
+        if reservation is None or reservation.get("run_id") != parsed.run_id:
+            raise ValueError("hosted recovery lacks the original reservation")
+
+        proof, report_digest, report = self._produce_managed_result_loss(
+            dispatch=parsed,
+            workflow=verified.workflow,
+            run_dir=run_dir,
+            qualification=qualification,
+            private_key=key,
+            verified_params=params,
+            dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+            closure_authority=closure_authority,
+            loss_code="recovered_after_restart",
+        )
+        outcome = TransactionOutcome.RECONCILIATION_REQUIRED
+        self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
+        events = tuple(
+            report_events(
+                report,
+                run_id=parsed.run_id,
+                workflow_id=parsed.workflow_id,
+                bundle_digest=parsed.payload.bundle.content_digest,
+                authorization_id=parsed.payload.authorization.authorization_id,
+                consequential_steps=verified.consequential_steps,
+                effect_covered_consequential_steps=(
+                    verified.effect_covered_consequential_steps
+                ),
+                terminal_outcome=outcome.value,
+            )
+        )
+        return HostedRunResult(
+            dispatch_id=parsed.dispatch_id,
+            run_id=parsed.run_id,
+            outcome=outcome,
+            evidence_batch=events,
+            terminal_verification=proof,
+            started=True,
+            uncertain_delivery=proof.payload.pending_permit_count == 1,
+            report_sha256=report_digest,
+        )
+
     def execute(
         self,
         dispatch: HostedDispatch | Mapping[str, object],
@@ -1526,10 +2530,12 @@ class HostedRunnerAdapter:
         runner_config: Path,
         run_dir: Path,
         authority: DeliveryAuthority,
+        closure_authority: HostedRunnerTransport | None = None,
     ) -> Union[HostedRunResult, HostedDispatchRefusal]:
         parsed: HostedDispatch | None = None
         try:
             parsed = HostedDispatch.model_validate(dispatch)
+            assert parsed is not None
             expiry = _utc_seconds(parsed.lease_expires_at, label="hosted lease expiry")
             if datetime.now(timezone.utc) >= expiry:
                 raise ValueError("hosted lease expired before execution")
@@ -1600,6 +2606,7 @@ class HostedRunnerAdapter:
                 f"prestart_{type(exc).__name__}",
             )
 
+        assert parsed is not None
         reservation_key = f"{parsed.tenant_id}:{parsed.idempotency_key}"
         try:
             self._ledger.reserve(reservation_key, run_id=parsed.run_id)
@@ -1665,25 +2672,164 @@ class HostedRunnerAdapter:
             )
 
         try:
+            self._write_child_start_evidence(
+                dispatch=parsed,
+                run_dir=run_dir,
+                dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+            )
+        except Exception:
+            outcome = TransactionOutcome.FAILED_PLATFORM
+            self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
+            events = tuple(
+                failure_events(
+                    run_id=parsed.run_id,
+                    bundle_digest=parsed.payload.bundle.content_digest,
+                    authorization_id=parsed.payload.authorization.authorization_id,
+                )
+            )
+            return HostedRunResult(
+                dispatch_id=parsed.dispatch_id,
+                run_id=parsed.run_id,
+                outcome=outcome,
+                evidence_batch=events,
+                started=False,
+                uncertain_delivery=False,
+                report_sha256="0" * 64,
+            )
+
+        try:
             # Once this call starts, the child can reach a real input edge. Any
             # lost or malformed result is uncertain and can never be retried.
             execution = self._runner(argv, run_dir, child_env)
-        except Exception as exc:
+        except Exception:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
+            try:
+                if closure_authority is None:
+                    raise ValueError("hosted result-loss closure authority is absent")
+                terminal_key, terminal_qualification = (
+                    self._revalidate_terminal_authority(
+                        dispatch=parsed,
+                        runner_config=runner_config,
+                        configured_origin=configured_origin,
+                        initial_qualification=qualification,
+                        initial_deployment_bytes=deployment_bytes,
+                    )
+                )
+                exception_loss_proof, report_digest, exception_loss_report = (
+                    self._produce_managed_result_loss(
+                        dispatch=parsed,
+                        workflow=verified.workflow,
+                        run_dir=run_dir,
+                        qualification=terminal_qualification,
+                        private_key=terminal_key,
+                        verified_params=params,
+                        dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                        closure_authority=closure_authority,
+                        loss_code="runner_exception",
+                    )
+                )
+            except Exception as terminal_exc:
+                self._ledger.record_outcome(
+                    reservation_key, outcome, run_id=parsed.run_id
+                )
+                raise RuntimeError(
+                    "managed run requires signed terminal reconciliation"
+                ) from terminal_exc
             self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
-            raise RuntimeError(
-                "managed run requires signed terminal reconciliation"
-            ) from exc
+            events = tuple(
+                report_events(
+                    exception_loss_report,
+                    run_id=parsed.run_id,
+                    workflow_id=parsed.workflow_id,
+                    bundle_digest=parsed.payload.bundle.content_digest,
+                    authorization_id=parsed.payload.authorization.authorization_id,
+                    consequential_steps=verified.consequential_steps,
+                    effect_covered_consequential_steps=(
+                        verified.effect_covered_consequential_steps
+                    ),
+                    terminal_outcome=outcome.value,
+                )
+            )
+            return HostedRunResult(
+                dispatch_id=parsed.dispatch_id,
+                run_id=parsed.run_id,
+                outcome=outcome,
+                evidence_batch=events,
+                terminal_verification=exception_loss_proof,
+                started=True,
+                uncertain_delivery=(
+                    exception_loss_proof.payload.pending_permit_count == 1
+                ),
+                report_sha256=report_digest,
+            )
 
         if execution.report_bytes is None:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
+            try:
+                if closure_authority is None:
+                    raise ValueError("hosted result-loss closure authority is absent")
+                terminal_key, terminal_qualification = (
+                    self._revalidate_terminal_authority(
+                        dispatch=parsed,
+                        runner_config=runner_config,
+                        configured_origin=configured_origin,
+                        initial_qualification=qualification,
+                        initial_deployment_bytes=deployment_bytes,
+                    )
+                )
+                missing_loss_proof, report_digest, missing_loss_report = (
+                    self._produce_managed_result_loss(
+                        dispatch=parsed,
+                        workflow=verified.workflow,
+                        run_dir=run_dir,
+                        qualification=terminal_qualification,
+                        private_key=terminal_key,
+                        verified_params=params,
+                        dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                        closure_authority=closure_authority,
+                        loss_code="report_missing",
+                    )
+                )
+            except Exception as terminal_exc:
+                self._ledger.record_outcome(
+                    reservation_key, outcome, run_id=parsed.run_id
+                )
+                raise RuntimeError(
+                    "managed run requires signed terminal reconciliation"
+                ) from terminal_exc
             self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
-            raise RuntimeError("managed run requires signed terminal reconciliation")
+            events = tuple(
+                report_events(
+                    missing_loss_report,
+                    run_id=parsed.run_id,
+                    workflow_id=parsed.workflow_id,
+                    bundle_digest=parsed.payload.bundle.content_digest,
+                    authorization_id=parsed.payload.authorization.authorization_id,
+                    consequential_steps=verified.consequential_steps,
+                    effect_covered_consequential_steps=(
+                        verified.effect_covered_consequential_steps
+                    ),
+                    terminal_outcome=outcome.value,
+                )
+            )
+            return HostedRunResult(
+                dispatch_id=parsed.dispatch_id,
+                run_id=parsed.run_id,
+                outcome=outcome,
+                evidence_batch=events,
+                terminal_verification=missing_loss_proof,
+                started=True,
+                uncertain_delivery=(
+                    missing_loss_proof.payload.pending_permit_count == 1
+                ),
+                report_sha256=report_digest,
+            )
         report: RunReport | None = None
         report_digest = hashlib.sha256(execution.report_bytes).hexdigest()
         terminalization_error: Exception | None
         try:
             report = RunReport.model_validate_json(execution.report_bytes)
+            assert report is not None
             outcome = classify_transaction_outcome(report)
             proof: ProductionTerminalVerificationEnvelope | None = None
             if execution.terminal_verification is not None:
@@ -1695,28 +2841,20 @@ class HostedRunnerAdapter:
             }:
                 if outcome is TransactionOutcome.VERIFIED and execution.returncode != 0:
                     raise ValueError("managed child exited unsuccessfully")
-                terminal_config = load_runner_config(runner_config, protected=True)
-                if self._protected_runner_origin(terminal_config) != configured_origin:
-                    raise ValueError("protected runner origin changed during execution")
-                self._verify_product_release(parsed, terminal_config)
-                terminal_key = self._load_evidence_private_key(terminal_config)
-                terminal_qualification, terminal_deployment = (
-                    self._verify_workflow_admission(
-                        parsed,
-                        terminal_config,
-                        evidence_private_key=terminal_key,
+                terminal_key, terminal_qualification = (
+                    self._revalidate_terminal_authority(
+                        dispatch=parsed,
+                        runner_config=runner_config,
+                        configured_origin=configured_origin,
+                        initial_qualification=qualification,
+                        initial_deployment_bytes=deployment_bytes,
                     )
                 )
-                if (
-                    terminal_qualification != qualification
-                    or terminal_deployment != deployment_bytes
-                ):
-                    raise ValueError("production admission changed during execution")
                 proof, report_digest = self._produce_terminal_verification(
                     dispatch=parsed,
                     report=report,
                     run_dir=run_dir,
-                    qualification=qualification,
+                    qualification=terminal_qualification,
                     private_key=terminal_key,
                     verified_params=params,
                     dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
@@ -1763,7 +2901,7 @@ class HostedRunnerAdapter:
                     terminal_outcome=outcome.value,
                 )
             )
-        uncertain = outcome is TransactionOutcome.RECONCILIATION_REQUIRED
+        uncertain = bool(proof is not None and proof.payload.pending_permit_count == 1)
         return HostedRunResult(
             dispatch_id=parsed.dispatch_id,
             run_id=parsed.run_id,

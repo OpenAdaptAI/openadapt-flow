@@ -31,6 +31,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.runtime.effects import Effect, EffectKind
 from openadapt_flow.visualize import (
     SPEC_VERSION,
+    GraphNode,
     PresentationProfile,
     ProgramGraphSpec,
     build_program_graph,
@@ -398,3 +399,137 @@ def test_cli_visualize_writes_outputs(tmp_path) -> None:
     assert data["spec_version"] == SPEC_VERSION
     assert data["bundle"]["name"] == "Compiled program"
     assert "admin" not in out_json.read_text().lower()
+
+
+# --------------------------------------------------------------------------
+# The non-local boundary is a closed ALLOW-LIST.
+#
+# A deny-list projection ships every newly added spec field to public surfaces
+# by default. These tests pin the inverse: a field leaves only when it is
+# explicitly enumerated, and an unclassified field is refused outright.
+# --------------------------------------------------------------------------
+
+_PUBLIC_PROFILES = (
+    PresentationProfile.REMOTE_SAFE,
+    PresentationProfile.PUBLIC_SYNTHETIC,
+    PresentationProfile.SANITIZED_DERIVATIVE,
+)
+
+
+def _risk_explanation_workflow(explanation: str) -> Workflow:
+    """A one-step workflow whose risk provenance carries operator free text."""
+    return Workflow(
+        name="risk-provenance",
+        steps=[
+            Step(
+                id="s0",
+                intent="click Save",
+                action=ActionKind.CLICK,
+                anchor=_anchor(),
+                risk="irreversible",
+                risk_explanation=explanation,
+            )
+        ],
+    )
+
+
+def test_operator_risk_explanation_never_crosses_the_local_boundary() -> None:
+    """``risk_explanation`` is operator free text (ir.py: up to 512 chars) and
+    can name a customer and a record id. It must not reach a public surface."""
+    explanation = "irreversible - posts to Acme's live billing API for patient 4417"
+    source = build_program_graph(_risk_explanation_workflow(explanation))
+    # The operator-local view still carries it; it is provenance, not a leak.
+    local = project_program_graph(source, PresentationProfile.OPERATOR_LOCAL)
+    assert local.nodes[0].risk_explanation == explanation
+
+    for profile in _PUBLIC_PROFILES:
+        projected = project_program_graph(source, profile)
+        assert projected.nodes[0].risk_explanation is None, profile
+        # The spec is embedded verbatim in the HTML export, so the string must
+        # be absent from the rendered artifact too, not merely unrendered.
+        assert explanation not in projected.model_dump_json(), profile
+        assert "Acme" not in render_html(projected), profile
+        assert "4417" not in render_html(projected), profile
+
+
+def test_projection_carries_only_allow_listed_node_fields() -> None:
+    """Every field a projected node actually sets is on the node allow-list."""
+    from openadapt_flow.visualize.projection import _NODE_LOCAL, _NODE_PUBLIC
+
+    source = build_program_graph(_mixed_workflow())
+    for profile in _PUBLIC_PROFILES:
+        projected = project_program_graph(source, profile)
+        for node in projected.nodes:
+            defaults = GraphNode(id=node.id, index=node.index, title="")
+            set_fields = {
+                name
+                for name in GraphNode.model_fields
+                if getattr(node, name) != getattr(defaults, name)
+            }
+            assert set_fields <= _NODE_PUBLIC, (profile, node.id, set_fields)
+            # Nothing on the local list is ever populated.
+            for name in _NODE_LOCAL:
+                assert getattr(node, name) == getattr(defaults, name), (profile, name)
+
+
+def test_field_boundary_classifies_every_crossing_model_field() -> None:
+    """The live guard: adding a field to spec.py without classifying it fails
+    here (and at import) instead of silently reaching a public surface."""
+    from openadapt_flow.visualize.projection import assert_field_boundary_is_closed
+
+    assert_field_boundary_is_closed()
+
+
+def test_an_unclassified_new_field_is_refused() -> None:
+    """Proof the guard has teeth: a GraphNode grown a new field is refused
+    until an author puts it on the public or the local list."""
+    import pytest
+    from pydantic import create_model
+
+    from openadapt_flow.visualize.projection import (
+        _NODE_LOCAL,
+        _NODE_PUBLIC,
+        ProjectionBoundaryError,
+        check_model_partition,
+    )
+
+    grown = create_model(
+        "GraphNodeWithNewField",
+        __base__=GraphNode,
+        operator_note=(str, ""),
+    )
+    with pytest.raises(ProjectionBoundaryError) as excinfo:
+        check_model_partition(grown, _NODE_PUBLIC, _NODE_LOCAL)
+    assert "operator_note" in str(excinfo.value)
+
+    # risk_explanation specifically is classified local, not public.
+    assert "risk_explanation" in _NODE_LOCAL
+    assert "risk_explanation" not in _NODE_PUBLIC
+
+
+def test_projected_rung_labels_match_the_builder() -> None:
+    """The projection derives each rung label from the closed rung id rather
+    than carrying it across, so the two label tables must not drift."""
+    from openadapt_flow.visualize.builder import _RUNG_LABELS as BUILT
+    from openadapt_flow.visualize.projection import _RUNG_LABELS as PROJECTED
+
+    assert dict(BUILT) == PROJECTED
+
+
+def test_projection_drops_values_outside_a_closed_vocabulary() -> None:
+    """Closed vocabularies are enforced at the boundary, so widening one
+    upstream cannot by itself widen what leaves."""
+    source = build_program_graph(_mixed_workflow())
+    node = source.nodes[0]
+    node.action = "exfiltrate patient 4417"
+    node.risk = "free text risk"
+    node.postconditions = ["text_present", "smuggled free text"]
+    node.badges = ["irreversible", "3 authorized roles", "smuggled free text"]
+
+    projected = project_program_graph(source, PresentationProfile.REMOTE_SAFE)
+    out = projected.nodes[0]
+    assert out.action is None
+    assert out.risk is None
+    assert out.postconditions == ["text_present"]
+    assert out.badges == ["irreversible", "3 authorized roles"]
+    assert "4417" not in projected.model_dump_json()

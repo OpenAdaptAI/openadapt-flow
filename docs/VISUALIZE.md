@@ -77,10 +77,19 @@ openadapt-flow visualize path/to/bundle --profile remote-safe -o program.html
 ```
 
 The default `operator-local` profile includes local diagnostic detail.
-`remote-safe`, `public-synthetic`, and `sanitized-derivative` remove recorded
-text, parameter values, selectors, URLs, free-text predicates, and local
-provenance. The projection does not sanitize the source bundle. It does not
-prove that the source is safe to send.
+
+`remote-safe`, `public-synthetic`, and `sanitized-derivative` work the other way
+round. Each rebuilds the graph from a closed list of the fields allowed to
+leave, rather than copying the graph and deleting the sensitive parts. Recorded
+text, parameter values, selectors, URLs, free-text predicates, risk
+explanations, and local provenance all stay behind, because none of them is on
+that list. Fields whose vocabulary is finite, such as the action or the
+resolution rung, are also checked against a closed set of values.
+
+This matters most for the field nobody has written yet. Add one to the spec and
+it doesn't travel: the module won't load until someone marks it either safe to
+leave or local. The projection still doesn't sanitize the source bundle, and it
+doesn't prove the source is safe to send.
 
 ## Rendering choice and tradeoffs
 

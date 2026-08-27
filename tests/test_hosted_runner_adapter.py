@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import ValidationError
 
 import openadapt_flow.runner.hosted_adapter as hosted
 from openadapt_flow.__main__ import _replay_params
@@ -751,16 +752,13 @@ def test_terminal_admission_is_revalidated_after_child_execution(
         dispatch.delivery_authority_token,
     )
 
-    first = adapter.execute(
-        dispatch,
-        runner_config=tmp_path / "runner.toml",
-        run_dir=tmp_path / "run",
-        authority=authority,
-    )
-
-    assert first.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
-    assert first.started is True
-    assert first.terminal_verification is None
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run",
+            authority=authority,
+        )
     assert calls == 1
     assert release_checks == 2
 
@@ -818,25 +816,20 @@ def test_hosted_uncertain_delivery_fault_never_replays(
         dispatch.managed_delivery_authority_url,
         dispatch.delivery_authority_token,
     )
-    first = adapter.execute(
-        dispatch,
-        runner_config=tmp_path / "runner.toml",
-        run_dir=tmp_path / "run",
-        authority=authority,
-    )
-    second = adapter.execute(
-        dispatch,
-        runner_config=tmp_path / "runner.toml",
-        run_dir=tmp_path / "run-again",
-        authority=authority,
-    )
-
-    assert first.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
-    assert first.started is True
-    assert first.uncertain_delivery is True
-    assert second.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
-    assert second.started is True
-    assert second.uncertain_delivery is True
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run",
+            authority=authority,
+        )
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run-again",
+            authority=authority,
+        )
     assert calls == 1
     assert seen_child_env[REMOTE_DISPATCH_SESSION_ID_ENV] == (
         dispatch.dispatch_session_id
@@ -1201,7 +1194,18 @@ def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) 
         dispatch_id=dispatch.dispatch_id,
         run_id=binding.run_id,
         outcome=TransactionOutcome.VERIFIED,
-        evidence_batch=(),
+        evidence_batch=tuple(
+            hosted.report_events(
+                _production_report(),
+                run_id=binding.run_id,
+                workflow_id=proof.payload.workflow_id,
+                bundle_digest=proof.payload.bundle_content_digest,
+                authorization_id="test-authorization",
+                consequential_steps=1,
+                effect_covered_consequential_steps=1,
+                terminal_outcome=TransactionOutcome.VERIFIED.value,
+            )
+        ),
         terminal_verification=proof,
         started=True,
         uncertain_delivery=False,
@@ -1260,7 +1264,18 @@ def test_recovery_callback_retains_signed_non_success_terminal_v2(
         dispatch_id=dispatch.dispatch_id,
         run_id=binding.run_id,
         outcome=outcome,
-        evidence_batch=(),
+        evidence_batch=tuple(
+            hosted.report_events(
+                _production_report(),
+                run_id=binding.run_id,
+                workflow_id=proof.payload.workflow_id,
+                bundle_digest=proof.payload.bundle_content_digest,
+                authorization_id="test-authorization",
+                consequential_steps=1,
+                effect_covered_consequential_steps=1,
+                terminal_outcome=outcome.value,
+            )
+        ),
         terminal_verification=proof,
         started=True,
         uncertain_delivery=uncertain_delivery,
@@ -1284,6 +1299,62 @@ def test_safe_halt_callback_requires_signed_terminal_proof() -> None:
             report_sha256="b" * 64,
             started=True,
             uncertain_delivery=False,
+        )
+
+
+def test_terminal_callback_refuses_conflicting_uncertainty_state() -> None:
+    proof = sign_production_terminal_verification(
+        _reconciliation_payload(), _private_key()
+    )
+    with pytest.raises(ValueError, match="uncertainty conflicts"):
+        HostedTerminalEvent(
+            run_id=proof.payload.run_id,
+            outcome="RECONCILIATION_REQUIRED",
+            report_sha256=proof.payload.run_report_sha256,
+            started=True,
+            uncertain_delivery=False,
+            terminal_verification_artifact_bytes_base64=b64encode(
+                hosted.canonical_json(proof)
+            ).decode("ascii"),
+            terminal_verification_artifact_sha256=proof.artifact_sha256(),
+        )
+
+
+def test_callback_rejects_confirmed_summary_for_reconciliation() -> None:
+    proof = sign_production_terminal_verification(
+        _reconciliation_payload(), _private_key()
+    )
+    terminal = HostedTerminalEvent(
+        run_id=proof.payload.run_id,
+        outcome="RECONCILIATION_REQUIRED",
+        report_sha256=proof.payload.run_report_sha256,
+        started=True,
+        uncertain_delivery=True,
+        terminal_verification_artifact_bytes_base64=b64encode(
+            hosted.canonical_json(proof)
+        ).decode("ascii"),
+        terminal_verification_artifact_sha256=proof.artifact_sha256(),
+    )
+    summary = hosted.report_events(
+        _production_report(),
+        run_id=proof.payload.run_id,
+        workflow_id=proof.payload.workflow_id,
+        bundle_digest=proof.payload.bundle_content_digest,
+        authorization_id="test-authorization",
+        consequential_steps=1,
+        effect_covered_consequential_steps=1,
+        terminal_outcome="VERIFIED",
+    )[-1]
+
+    with pytest.raises(ValidationError, match="conflicts with terminal outcome"):
+        CallbackRequest(
+            dispatch_id="11111111-1111-4111-8111-111111111111",
+            runner_session_id="22222222-2222-4222-8222-222222222222",
+            idempotency_key="callback-test-key",
+            lease_token="oal_" + "a" * 64,
+            product_release_admission_sha256="b" * 64,
+            workflow_admission_sha256="c" * 64,
+            events=(summary, terminal.model_dump(mode="json")),
         )
 
 

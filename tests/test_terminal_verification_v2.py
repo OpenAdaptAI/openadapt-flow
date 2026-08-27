@@ -39,6 +39,7 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionExecutionOutcome,
     ProductionIdentityEvidenceManifest,
     ProductionIdentityResult,
+    ProductionPendingDeliveryPermit,
     ProductionPolicyEvidenceManifest,
     ProductionPostconditionEvidenceManifest,
     ProductionRunReceipt,
@@ -469,6 +470,15 @@ def _permit_chain() -> ProductionDeliveryPermitChain:
     return ProductionDeliveryPermitChain.build((_permit_entry(),))
 
 
+def _pending_permit_chain() -> ProductionDeliveryPermitChain:
+    permit = _permit_entry().permit_artifact
+    pending = ProductionPendingDeliveryPermit.build(
+        permit,
+        receipt_absence_observed_at="2026-08-18T12:00:02Z",
+    )
+    return ProductionDeliveryPermitChain.build((), pending=pending)
+
+
 def _manifests(
     chain: ProductionDeliveryPermitChain,
 ) -> ProductionEvidenceManifests:
@@ -685,6 +695,8 @@ def _halted_payload() -> ProductionTerminalVerificationPayload:
         execution_authority_signer_sha256=SHA_C,
         permit_chain=chain,
         permit_count=0,
+        acknowledged_permit_count=0,
+        pending_permit_count=0,
         final_authority_sequence=0,
         final_runtime_delivery_sequence=0,
         workflow_contract_sha256=SHA_A,
@@ -704,7 +716,7 @@ def _halted_payload() -> ProductionTerminalVerificationPayload:
 
 
 def _reconciliation_payload() -> ProductionTerminalVerificationPayload:
-    chain = _permit_chain()
+    chain = _pending_permit_chain()
     receipt = _reconciliation_receipt()
     outcome = _reconciliation_outcome()
     return ProductionTerminalVerificationPayload(
@@ -726,11 +738,13 @@ def _reconciliation_payload() -> ProductionTerminalVerificationPayload:
         qualification_signer_registry_sha256=SHA_E,
         qualification_signer_registry_revision=7,
         execution_authority_sha256=SHA_A,
-        execution_authority_signer_sha256=chain.entries[0].authority_signer_sha256,
+        execution_authority_signer_sha256=chain.pending.authority_signer_sha256,
         permit_chain=chain,
         permit_count=1,
+        acknowledged_permit_count=0,
+        pending_permit_count=1,
         final_authority_sequence=0,
-        final_runtime_delivery_sequence=9,
+        final_runtime_delivery_sequence=0,
         workflow_contract_sha256=SHA_A,
         execution_outcome=outcome,
         execution_outcome_sha256=outcome.artifact_sha256(),
@@ -772,6 +786,8 @@ def _payload() -> ProductionTerminalVerificationPayload:
         execution_authority_signer_sha256=(chain.entries[0].authority_signer_sha256),
         permit_chain=chain,
         permit_count=1,
+        acknowledged_permit_count=1,
+        pending_permit_count=0,
         final_authority_sequence=0,
         final_runtime_delivery_sequence=9,
         workflow_contract_sha256=SHA_A,
@@ -832,6 +848,13 @@ def _expected(
         execution_authority_signer_sha256=(payload.execution_authority_signer_sha256),
         permit_chain_sha256=payload.permit_chain.permit_chain_sha256,
         permit_count=payload.permit_count,
+        acknowledged_permit_count=payload.acknowledged_permit_count,
+        pending_permit_count=payload.pending_permit_count,
+        pending_permit_artifact_sha256=(
+            payload.permit_chain.pending.permit_artifact_sha256
+            if payload.permit_chain.pending is not None
+            else None
+        ),
         final_authority_sequence=payload.final_authority_sequence,
         final_runtime_delivery_sequence=payload.final_runtime_delivery_sequence,
         authenticated_runner_id_sha256=authenticated_runner_id_sha256,
@@ -960,10 +983,91 @@ def test_terminal_v2_signs_and_verifies_reconciliation_proof() -> None:
     assert digest == envelope.artifact_sha256()
     assert payload.run_receipt.transaction_outcome == "RECONCILIATION_REQUIRED"
     assert payload.permit_count == 1
+    assert payload.acknowledged_permit_count == 0
+    assert payload.pending_permit_count == 1
+    assert payload.final_runtime_delivery_sequence == 0
+    assert payload.permit_chain.pending is not None
+    assert payload.permit_chain.pending.delivery_state == "UNRESOLVED"
+    assert payload.permit_chain.pending.delivery_receipt_artifact is None
+    assert payload.permit_chain.pending.actuation_replay_authorized is False
     record = payload.evidence_manifests.effect.records[0]
     assert isinstance(record, ProductionTerminalEffectState)
     assert record.attempt_state == "delivery_uncertain"
     assert record.observed_effect == "unknown"
+
+
+def test_pending_delivery_chain_rebuilds_from_exact_retained_permit() -> None:
+    chain = _pending_permit_chain()
+    assert chain.pending is not None
+
+    rebuilt = rebuild_production_delivery_permit_chain_from_artifacts(
+        (),
+        pending_permit_artifact=chain.pending.permit_artifact.canonical_bytes(),
+        receipt_absence_observed_at=chain.pending.receipt_absence_observed_at,
+    )
+
+    assert rebuilt == chain
+    with pytest.raises(
+        ProductionTerminalVerificationError,
+        match="pending delivery binding is incomplete",
+    ):
+        rebuild_production_delivery_permit_chain_from_artifacts(
+            (),
+            pending_permit_artifact=chain.pending.permit_artifact.canonical_bytes(),
+        )
+
+
+def test_pending_reconciliation_refuses_effect_absence_or_replay() -> None:
+    payload = _reconciliation_payload()
+    assert payload.permit_chain.pending is not None
+    pending = payload.permit_chain.pending.model_dump(mode="json")
+
+    pending["actuation_replay_authorized"] = True
+    with pytest.raises(ValidationError):
+        ProductionPendingDeliveryPermit.model_validate(pending)
+
+    data = payload.model_dump(mode="json")
+    effect = data["evidence_manifests"]["effect"]
+    effect["records"][0]["observed_effect"] = "absent"
+    effect["records"][0]["absence_basis"] = "not_actuated"
+    with pytest.raises(ValidationError):
+        ProductionTerminalVerificationPayload.model_validate(data)
+
+
+def test_terminal_acceptor_rechecks_pending_permit_digest() -> None:
+    payload = _reconciliation_payload()
+    envelope = sign_production_terminal_verification(payload, _private_key())
+    expected = _expected(payload).model_copy(
+        update={"pending_permit_artifact_sha256": SHA_A}
+    )
+
+    with pytest.raises(
+        ProductionTerminalVerificationError,
+        match="pending permit",
+    ):
+        verify_production_terminal_verification(
+            envelope,
+            expected=expected,
+            now=NOW,
+        )
+
+
+def test_verified_terminal_refuses_a_pending_permit() -> None:
+    success = _payload()
+    pending_chain = _pending_permit_chain()
+    data = success.model_dump(mode="json")
+    data.update(
+        {
+            "permit_chain": pending_chain.model_dump(mode="json"),
+            "acknowledged_permit_count": 0,
+            "pending_permit_count": 1,
+            "final_runtime_delivery_sequence": 0,
+            "evidence_manifests": _manifests(pending_chain).model_dump(mode="json"),
+        }
+    )
+
+    with pytest.raises(ValidationError, match="VERIFIED proof is incomplete"):
+        ProductionTerminalVerificationPayload.model_validate(data)
 
 
 @pytest.mark.parametrize(
@@ -977,7 +1081,7 @@ def test_terminal_v2_builds_non_success_proof_from_exact_run_report(
     chain = (
         ProductionDeliveryPermitChain.build(())
         if transaction_outcome == "HALTED_BEFORE_EFFECT"
-        else _permit_chain()
+        else _pending_permit_chain()
     )
     context = ProductionTerminalVerificationContext(
         run_id=IDS["run_id"],
@@ -1004,7 +1108,11 @@ def test_terminal_v2_builds_non_success_proof_from_exact_run_report(
         execution_authority_id=IDS["execution_authority_id"],
         execution_authority_sha256=SHA_A,
         execution_authority_signer_sha256=(
-            chain.entries[0].authority_signer_sha256 if chain.entries else SHA_C
+            chain.pending.authority_signer_sha256
+            if chain.pending is not None
+            else chain.entries[0].authority_signer_sha256
+            if chain.entries
+            else SHA_C
         ),
         permit_chain=chain,
         run_report_object_version="version:terminal-report:1",
@@ -1312,7 +1420,7 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
     )
     payloads = {
         "halted-before-effect-zero-permit": _halted_payload(),
-        "reconciliation-required-nonempty-permit": _reconciliation_payload(),
+        "reconciliation-required-pending-permit": _reconciliation_payload(),
     }
 
     for vector in fixture["vectors"]:

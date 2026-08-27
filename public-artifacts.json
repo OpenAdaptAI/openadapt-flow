@@ -5780,6 +5780,10 @@
       "sha256": "20a1ae7f1878315c100c58894ec14bbc6af4848a6c206c467ca82cff025325f0"
     },
     {
+      "path": "tests/fixtures/terminal_verification_v2_terminal_vectors.json",
+      "sha256": "82d609a0c29593c91ec42b9416a64d6432fad47e3898bbfb926e76f7598f91df"
+    },
+    {
       "path": "tests/fixtures/theme-region-stable-overhalt-v1.16.1.json",
       "sha256": "4bf055e6c11f837ed6daa4a5b89ab28dd431a7eccd2ce3044758ba260eed52cd"
     },

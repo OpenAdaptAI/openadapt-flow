@@ -159,7 +159,8 @@ def _next_steps_block() -> str:
     """
 
     return (
-        "Next: automate one small read-only task in your own app.\n"
+        "Next: automate one small read-only task with test data in your own "
+        "app. Write down the result you expect.\n"
         "  Record       openadapt-flow record --backend web "
         "--url https://your-app.example --out recording\n"
         "  Compile      openadapt-flow compile recording --out bundle "
@@ -167,7 +168,10 @@ def _next_steps_block() -> str:
         "  Inspect      openadapt-flow visualize bundle -o graph.html\n"
         "  Lint         openadapt-flow lint bundle\n"
         "  Replay       openadapt-flow replay bundle --backend web "
-        "--url https://your-app.example --headed\n"
+        "--url https://your-app.example --headed --run-dir first-run\n"
+        "  Review       first-run/REPORT.md\n"
+        "Confirm that the recorded steps and final result match what you "
+        "expected before you expand the task.\n"
         "Qualify the exact app and environment before unattended use. If an "
         "action is state-changing, unknown, consequential, or irreversible, "
         "qualify its identity, effect, and policy evidence before Flow first "

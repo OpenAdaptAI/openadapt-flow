@@ -48,14 +48,14 @@ rounds against the wrong-target check.
 
 ## Try it
 
-The canonical first run uses the [OpenAdapt](https://github.com/OpenAdaptAI/openadapt)
-launcher, which handles Python versions, virtual environments, and shell quoting
-for you:
+The optional product check uses the
+[OpenAdapt](https://github.com/OpenAdaptAI/openadapt) launcher, which handles
+Python versions, virtual environments, and shell quoting for you:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/OpenAdaptAI/openadapt-flow/main/scripts/install.sh | sh
 
-openadapt quickstart                                     # the whole loop, VERIFIED
+openadapt quickstart                                     # optional product check, VERIFIED
 ```
 
 Prefer plain pip? Two commands (quote the brackets; on Windows `cmd.exe` use
@@ -64,7 +64,7 @@ double quotes: `pip install "openadapt[browser]"`):
 ```bash
 pip install 'openadapt[browser]'
 
-openadapt quickstart                                     # the whole loop, VERIFIED
+openadapt quickstart                                     # optional product check, VERIFIED
 ```
 
 **Requirements:** Python 3.10–3.12 (3.13+ is not yet supported; the installer
@@ -76,7 +76,7 @@ name:
 ```bash
 pip install 'openadapt-flow[browser]'
 
-openadapt-flow tutorial                                  # same loop as `openadapt quickstart`
+openadapt-flow tutorial                                  # optional product check
 ```
 
 `tutorial` records a demonstration against the bundled MockMed fixture, mines its
@@ -85,7 +85,8 @@ policy, and verifies the write by reading the system of record out of band — a
 path the app never calls, so the screen cannot influence it. It ends `VERIFIED`
 with zero model calls.
 
-Next, [record one small read-only workflow in your own app](#record-your-own-app-on-any-substrate).
+Your first real workflow starts with a small read-only task and test data:
+[record it in your own app](#record-your-own-app-on-any-substrate).
 
 Full walkthrough, including `--guided` and the hand-driven
 `demo-record` / `compile` / `lint` / `certify` / `replay` stages:
@@ -162,8 +163,9 @@ Artifacts: [baseline run report](docs/showcase/baseline-run/REPORT.md) and
 
 ## Record your own app, on any substrate
 
-Start with one small read-only task. Record it, compile it, inspect and lint the
-bundle, then replay it with the browser visible:
+Start with one small read-only task and test data. Write down the result you
+expect. Record the task, compile it, inspect and lint the bundle, then replay it
+with the browser visible:
 
 Six substrates run on the same `Backend` protocol and the same governed runtime,
 selected with `--backend web | windows | macos | linux | rdp | citrix` on
@@ -177,8 +179,12 @@ openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
 openadapt-flow visualize bundle -o graph.html
 openadapt-flow lint bundle
-openadapt-flow replay bundle --backend web --url https://your.app --headed
+openadapt-flow replay bundle --backend web --url https://your.app --headed \
+  --run-dir first-run
 ```
+
+Review `first-run/REPORT.md`. Confirm that the recorded steps and the final
+result match what you expected before you expand the task.
 
 Qualify the exact app and environment before unattended use. If an action is
 state-changing, unknown, consequential, or irreversible, qualify its identity,

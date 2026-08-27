@@ -87,12 +87,14 @@ def _wire(monkeypatch: pytest.MonkeyPatch, result_for: Any) -> None:
 
 def test_next_steps_block_carries_the_real_first_workflow() -> None:
     block = _next_steps_block()
-    assert "one small read-only task" in block
+    assert "one small read-only task with test data" in block
     assert "openadapt-flow record --backend web" in block
     assert "openadapt-flow compile recording" in block
     assert "openadapt-flow visualize bundle" in block
     assert "openadapt-flow lint bundle" in block
     assert "openadapt-flow replay bundle" in block
+    assert "--run-dir first-run" in block
+    assert "first-run/REPORT.md" in block
     assert QUALIFY_URL in block
     assert "identity, effect, and policy evidence" in block
     assert "before Flow first actuates it" in block

@@ -468,7 +468,12 @@ class LinuxBackend:
             else (
                 DisplayGeometry(
                     display_id=f"test-window-display:{current.native_id}",
-                    bounds=tuple(float(value) for value in current.bounds),
+                    bounds=(
+                        float(current.bounds[0]),
+                        float(current.bounds[1]),
+                        float(current.bounds[2]),
+                        float(current.bounds[3]),
+                    ),
                     scale=(1.0, 1.0),
                 ),
             )

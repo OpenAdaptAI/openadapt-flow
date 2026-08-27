@@ -142,9 +142,14 @@ def _make_capture(tmp_path: Path, *, sealed: bool = True) -> Path:
                     mouse_pressed=pressed,
                     screenshot_timestamp=T0 + 1.0,
                     screenshot_source_ordinal=FRAME_ORDINAL,
+                    after_screenshot_timestamp=T0 + 1.3,
+                    after_screenshot_source_ordinal=AFTER_FRAME_ORDINAL,
                     window_event_timestamp=T0 + 1.0,
                     window_event_source_ordinal=FRAME_ORDINAL,
+                    after_window_event_timestamp=T0 + 1.3,
+                    after_window_event_source_ordinal=AFTER_FRAME_ORDINAL,
                     window_geometry_generation=1,
+                    after_window_geometry_generation=1,
                 )
             )
         session.commit()

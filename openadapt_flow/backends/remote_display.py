@@ -819,7 +819,12 @@ class RemoteDisplayBackend:
             else (
                 DisplayGeometry(
                     display_id=f"test-window-display:{win.window_id}",
-                    bounds=tuple(float(value) for value in win.bounds),
+                    bounds=(
+                        float(win.bounds[0]),
+                        float(win.bounds[1]),
+                        float(win.bounds[2]),
+                        float(win.bounds[3]),
+                    ),
                     scale=(float(pixel_scale[0]), float(pixel_scale[1])),
                 ),
             )

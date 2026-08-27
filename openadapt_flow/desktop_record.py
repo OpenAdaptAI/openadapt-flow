@@ -228,15 +228,21 @@ def record_desktop_capture(
     if convert is None:
         from openadapt_flow.adapters.capture import convert_capture
 
-        converter_options: dict[str, object] = {
-            # A native Windows window remains a native UIA surface. Only an
-            # explicitly remote target suppresses the local client-window UIA
-            # observation, which cannot see controls inside RDP/Citrix.
-            "include_structural": backend_kind not in ("rdp", "citrix"),
-        }
+        # A native Windows window remains a native UIA surface. Only an
+        # explicitly remote target suppresses the local client-window UIA
+        # observation, which cannot see controls inside RDP/Citrix.
+        include_structural = backend_kind not in ("rdp", "citrix")
         if source_surface is not None:
-            converter_options["source_surface"] = source_surface
-        convert = functools.partial(convert_capture, **converter_options)
+            convert = functools.partial(
+                convert_capture,
+                include_structural=include_structural,
+                source_surface=source_surface,
+            )
+        else:
+            convert = functools.partial(
+                convert_capture,
+                include_structural=include_structural,
+            )
 
     if announce:
         scope_line = ""

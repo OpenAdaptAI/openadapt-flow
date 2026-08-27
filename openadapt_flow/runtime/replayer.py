@@ -770,21 +770,22 @@ class Replayer:
         """
 
         viewport = exact_png_size(png)
+        backend_type = (
+            f"{type(self.backend).__module__}.{type(self.backend).__qualname__}"
+        )
         backend_identity = {
             "schema": "openadapt.legacy-frame-surface.v1",
-            "backend_type": (
-                f"{type(self.backend).__module__}.{type(self.backend).__qualname__}"
-            ),
+            "backend_type": backend_type,
             "backend_instance": id(self.backend),
         }
         window_identity = window_identity_sha256(
             window_id=f"legacy:{id(self.backend)}",
             pid=0,
             process_start_time=None,
-            owner=backend_identity["backend_type"],
+            owner=backend_type,
         )
         session_identity = session_identity_sha256(
-            authority=backend_identity["backend_type"],
+            authority=backend_type,
             session_id=str(id(self.backend)),
             session_start_time=None,
             principal_identity_sha256=None,
@@ -9125,20 +9126,23 @@ class Replayer:
         )
         expected_observation = exc.expected_observation
         observed_observation = exc.observed_observation
-        display_fields = (
-            {
-                "expected_display_id": expected_observation.display_id,
-                "observed_display_id": observed_observation.display_id,
-                "expected_display_bounds": expected_observation.display_bounds,
-                "observed_display_bounds": observed_observation.display_bounds,
-                "expected_display_scale": expected_observation.display_scale,
-                "observed_display_scale": observed_observation.display_scale,
-                "expected_topology_sha256": expected_observation.topology_sha256,
-                "observed_topology_sha256": observed_observation.topology_sha256,
-            }
-            if expected_observation is not None and observed_observation is not None
-            else {}
-        )
+        expected_display_id = None
+        observed_display_id = None
+        expected_display_bounds = None
+        observed_display_bounds = None
+        expected_display_scale = None
+        observed_display_scale = None
+        expected_topology_sha256 = None
+        observed_topology_sha256 = None
+        if expected_observation is not None and observed_observation is not None:
+            expected_display_id = expected_observation.display_id
+            observed_display_id = observed_observation.display_id
+            expected_display_bounds = expected_observation.display_bounds
+            observed_display_bounds = observed_observation.display_bounds
+            expected_display_scale = expected_observation.display_scale
+            observed_display_scale = observed_observation.display_scale
+            expected_topology_sha256 = expected_observation.topology_sha256
+            observed_topology_sha256 = observed_observation.topology_sha256
         return FreshActuationEvent(
             attempt=attempt,
             operation=exc.operation,
@@ -9147,10 +9151,17 @@ class Replayer:
             frame_size=exc.frame_size,
             expected_geometry_epoch=exc.expected_geometry_epoch,
             observed_geometry_epoch=exc.observed_geometry_epoch,
+            expected_display_id=expected_display_id,
+            observed_display_id=observed_display_id,
+            expected_display_bounds=expected_display_bounds,
+            observed_display_bounds=observed_display_bounds,
+            expected_display_scale=expected_display_scale,
+            observed_display_scale=observed_display_scale,
+            expected_topology_sha256=expected_topology_sha256,
+            observed_topology_sha256=observed_topology_sha256,
             target_intersection=target_intersection,
             identity_intersection=identity_intersection,
             retried=retried,
-            **display_fields,
         )
 
     def _active_program_frame_refusal(
@@ -13238,8 +13249,8 @@ class Replayer:
             current_observation = self._observation_for_frame(frame_png)
             if (
                 source_observation is not None
-                and current_observation.geometry_epoch
-                != source_observation.geometry_epoch
+                and current_observation.coordinate_mapping_epoch
+                != source_observation.coordinate_mapping_epoch
             ):
                 # A raw region has no authority after reflow. A future IR field
                 # can carry a named target/anchor binding and map the region

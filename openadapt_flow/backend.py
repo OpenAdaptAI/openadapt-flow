@@ -271,6 +271,49 @@ def frame_geometry_epoch(
     )
 
 
+def frame_coordinate_mapping_epoch(
+    *,
+    viewport: tuple[int, int],
+    viewport_width: int,
+    viewport_height: int,
+    origin: tuple[float, float],
+    scale: Optional[tuple[float, float]],
+    device_pixel_ratio: Optional[float],
+    display_id: str,
+    display_bounds: tuple[float, float, float, float],
+    display_scale: tuple[float, float],
+    topology_sha256: str,
+    window_identity_sha256: str,
+    session_identity_sha256: str,
+) -> str:
+    """Digest the surface facts that map frame pixels to live input space.
+
+    Page and document identities are intentionally absent. A successful action
+    can navigate or replace the top-level document without changing the window,
+    viewport, display, or pixel mapping. Actuation still binds the stricter
+    ``geometry_epoch``. Read-only frame-region checks use this mapping epoch so
+    an expected navigation does not look like a resize.
+    """
+
+    return _sha256_json(
+        {
+            "schema": "openadapt.frame-coordinate-mapping.v1",
+            "viewport": list(viewport),
+            "viewport_width": viewport_width,
+            "viewport_height": viewport_height,
+            "origin": list(origin),
+            "scale": list(scale) if scale is not None else None,
+            "device_pixel_ratio": device_pixel_ratio,
+            "display_id": display_id,
+            "display_bounds": list(display_bounds),
+            "display_scale": list(display_scale),
+            "topology_sha256": topology_sha256,
+            "window_identity_sha256": window_identity_sha256,
+            "session_identity_sha256": session_identity_sha256,
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FrameObservation:
     """One immutable frame and the exact geometry/context that produced it.
@@ -379,6 +422,25 @@ class FrameObservation:
 
         return hashlib.sha256(self.png).hexdigest()
 
+    @property
+    def coordinate_mapping_epoch(self) -> str:
+        """Digest the coordinate mapping without document-lifecycle identity."""
+
+        return frame_coordinate_mapping_epoch(
+            viewport=self.viewport,
+            viewport_width=self.viewport_width,
+            viewport_height=self.viewport_height,
+            origin=self.origin,
+            scale=self.scale,
+            device_pixel_ratio=self.device_pixel_ratio,
+            display_id=self.display_id,
+            display_bounds=self.display_bounds,
+            display_scale=self.display_scale,
+            topology_sha256=self.topology_sha256,
+            window_identity_sha256=self.window_identity_sha256,
+            session_identity_sha256=self.session_identity_sha256,
+        )
+
     @classmethod
     def create(
         cls,
@@ -412,8 +474,16 @@ class FrameObservation:
         normalized_dpr = (
             float(device_pixel_ratio) if device_pixel_ratio is not None else None
         )
-        normalized_display_bounds = tuple(float(value) for value in display_bounds)
-        normalized_display_scale = tuple(float(value) for value in display_scale)
+        normalized_display_bounds = (
+            float(display_bounds[0]),
+            float(display_bounds[1]),
+            float(display_bounds[2]),
+            float(display_bounds[3]),
+        )
+        normalized_display_scale = (
+            float(display_scale[0]),
+            float(display_scale[1]),
+        )
         return cls(
             png=png,
             viewport=viewport,

@@ -573,18 +573,8 @@ def test_cli_record_web_requires_url(tmp_path: Path) -> None:
         ),
         (
             "linux",
-            ["--linux-app", "gedit"],
-            "no Linux window-scoping primitive",
-        ),
-        (
-            "linux",
-            ["--linux-window-title", "Untitled Document 1"],
-            "no Linux window-scoping primitive",
-        ),
-        (
-            "linux",
             ["--linux-allow-physical-input"],
-            "no Linux window-scoping primitive",
+            "permits replay-time physical input",
         ),
         (
             "rdp",
@@ -663,6 +653,32 @@ def test_cli_record_macos_target_scopes_capture(tmp_path: Path, monkeypatch) -> 
     assert captured["window"] == {"owner": "TextEdit", "title": "notes.txt"}
 
 
+def test_cli_record_linux_target_scopes_capture(tmp_path: Path, monkeypatch) -> None:
+    """Linux target flags bind the exact local X11 Capture window."""
+    captured: dict = {}
+    monkeypatch.setattr(
+        "openadapt_flow.desktop_record.record_desktop_capture",
+        _fake_desktop_record(captured),
+    )
+
+    rc = _run_cli(
+        [
+            "record",
+            "--backend",
+            "linux",
+            "--linux-app",
+            "gedit",
+            "--linux-window-title",
+            "notes.txt",
+            "--out",
+            str(tmp_path / "rec"),
+        ]
+    )
+
+    assert rc == 0
+    assert captured["window"] == {"owner": "gedit", "title": "notes.txt"}
+
+
 @pytest.mark.parametrize(
     ("backend", "generic_flags", "target_flags"),
     [
@@ -671,6 +687,12 @@ def test_cli_record_macos_target_scopes_capture(tmp_path: Path, monkeypatch) -> 
             "macos",
             ["--window-title", "notes.txt"],
             ["--macos-window-title", "draft.txt"],
+        ),
+        ("linux", ["--window", "Notes"], ["--linux-app", "gedit"]),
+        (
+            "linux",
+            ["--window-title", "notes.txt"],
+            ["--linux-window-title", "draft.txt"],
         ),
     ],
 )
@@ -874,7 +896,7 @@ def test_record_desktop_window_forwarded_to_factory(
     """`record_desktop_capture(window=...)` reaches the default factory closure."""
     from openadapt_flow import desktop_record
 
-    # The platform guard only permits window capture on darwin/win32; force a
+    # The platform guard permits window capture on darwin/win32/linux; force a
     # supported platform so this forwarding test runs on the Linux CI host.
     monkeypatch.setattr(desktop_record.sys, "platform", "darwin")
 
@@ -912,7 +934,7 @@ def test_record_desktop_window_unsupported_platform(
     """
     from openadapt_flow import desktop_record
 
-    monkeypatch.setattr(desktop_record.sys, "platform", "linux")
+    monkeypatch.setattr(desktop_record.sys, "platform", "freebsd13")
     with pytest.raises(SystemExit, match="not supported on this host"):
         record_desktop_capture(
             tmp_path / "rec",

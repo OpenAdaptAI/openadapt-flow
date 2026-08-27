@@ -678,7 +678,6 @@ def test_geometry_epoch_change_between_actions_forces_fresh_resolution(
         bundle_dir=bundle,
         run_dir=run_dir,
     )
-
     assert report.success is True
     assert backend.actions == [
         ("click", 110, 105, False),
@@ -686,6 +685,44 @@ def test_geometry_epoch_change_between_actions_forces_fresh_resolution(
     ]
     assert len(vision.template_calls) == 2
     assert len(set(backend.observed_epochs)) == 2
+
+
+def test_coordinate_mapping_epoch_allows_navigation_but_detects_resize() -> None:
+    def observation(*, page: str, size: tuple[int, int]) -> FrameObservation:
+        return FrameObservation.create(
+            make_png(size),
+            origin=(0.0, 0.0),
+            scale=(1.0, 1.0),
+            device_pixel_ratio=1.0,
+            display_id="test-display",
+            display_bounds=(0.0, 0.0, float(size[0]), float(size[1])),
+            display_scale=(1.0, 1.0),
+            topology_sha256=frame_observation_identity({"schema": "test-topology.v1"}),
+            window_identity_sha256=window_identity_sha256(
+                window_id="test-window",
+                pid=1,
+                process_start_time="test-start",
+                owner="Test Backend",
+            ),
+            session_identity_sha256=session_identity_sha256(
+                authority="test",
+                session_id="test-session",
+                session_start_time="test-start",
+                principal_identity_sha256=None,
+            ),
+            page_identity_sha256=hashlib.sha256(page.encode()).hexdigest(),
+            top_level_frame_identity_sha256=hashlib.sha256(
+                f"frame:{page}".encode()
+            ).hexdigest(),
+        )
+
+    before = observation(page="before", size=(300, 200))
+    navigated = observation(page="after", size=(300, 200))
+    resized = observation(page="after", size=(600, 400))
+
+    assert before.geometry_epoch != navigated.geometry_epoch
+    assert before.coordinate_mapping_epoch == navigated.coordinate_mapping_epoch
+    assert before.coordinate_mapping_epoch != resized.coordinate_mapping_epoch
 
 
 def test_happy_path_click_then_param_type(bundle, run_dir):

@@ -699,8 +699,9 @@ openadapt-flow tutorial --simulate-rejected-write
 
 The sample UI paints its success banner, but the server rejects the write and
 the system of record remains empty. The independent effect verifier must refute
-`record_written`. The run returns `RECONCILIATION_REQUIRED`, makes no blind
-retry or replay dispatch, and writes local evidence to
+`record_written`. The fault run halts and classifies the transaction as
+`RECONCILIATION_REQUIRED`. It makes no blind retry or replay dispatch and writes
+local evidence to
 `run-rejected-write/REPORT.md`. It emits no success receipt. This synthetic
 fixture tests the effect-verification boundary; it doesn't qualify a customer
 workflow.

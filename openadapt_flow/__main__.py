@@ -5148,8 +5148,9 @@ def build_parser() -> argparse.ArgumentParser:
             "After the clean VERIFIED run, this advanced fixture reruns the "
             "same certified bundle against a sample backend that reports "
             "success in the UI but rejects the write. OpenAdapt must refuse "
-            "false success and return RECONCILIATION_REQUIRED. Evidence lands "
-            "in <out>/run-rejected-write/REPORT.md"
+            "false success and classify the transaction as "
+            "RECONCILIATION_REQUIRED. Evidence lands in "
+            "<out>/run-rejected-write/REPORT.md"
         ),
     )
     p.add_argument(

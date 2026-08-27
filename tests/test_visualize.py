@@ -561,98 +561,78 @@ def test_projection_refuses_an_out_of_vocabulary_effect_fact() -> None:
 
 
 # --------------------------------------------------------------------------
-# Committed PUBLIC artifacts must carry a PROJECTED spec.
+# A PUBLIC program graph must carry a PROJECTED spec.
 #
 # render_html embeds the whole spec as JSON, so an unprojected graph ships
 # recorded titles, DOM selectors, and template paths inside the published file
-# even though the rendered page never displays them. These artifacts are
-# committed and registered in the reviewed public inventory, so the check has
-# to run against the files themselves, not only against the projection.
+# even though the rendered page never displays them.
+#
+# Deliberately NOT asserted over public-demo/evidence-packs/mockmed-triage-v1,
+# -v2 and -v3. Those are immutable retained packs in a format the exporter will
+# never produce again, pinned byte-for-byte by LEGACY_RETAINED_PACKS in
+# scripts/export_public_demo_evidence.py. Editing them to satisfy a test would
+# trip the anti-tamper control that exists to stop exactly that, so the remedy
+# for a retained pack is withdrawal, never rewriting.
 # --------------------------------------------------------------------------
 
-_PUBLIC_GRAPH_DIRS = (
-    _REPO / "docs" / "showcase-openemr",
-    _REPO
-    / "public-demo"
-    / "evidence-packs"
-    / "mockmed-triage-v1"
-    / "artifacts"
-    / "compiled",
-    _REPO
-    / "public-demo"
-    / "evidence-packs"
-    / "mockmed-triage-v2"
-    / "artifacts"
-    / "compiled",
-    _REPO
-    / "public-demo"
-    / "evidence-packs"
-    / "mockmed-triage-v3"
-    / "artifacts"
-    / "compiled",
-)
+_SHOWCASE_GRAPH_DIR = _REPO / "docs" / "showcase-openemr"
 
 
-def _committed_public_graph_specs() -> list[tuple[Path, dict]]:
-    """Every committed public program graph, as (path, spec dict)."""
+def _embedded_spec(html_path: Path) -> dict:
+    """The spec render_html embeds in the page, as a dict."""
     import re
 
-    found: list[tuple[Path, dict]] = []
-    for directory in _PUBLIC_GRAPH_DIRS:
-        json_path = directory / "program-graph.json"
-        if json_path.exists():
-            found.append((json_path, json.loads(json_path.read_text())))
-        html_path = directory / "program-graph.html"
-        if html_path.exists():
-            embedded = re.search(
-                r'id="program-graph-spec">(.*?)</script>',
-                html_path.read_text(),
-                re.S,
-            )
-            assert embedded is not None, f"{html_path} has no embedded spec"
-            found.append(
-                (html_path, json.loads(embedded.group(1).replace("<\\/", "</")))
-            )
-    return found
+    match = re.search(
+        r'id="program-graph-spec">(.*?)</script>', html_path.read_text(), re.S
+    )
+    assert match is not None, f"{html_path} has no embedded spec"
+    return json.loads(match.group(1).replace("<\\/", "</"))
 
 
-def test_committed_public_graphs_are_all_discovered() -> None:
-    """Guard the guard: if the artifacts move, the check below must not turn
-    into a silent no-op over an empty list."""
-    import subprocess
-
-    tracked = subprocess.run(
-        ["git", "ls-files", "*program-graph.html", "*program-graph.json"],
-        cwd=_REPO,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.split()
-    assert len(tracked) == len(_committed_public_graph_specs()) == 8, tracked
-
-
-def test_committed_public_graphs_carry_a_projected_spec() -> None:
-    """A committed public artifact must not contain local diagnostic content."""
+def _assert_spec_is_projected(spec: dict, where: object) -> None:
+    """Fail if any local diagnostic content survived into ``spec``."""
     from openadapt_flow.visualize.projection import _NODE_LOCAL
     from openadapt_flow.visualize.spec import PROJECTED_BUNDLE_NAME
 
-    for path, spec in _committed_public_graph_specs():
-        where = path.relative_to(_REPO)
-        assert spec["bundle"]["name"] == PROJECTED_BUNDLE_NAME, where
-        assert spec["bundle"].get("created_at") is None, where
-        assert spec["bundle"]["provenance"].get("content_digest") is None, where
-        for node in spec["nodes"]:
-            for rung in (node.get("resolution") or {}).get("rungs", []):
-                # detail carries the selector, template path, or OCR text.
-                assert not rung.get("detail"), (where, node["id"], rung["name"])
-            for field in _NODE_LOCAL:
-                assert not node.get(field), (where, node["id"], field)
-        for edge in spec["edges"]:
-            assert edge.get("guard") is None, where
+    assert spec["bundle"]["name"] == PROJECTED_BUNDLE_NAME, where
+    assert spec["bundle"].get("created_at") is None, where
+    assert spec["bundle"]["provenance"].get("content_digest") is None, where
+    for node in spec["nodes"]:
+        for rung in (node.get("resolution") or {}).get("rungs", []):
+            # detail carries the selector, template path, or OCR text.
+            assert not rung.get("detail"), (where, node["id"], rung["name"])
+        for field in _NODE_LOCAL:
+            assert not node.get(field), (where, node["id"], field)
+    for edge in spec["edges"]:
+        assert edge.get("guard") is None, where
 
 
-def test_public_evidence_export_projects_before_rendering() -> None:
-    """The export script must cross the boundary, not render the local graph."""
-    source = (_REPO / "scripts" / "export_public_demo_evidence.py").read_text()
-    assert "project_program_graph(" in source
-    assert "PresentationProfile.PUBLIC_SYNTHETIC" in source
+def test_committed_showcase_graph_carries_a_projected_spec() -> None:
+    """The committed showcase graph is a public artifact in both formats."""
+    json_path = _SHOWCASE_GRAPH_DIR / "program-graph.json"
+    html_path = _SHOWCASE_GRAPH_DIR / "program-graph.html"
+    assert json_path.exists() and html_path.exists()
+    _assert_spec_is_projected(json.loads(json_path.read_text()), json_path)
+    _assert_spec_is_projected(_embedded_spec(html_path), html_path)
+
+
+def test_newly_exported_pack_graph_is_projected(tmp_path: Path) -> None:
+    """The evidence exporter must cross the boundary, not publish the local
+    graph. Exercises the real write path rather than grepping the source."""
+    from scripts.export_public_demo_evidence import write_compiled_graph
+
+    workflow = _mixed_workflow()
+    write_compiled_graph(tmp_path, workflow)
+
+    written_json = json.loads((tmp_path / "program-graph.json").read_text())
+    _assert_spec_is_projected(written_json, "exported program-graph.json")
+    _assert_spec_is_projected(
+        _embedded_spec(tmp_path / "program-graph.html"), "exported program-graph.html"
+    )
+
+    # The recorded content of the source workflow must not appear anywhere in
+    # either published byte stream.
+    for name in ("program-graph.json", "program-graph.html"):
+        blob = (tmp_path / name).read_text()
+        for secret in ("unit-mixed", "patient row", "#row-1", "click Save"):
+            assert secret not in blob, (name, secret)

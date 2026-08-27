@@ -78,6 +78,47 @@ def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
     }
 
 
+def _result_loss_closure_vector(payload) -> dict[str, object]:
+    request = _result_loss_request()
+    closure = payload.delivery_result_loss_closure
+    assert closure is not None
+    closure_raw = canonical_json(closure)
+    chain_raw = canonical_json(payload.permit_chain)
+    closure_result = {
+        "schema_version": (
+            "openadapt.production-delivery-result-loss-closure-result/v2"
+        ),
+        "status": "closed",
+        "closure_artifact_bytes_base64": b64encode(closure_raw).decode("ascii"),
+        "closure_artifact_sha256": closure.artifact_sha256(),
+        "permit_chain_bytes_base64": b64encode(chain_raw).decode("ascii"),
+        "permit_chain_sha256": payload.permit_chain.permit_chain_sha256,
+    }
+    return {
+        "http_method": "POST",
+        "http_route": "/api/internal/managed-delivery-result-loss-closure",
+        "authorization_credential_source": "hosted_dispatch.lease_token",
+        "request_digest_domain_base64": b64encode(
+            RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
+        ).decode("ascii"),
+        "request_canonical_base64": b64encode(request.canonical_bytes()).decode(
+            "ascii"
+        ),
+        "request_sha256": request.request_sha256(),
+        "payload_signature_domain_base64": b64encode(
+            RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
+        ).decode("ascii"),
+        "closure_payload_sha256": closure.payload_sha256,
+        "closure_artifact_canonical_base64": b64encode(closure_raw).decode("ascii"),
+        "closure_artifact_sha256": closure.artifact_sha256(),
+        "permit_chain_canonical_base64": b64encode(chain_raw).decode("ascii"),
+        "permit_chain_sha256": payload.permit_chain.permit_chain_sha256,
+        "result_canonical_base64": b64encode(canonical_json(closure_result)).decode(
+            "ascii"
+        ),
+    }
+
+
 def build_fixture() -> dict[str, object]:
     private_key = _private_key()
     private_bytes = private_key.private_bytes(
@@ -90,21 +131,7 @@ def build_fixture() -> dict[str, object]:
         format=serialization.PublicFormat.Raw,
     )
     managed = _managed_result_loss_payload()
-    request = _result_loss_request()
-    closure = managed.delivery_result_loss_closure
-    assert closure is not None
-    closure_raw = canonical_json(closure)
-    chain_raw = canonical_json(managed.permit_chain)
-    closure_result = {
-        "schema_version": (
-            "openadapt.production-delivery-result-loss-closure-result/v2"
-        ),
-        "status": "closed",
-        "closure_artifact_bytes_base64": b64encode(closure_raw).decode("ascii"),
-        "closure_artifact_sha256": closure.artifact_sha256(),
-        "permit_chain_bytes_base64": b64encode(chain_raw).decode("ascii"),
-        "permit_chain_sha256": managed.permit_chain.permit_chain_sha256,
-    }
+    managed_acknowledged = _managed_result_loss_acknowledged_payload()
     return {
         "key_id": evidence_runner_key_id(public_bytes),
         "private_key_base64": b64encode(private_bytes).decode("ascii"),
@@ -112,29 +139,10 @@ def build_fixture() -> dict[str, object]:
         "schema_version": "openadapt.production-terminal-cross-language-vectors/v2",
         "signature_domain_base64": b64encode(SIGNATURE_DOMAIN).decode("ascii"),
         "signer_sha256": evidence_runner_signer_sha256(public_bytes),
-        "managed_result_loss_closure_vector": {
-            "http_method": "POST",
-            "http_route": "/api/internal/managed-delivery-result-loss-closure",
-            "authorization_credential_source": "hosted_dispatch.lease_token",
-            "request_digest_domain_base64": b64encode(
-                RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
-            ).decode("ascii"),
-            "request_canonical_base64": b64encode(request.canonical_bytes()).decode(
-                "ascii"
-            ),
-            "request_sha256": request.request_sha256(),
-            "payload_signature_domain_base64": b64encode(
-                RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
-            ).decode("ascii"),
-            "closure_payload_sha256": closure.payload_sha256,
-            "closure_artifact_canonical_base64": b64encode(closure_raw).decode("ascii"),
-            "closure_artifact_sha256": closure.artifact_sha256(),
-            "permit_chain_canonical_base64": b64encode(chain_raw).decode("ascii"),
-            "permit_chain_sha256": managed.permit_chain.permit_chain_sha256,
-            "result_canonical_base64": b64encode(canonical_json(closure_result)).decode(
-                "ascii"
-            ),
-        },
+        "managed_result_loss_closure_vector": _result_loss_closure_vector(managed),
+        "managed_result_loss_acknowledged_closure_vector": (
+            _result_loss_closure_vector(managed_acknowledged)
+        ),
         "vectors": [
             _vector(
                 "verified-complete",

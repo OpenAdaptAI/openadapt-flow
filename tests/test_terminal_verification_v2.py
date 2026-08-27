@@ -944,7 +944,7 @@ def _managed_result_loss_payload(
         postcondition_evidence=(),
         evidence_classes=("authorization",),
         model_calls=0,
-        external_network_calls="none",
+        external_network_calls="observed",
         managed_result_loss_evidence_sha256=loss.evidence_sha256,
     )
     receipt = ProductionRunReceipt(
@@ -976,7 +976,7 @@ def _managed_result_loss_payload(
         substrate="web",
         provenance="production",
         receipt_builder_version="1.2.3",
-        external_network_calls="none",
+        external_network_calls="observed",
         bundle_digest=SHA_A,
         source_receipt_digest=SHA_B,
         source_receipt_sha256=SHA_B,
@@ -1317,6 +1317,25 @@ def test_terminal_v2_signs_managed_result_loss_without_effect_absence() -> None:
     assert loss.blind_retry_authorized is False
     assert loss.actuation_replay_authorized is False
     assert envelope.payload.managed_result_loss == loss
+    assert payload.execution_outcome.external_network_calls == "observed"
+    assert payload.run_receipt.external_network_calls == "observed"
+
+
+def test_managed_result_loss_requires_observed_closure_network_io() -> None:
+    raw = _managed_result_loss_payload().model_dump(mode="json")
+    outcome = ProductionExecutionOutcome.model_validate(raw["execution_outcome"])
+    outcome = outcome.model_copy(update={"external_network_calls": "none"})
+    receipt = ProductionRunReceipt.model_validate(raw["run_receipt"])
+    receipt = receipt.model_copy(update={"external_network_calls": "none"})
+    raw["execution_outcome"] = outcome.model_dump(mode="json")
+    raw["execution_outcome_sha256"] = outcome.artifact_sha256()
+    raw["run_receipt"] = receipt.model_dump(mode="json")
+    raw["run_receipt_sha256"] = hashlib.sha256(
+        canonical_json(receipt.model_dump(mode="json"))
+    ).hexdigest()
+
+    with pytest.raises(ValueError, match="managed result loss terminal binding"):
+        ProductionTerminalVerificationPayload.model_validate(raw)
 
 
 def test_terminal_v2_signs_ack_won_managed_result_loss_without_uncertainty() -> None:
@@ -1871,42 +1890,56 @@ def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:
             encoding="utf-8"
         )
     )
-    vector = fixture["managed_result_loss_closure_vector"]
-    request_raw = b64decode(vector["request_canonical_base64"], validate=True)
-    closure_raw = b64decode(
-        vector["closure_artifact_canonical_base64"], validate=True
+    names = (
+        "managed_result_loss_closure_vector",
+        "managed_result_loss_acknowledged_closure_vector",
     )
-    chain_raw = b64decode(vector["permit_chain_canonical_base64"], validate=True)
-    result_raw = b64decode(vector["result_canonical_base64"], validate=True)
-    request = ProductionDeliveryResultLossClosureRequest.model_validate_json(
-        request_raw
-    )
-    closure = ProductionDeliveryResultLossClosureArtifact.model_validate_json(
-        closure_raw
-    )
-    chain = ProductionDeliveryPermitChain.model_validate_json(chain_raw)
-    result = ProductionDeliveryResultLossClosureResult.model_validate_json(result_raw)
+    pending_counts: list[int] = []
+    for name in names:
+        vector = fixture[name]
+        request_raw = b64decode(vector["request_canonical_base64"], validate=True)
+        closure_raw = b64decode(
+            vector["closure_artifact_canonical_base64"], validate=True
+        )
+        chain_raw = b64decode(
+            vector["permit_chain_canonical_base64"], validate=True
+        )
+        result_raw = b64decode(vector["result_canonical_base64"], validate=True)
+        request = ProductionDeliveryResultLossClosureRequest.model_validate_json(
+            request_raw
+        )
+        closure = ProductionDeliveryResultLossClosureArtifact.model_validate_json(
+            closure_raw
+        )
+        chain = ProductionDeliveryPermitChain.model_validate_json(chain_raw)
+        result = ProductionDeliveryResultLossClosureResult.model_validate_json(
+            result_raw
+        )
 
-    assert vector["http_method"] == "POST"
-    assert vector["http_route"] == (
-        "/api/internal/managed-delivery-result-loss-closure"
-    )
-    assert vector["authorization_credential_source"] == "hosted_dispatch.lease_token"
-    assert b64decode(vector["request_digest_domain_base64"], validate=True) == (
-        RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
-    )
-    assert b64decode(vector["payload_signature_domain_base64"], validate=True) == (
-        RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
-    )
-    assert request.canonical_bytes() == request_raw
-    assert request.request_sha256() == vector["request_sha256"]
-    assert closure.canonical_bytes() == closure_raw
-    assert closure.payload_sha256 == vector["closure_payload_sha256"]
-    assert closure.artifact_sha256() == vector["closure_artifact_sha256"]
-    assert canonical_json(chain) == chain_raw
-    assert chain.permit_chain_sha256 == vector["permit_chain_sha256"]
-    assert canonical_json(result) == result_raw
-    assert result.artifacts() == (closure, chain)
+        assert vector["http_method"] == "POST"
+        assert vector["http_route"] == (
+            "/api/internal/managed-delivery-result-loss-closure"
+        )
+        assert vector["authorization_credential_source"] == (
+            "hosted_dispatch.lease_token"
+        )
+        assert b64decode(vector["request_digest_domain_base64"], validate=True) == (
+            RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
+        )
+        assert b64decode(
+            vector["payload_signature_domain_base64"], validate=True
+        ) == (RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN)
+        assert request.canonical_bytes() == request_raw
+        assert request.request_sha256() == vector["request_sha256"]
+        assert closure.canonical_bytes() == closure_raw
+        assert closure.payload_sha256 == vector["closure_payload_sha256"]
+        assert closure.artifact_sha256() == vector["closure_artifact_sha256"]
+        assert canonical_json(chain) == chain_raw
+        assert chain.permit_chain_sha256 == vector["permit_chain_sha256"]
+        assert canonical_json(result) == result_raw
+        assert result.artifacts() == (closure, chain)
+        pending_counts.append(closure.payload.pending_permit_count)
+    assert pending_counts == [1, 0]
 
 
 def test_delivery_artifact_rebuild_rejects_noncanonical_stored_bytes() -> None:

@@ -2683,6 +2683,8 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 != (chain.pending or chain.entries[0]).run_request_sha256
                 or result_loss.pending_action_request_sha256
                 != (pending.action_request_sha256 if pending is not None else None)
+                or outcome.external_network_calls != "observed"
+                or receipt.external_network_calls != "observed"
                 or manifests.identity.required != 0
                 or manifests.identity.confirmed != 0
                 or manifests.identity.results

@@ -115,6 +115,12 @@ _CHILD_START_DOMAIN = b"OpenAdapt managed child start v1\0"
 _RUN_STORE_IDENTITY_DOMAIN = b"OpenAdapt managed run store identity v1\0"
 _RESULT_LOSS_SNAPSHOT_DOMAIN = b"OpenAdapt managed result loss snapshot v1\0"
 _MAX_TERMINAL_STATE_BYTES = 2 * (4 * ((_MAX_ARTIFACT_BYTES + 2) // 3)) + 4096
+ManagedResultLossCode = Literal[
+    "runner_exception",
+    "report_missing",
+    "report_invalid",
+    "recovered_after_restart",
+]
 
 # The current runner credential is never part of a request model. Desktop may
 # project it into this header only for POST /api/runners/register on the exact
@@ -1489,29 +1495,17 @@ class HostedRunnerAdapter:
             raise ValueError("managed result loss classification changed")
         return RunReport.model_validate_json(report.model_dump_json())
 
-    def _produce_managed_result_loss(
+    def _retain_managed_result_loss_closure(
         self,
         *,
         dispatch: HostedDispatch,
-        workflow: Workflow,
         run_dir: Path,
-        qualification: ProductionQualificationAuthority,
-        private_key: Ed25519PrivateKey,
-        verified_params: dict[str, RuntimeParamScalar],
         dispatch_binding_sha256: str,
         closure_authority: HostedRunnerTransport,
-        loss_code: Literal[
-            "runner_exception",
-            "report_missing",
-            "recovered_after_restart",
-        ],
-    ) -> tuple[ProductionTerminalVerificationEnvelope, str, RunReport]:
-        """Seal one result-loss report without resolving or replaying delivery."""
+        loss_code: ManagedResultLossCode,
+    ) -> ManagedResultLossSnapshot:
+        """Fence delivery authority before any fallible terminal proof work."""
 
-        store = CheckpointStore(run_dir)
-        manifest = store.read_manifest()
-        if manifest is None:
-            raise ValueError("managed result loss lacks a retained run manifest")
         marker = self._read_child_start_evidence(
             dispatch=dispatch,
             run_dir=run_dir,
@@ -1521,11 +1515,7 @@ class HostedRunnerAdapter:
         def snapshot_from_closure(
             *,
             request: ProductionDeliveryResultLossClosureRequest,
-            retained_loss_code: Literal[
-                "runner_exception",
-                "report_missing",
-                "recovered_after_restart",
-            ],
+            retained_loss_code: ManagedResultLossCode,
             closure_artifact: ProductionDeliveryResultLossClosureArtifact,
             retained_chain: ProductionDeliveryPermitChain,
         ) -> ManagedResultLossSnapshot:
@@ -1696,6 +1686,43 @@ class HostedRunnerAdapter:
                 snapshot = read_retained_snapshot()
         else:
             snapshot = read_retained_snapshot()
+        return snapshot
+
+    def _produce_managed_result_loss(
+        self,
+        *,
+        dispatch: HostedDispatch,
+        workflow: Workflow,
+        run_dir: Path,
+        qualification: ProductionQualificationAuthority,
+        private_key: Ed25519PrivateKey,
+        verified_params: dict[str, RuntimeParamScalar],
+        dispatch_binding_sha256: str,
+        loss_code: ManagedResultLossCode,
+        closure_authority: HostedRunnerTransport | None = None,
+        snapshot: ManagedResultLossSnapshot | None = None,
+    ) -> tuple[ProductionTerminalVerificationEnvelope, str, RunReport]:
+        """Sign one result-loss terminal after Cloud has fenced delivery."""
+
+        if snapshot is None:
+            if closure_authority is None:
+                raise ValueError("hosted result-loss closure authority is absent")
+            snapshot = self._retain_managed_result_loss_closure(
+                dispatch=dispatch,
+                run_dir=run_dir,
+                dispatch_binding_sha256=dispatch_binding_sha256,
+                closure_authority=closure_authority,
+                loss_code=loss_code,
+            )
+        store = CheckpointStore(run_dir)
+        manifest = store.read_manifest()
+        if manifest is None:
+            raise ValueError("managed result loss lacks a retained run manifest")
+        marker = self._read_child_start_evidence(
+            dispatch=dispatch,
+            run_dir=run_dir,
+            dispatch_binding_sha256=dispatch_binding_sha256,
+        )
         evidence = snapshot.evidence
         observed_at = evidence.observed_at
         expected = qualification.expected
@@ -2432,16 +2459,6 @@ class HostedRunnerAdapter:
         """
 
         parsed = HostedDispatch.model_validate(dispatch)
-        config = load_runner_config(runner_config, protected=True)
-        self._protected_runner_origin(config)
-        self._verify_product_release(parsed, config)
-        key = self._load_evidence_private_key(config)
-        qualification, deployment_bytes = self._verify_workflow_admission(
-            parsed,
-            config,
-            evidence_private_key=key,
-        )
-        params = self._resolve_params(parsed, config)
         run_dir = Path(run_dir)
         run_stat = run_dir.lstat()
         if (
@@ -2456,6 +2473,33 @@ class HostedRunnerAdapter:
             )
         ):
             raise ValueError("hosted recovery run directory is not protected")
+        self._read_child_start_evidence(
+            dispatch=parsed,
+            run_dir=run_dir,
+            dispatch_binding_sha256=parsed.payload.dispatch_binding_sha256,
+        )
+        reservation_key = f"{parsed.tenant_id}:{parsed.idempotency_key}"
+        reservation = self._ledger.lookup(reservation_key)
+        if reservation is None or reservation.get("run_id") != parsed.run_id:
+            raise ValueError("hosted recovery lacks the original reservation")
+        loss_snapshot = self._retain_managed_result_loss_closure(
+            dispatch=parsed,
+            run_dir=run_dir,
+            dispatch_binding_sha256=parsed.payload.dispatch_binding_sha256,
+            closure_authority=closure_authority,
+            loss_code="recovered_after_restart",
+        )
+
+        config = load_runner_config(runner_config, protected=True)
+        self._protected_runner_origin(config)
+        self._verify_product_release(parsed, config)
+        key = self._load_evidence_private_key(config)
+        qualification, deployment_bytes = self._verify_workflow_admission(
+            parsed,
+            config,
+            evidence_private_key=key,
+        )
+        params = self._resolve_params(parsed, config)
         profile_path = run_dir / "deployment.yaml"
         if (
             self._read_private_bytes(
@@ -2475,15 +2519,10 @@ class HostedRunnerAdapter:
         )
         if isinstance(verified, Refusal):
             raise ValueError("hosted recovery dispatch no longer verifies")
-        self._read_child_start_evidence(
-            dispatch=parsed,
-            run_dir=run_dir,
-            dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
-        )
-        reservation_key = f"{parsed.tenant_id}:{parsed.idempotency_key}"
-        reservation = self._ledger.lookup(reservation_key)
-        if reservation is None or reservation.get("run_id") != parsed.run_id:
-            raise ValueError("hosted recovery lacks the original reservation")
+        if verified.payload.dispatch_binding_sha256 != (
+            parsed.payload.dispatch_binding_sha256
+        ):
+            raise ValueError("hosted recovery dispatch binding changed")
 
         proof, report_digest, report = self._produce_managed_result_loss(
             dispatch=parsed,
@@ -2493,8 +2532,8 @@ class HostedRunnerAdapter:
             private_key=key,
             verified_params=params,
             dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
-            closure_authority=closure_authority,
             loss_code="recovered_after_restart",
+            snapshot=loss_snapshot,
         )
         outcome = TransactionOutcome.RECONCILIATION_REQUIRED
         self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
@@ -2706,6 +2745,13 @@ class HostedRunnerAdapter:
             try:
                 if closure_authority is None:
                     raise ValueError("hosted result-loss closure authority is absent")
+                loss_snapshot = self._retain_managed_result_loss_closure(
+                    dispatch=parsed,
+                    run_dir=run_dir,
+                    dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                    closure_authority=closure_authority,
+                    loss_code="runner_exception",
+                )
                 terminal_key, terminal_qualification = (
                     self._revalidate_terminal_authority(
                         dispatch=parsed,
@@ -2724,8 +2770,8 @@ class HostedRunnerAdapter:
                         private_key=terminal_key,
                         verified_params=params,
                         dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
-                        closure_authority=closure_authority,
                         loss_code="runner_exception",
+                        snapshot=loss_snapshot,
                     )
                 )
             except Exception as terminal_exc:
@@ -2768,6 +2814,13 @@ class HostedRunnerAdapter:
             try:
                 if closure_authority is None:
                     raise ValueError("hosted result-loss closure authority is absent")
+                loss_snapshot = self._retain_managed_result_loss_closure(
+                    dispatch=parsed,
+                    run_dir=run_dir,
+                    dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                    closure_authority=closure_authority,
+                    loss_code="report_missing",
+                )
                 terminal_key, terminal_qualification = (
                     self._revalidate_terminal_authority(
                         dispatch=parsed,
@@ -2786,8 +2839,8 @@ class HostedRunnerAdapter:
                         private_key=terminal_key,
                         verified_params=params,
                         dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
-                        closure_authority=closure_authority,
                         loss_code="report_missing",
+                        snapshot=loss_snapshot,
                     )
                 )
             except Exception as terminal_exc:
@@ -2865,6 +2918,40 @@ class HostedRunnerAdapter:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             proof = None
             terminalization_error = exc
+            try:
+                if closure_authority is None:
+                    raise ValueError("hosted result-loss closure authority is absent")
+                loss_snapshot = self._retain_managed_result_loss_closure(
+                    dispatch=parsed,
+                    run_dir=run_dir,
+                    dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                    closure_authority=closure_authority,
+                    loss_code="report_invalid",
+                )
+                terminal_key, terminal_qualification = (
+                    self._revalidate_terminal_authority(
+                        dispatch=parsed,
+                        runner_config=runner_config,
+                        configured_origin=configured_origin,
+                        initial_qualification=qualification,
+                        initial_deployment_bytes=deployment_bytes,
+                    )
+                )
+                proof, report_digest, report = self._produce_managed_result_loss(
+                    dispatch=parsed,
+                    workflow=verified.workflow,
+                    run_dir=run_dir,
+                    qualification=terminal_qualification,
+                    private_key=terminal_key,
+                    verified_params=params,
+                    dispatch_binding_sha256=verified.payload.dispatch_binding_sha256,
+                    loss_code="report_invalid",
+                    snapshot=loss_snapshot,
+                )
+            except Exception as loss_exc:  # noqa: BLE001 - remains fenced/reconciling
+                terminalization_error = loss_exc
+            else:
+                terminalization_error = None
         else:
             terminalization_error = None
         if proof is None and outcome in {

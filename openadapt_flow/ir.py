@@ -3405,6 +3405,7 @@ class ManagedResultLossEvidence(BaseModel):
     loss_code: Literal[
         "runner_exception",
         "report_missing",
+        "report_invalid",
         "recovered_after_restart",
     ]
     child_started_at: str = Field(

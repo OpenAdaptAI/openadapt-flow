@@ -1015,8 +1015,17 @@ def test_hosted_uncertain_delivery_fault_never_replays(
             ManagedExecution(returncode=1, report_bytes=None),
             "report_missing",
         ),
+        (
+            ManagedExecution(returncode=1, report_bytes=b"{"),
+            "report_invalid",
+        ),
     ],
-    ids=("runtime-exception", "transport-exception", "missing-report"),
+    ids=(
+        "runtime-exception",
+        "transport-exception",
+        "missing-report",
+        "malformed-report",
+    ),
 )
 def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
     monkeypatch,
@@ -1065,11 +1074,21 @@ def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
     )
     report = _production_report()
     seen_loss_codes: list[str] = []
+    seen_fence_codes: list[str] = []
+
+    def retain_loss_closure(**kwargs):
+        seen_fence_codes.append(kwargs["loss_code"])
+        return object()
 
     def produce_loss(**kwargs):
         seen_loss_codes.append(kwargs["loss_code"])
         return proof, proof.payload.run_report_sha256, report
 
+    monkeypatch.setattr(
+        adapter,
+        "_retain_managed_result_loss_closure",
+        retain_loss_closure,
+    )
     monkeypatch.setattr(adapter, "_produce_managed_result_loss", produce_loss)
     authority = DeliveryAuthority(
         dispatch.managed_delivery_authority_url,
@@ -1086,6 +1105,7 @@ def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
     callback = adapter.callback_request(dispatch, result)
 
     assert calls == 1
+    assert seen_fence_codes == [expected_loss_code]
     assert seen_loss_codes == [expected_loss_code]
     assert result.outcome is TransactionOutcome.RECONCILIATION_REQUIRED
     assert result.uncertain_delivery is True
@@ -1110,6 +1130,177 @@ def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
             authority=authority,
         )
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    ("result_mode", "expected_loss_code"),
+    [
+        ("runner-exception", "runner_exception"),
+        ("missing-report", "report_missing"),
+        ("malformed-report", "report_invalid"),
+        ("conflicting-child-proof", "report_invalid"),
+    ],
+)
+def test_result_loss_fences_before_terminal_trust_revalidation(
+    monkeypatch,
+    tmp_path,
+    config,
+    sealed,
+    result_mode,
+    expected_loss_code,
+) -> None:
+    workflow, _ = sealed
+
+    def runner(_argv, _run_dir, _child_env):
+        if result_mode == "runner-exception":
+            raise RuntimeError("child result lost")
+        if result_mode == "missing-report":
+            return ManagedExecution(returncode=1, report_bytes=None)
+        if result_mode == "malformed-report":
+            return ManagedExecution(returncode=1, report_bytes=b"{")
+        return ManagedExecution(
+            returncode=0,
+            report_bytes=_production_report().model_dump_json().encode("utf-8"),
+            terminal_verification=sign_production_terminal_verification(
+                _managed_result_loss_payload(),
+                _private_key(),
+            ),
+        )
+
+    adapter, dispatch = _prepared_adapter(
+        monkeypatch,
+        tmp_path,
+        config,
+        workflow,
+        runner,
+    )
+    fence_codes: list[str] = []
+
+    def retain_fence(**kwargs):
+        fence_codes.append(kwargs["loss_code"])
+        return object()
+
+    monkeypatch.setattr(
+        adapter,
+        "_retain_managed_result_loss_closure",
+        retain_fence,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_revalidate_terminal_authority",
+        lambda **_kwargs: (_ for _ in ()).throw(ValueError("authority revoked")),
+    )
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation"):
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run",
+            authority=authority,
+            closure_authority=SimpleNamespace(),
+        )
+
+    assert fence_codes == [expected_loss_code]
+    reservation = adapter._ledger.lookup(
+        f"{dispatch.tenant_id}:{dispatch.idempotency_key}"
+    )
+    assert reservation is not None
+    assert reservation["outcome"] == "RECONCILIATION_REQUIRED"
+
+
+def test_result_loss_fences_before_missing_child_manifest_is_read(
+    monkeypatch, tmp_path, config, sealed
+) -> None:
+    workflow, _ = sealed
+
+    def runner(_argv, _run_dir, _child_env):
+        raise RuntimeError("child result lost")
+
+    adapter, dispatch = _prepared_adapter(
+        monkeypatch,
+        tmp_path,
+        config,
+        workflow,
+        runner,
+    )
+    fenced = object()
+    monkeypatch.setattr(
+        adapter,
+        "_retain_managed_result_loss_closure",
+        lambda **_kwargs: fenced,
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_revalidate_terminal_authority",
+        lambda **_kwargs: (object(), object()),
+    )
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+
+    with pytest.raises(RuntimeError, match="signed terminal reconciliation") as error:
+        adapter.execute(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=tmp_path / "run",
+            authority=authority,
+            closure_authority=SimpleNamespace(),
+        )
+
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "retained run manifest" in str(error.value.__cause__)
+
+
+def test_restart_recovery_fences_before_current_runner_trust_is_loaded(
+    monkeypatch, tmp_path, sealed
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(mode=0o700)
+    adapter._write_child_start_evidence(
+        dispatch=dispatch,
+        run_dir=run_dir,
+        dispatch_binding_sha256=dispatch.payload.dispatch_binding_sha256,
+    )
+    adapter._ledger.reserve(
+        f"{dispatch.tenant_id}:{dispatch.idempotency_key}",
+        run_id=dispatch.run_id,
+    )
+    fence_codes: list[str] = []
+
+    def retain_fence(**kwargs):
+        fence_codes.append(kwargs["loss_code"])
+        return object()
+
+    monkeypatch.setattr(
+        adapter,
+        "_retain_managed_result_loss_closure",
+        retain_fence,
+    )
+    monkeypatch.setattr(
+        hosted,
+        "load_runner_config",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("runner trust unavailable")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="runner trust unavailable"):
+        adapter.recover_uncertain_run(
+            dispatch,
+            runner_config=tmp_path / "runner.toml",
+            run_dir=run_dir,
+            closure_authority=SimpleNamespace(),
+        )
+
+    assert fence_codes == ["recovered_after_restart"]
 
 
 def test_managed_result_loss_report_is_outer_recovery_only(tmp_path, sealed) -> None:

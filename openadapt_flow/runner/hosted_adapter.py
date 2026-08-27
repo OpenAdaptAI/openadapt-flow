@@ -313,8 +313,18 @@ class HostedTerminalEvent(_Closed):
         has_proof = self.terminal_verification_artifact_bytes_base64 is not None
         if has_proof != (self.terminal_verification_artifact_sha256 is not None):
             raise ValueError("terminal verification binding is incomplete")
-        if self.outcome in {"VERIFIED", "HALTED_BEFORE_EFFECT"} and not has_proof:
+        if (
+            self.outcome
+            in {
+                "VERIFIED",
+                "HALTED_BEFORE_EFFECT",
+                "RECONCILIATION_REQUIRED",
+            }
+            and not has_proof
+        ):
             raise ValueError(f"{self.outcome} requires exact terminal verification")
+        if self.uncertain_delivery != (self.outcome == "RECONCILIATION_REQUIRED"):
+            raise ValueError("terminal uncertainty conflicts with its outcome")
         if (
             self.outcome
             not in {
@@ -373,6 +383,7 @@ class HostedRunResult(_Closed):
             in {
                 TransactionOutcome.VERIFIED,
                 TransactionOutcome.HALTED_BEFORE_EFFECT,
+                TransactionOutcome.RECONCILIATION_REQUIRED,
             }
             and self.terminal_verification is None
         ):
@@ -426,6 +437,34 @@ class CallbackRequest(_Closed):
     product_release_admission_sha256: str = Field(pattern=_HEX64)
     workflow_admission_sha256: str = Field(pattern=_HEX64)
     events: tuple[dict[str, Any], ...] = Field(min_length=1, max_length=10_001)
+
+    @model_validator(mode="after")
+    def _atomic_terminal_batch(self) -> "CallbackRequest":
+        terminal_indices = tuple(
+            index
+            for index, event in enumerate(self.events)
+            if event.get("schema_version") == "openadapt.hosted-runner-terminal/v1"
+        )
+        if terminal_indices != (len(self.events) - 1,):
+            raise ValueError("callback must end in exactly one terminal event")
+        terminal = HostedTerminalEvent.model_validate(self.events[-1])
+        summaries = tuple(
+            event for event in self.events[:-1] if event.get("kind") == "run_summary"
+        )
+        if len(summaries) != 1:
+            raise ValueError("callback must contain exactly one run summary")
+        if any(event.get("run_id") != terminal.run_id for event in self.events[:-1]):
+            raise ValueError("callback evidence names a different run")
+        summary = summaries[0].get("run_summary")
+        if not isinstance(summary, dict):
+            raise ValueError("callback run summary is invalid")
+        expected_status = {
+            "VERIFIED": "confirmed",
+            "HALTED_BEFORE_EFFECT": "halted-needs-attention",
+        }.get(terminal.outcome, "failed")
+        if summary.get("status") != expected_status:
+            raise ValueError("callback run summary conflicts with terminal outcome")
+        return self
 
 
 class CallbackResponse(_Closed):
@@ -1199,12 +1238,24 @@ class HostedRunnerAdapter:
             raise ValueError("run report differs from retained governed inputs")
 
         prepared = prepare_production_terminal_evidence(report)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        now_text = now.isoformat().replace("+00:00", "Z")
         chain = DurableAuthority(run_dir, store).production_delivery_permit_chain(
             allow_empty=(
                 prepared.transaction_outcome is TransactionOutcome.HALTED_BEFORE_EFFECT
-            )
+            ),
+            allow_pending=(
+                prepared.transaction_outcome
+                is TransactionOutcome.RECONCILIATION_REQUIRED
+            ),
+            receipt_absence_observed_at=(
+                now_text
+                if prepared.transaction_outcome
+                is TransactionOutcome.RECONCILIATION_REQUIRED
+                else None
+            ),
         )
-        first = chain.entries[0] if chain.entries else None
+        first = chain.entries[0] if chain.entries else chain.pending
         expected = qualification.expected
         runtime = expected.runtime_build_identity
         flow_run_id_sha256 = hashlib.sha256(dispatch.run_id.encode("utf-8")).hexdigest()
@@ -1230,13 +1281,14 @@ class HostedRunnerAdapter:
             != qualification.qualification_signer_registry_sha256
             or first.qualification_signer_registry_revision
             != qualification.qualification_signer_registry.revision
-            or first.authenticated_runner_id_sha256 != runner_id_sha256
-            or first.authenticated_session_id_sha256 != runner_session_id_sha256
         ):
             raise ValueError("retained delivery chain differs from admitted live state")
-
-        now = datetime.now(timezone.utc).replace(microsecond=0)
-        now_text = now.isoformat().replace("+00:00", "Z")
+        if chain.entries and (
+            chain.entries[0].authenticated_runner_id_sha256 != runner_id_sha256
+            or chain.entries[0].authenticated_session_id_sha256
+            != runner_session_id_sha256
+        ):
+            raise ValueError("retained delivery chain differs from admitted live state")
         context = ProductionTerminalVerificationContext(
             run_id=dispatch.run_id,
             tenant_id=dispatch.tenant_id,
@@ -1286,6 +1338,7 @@ class HostedRunnerAdapter:
         envelope_bytes = canonical_json(built.envelope)
         payload = built.envelope.payload
         final = chain.entries[-1] if chain.entries else None
+        final_authority = chain.pending or final
         live_expected = ProductionTerminalVerificationExpected(
             run_id=dispatch.run_id,
             flow_run_id_sha256=flow_run_id_sha256,
@@ -1320,9 +1373,16 @@ class HostedRunnerAdapter:
                 dispatch.execution_authority_signer_sha256
             ),
             permit_chain_sha256=chain.permit_chain_sha256,
-            permit_count=len(chain.entries),
+            permit_count=len(chain.entries) + (1 if chain.pending is not None else 0),
+            acknowledged_permit_count=len(chain.entries),
+            pending_permit_count=(1 if chain.pending is not None else 0),
+            pending_permit_artifact_sha256=(
+                chain.pending.permit_artifact_sha256
+                if chain.pending is not None
+                else None
+            ),
             final_authority_sequence=(
-                final.authority_sequence if final is not None else 0
+                final_authority.authority_sequence if final_authority is not None else 0
             ),
             final_runtime_delivery_sequence=(
                 final.runtime_delivery_sequence if final is not None else 0
@@ -1445,9 +1505,9 @@ class HostedRunnerAdapter:
         *,
         code: str = "runner_result_lost",
     ) -> HostedRunResult:
-        """Close a crash window without re-entering the execution path."""
+        """Refuse an unsigned callback without re-entering the execution path."""
 
-        parsed = HostedRecoveryBinding.model_validate(binding)
+        HostedRecoveryBinding.model_validate(binding)
         if (
             not code
             or len(code) > 64
@@ -1457,21 +1517,7 @@ class HostedRunnerAdapter:
             )
         ):
             raise ValueError("reconciliation code is invalid")
-        return HostedRunResult(
-            dispatch_id=parsed.dispatch_id,
-            run_id=parsed.run_id,
-            outcome=TransactionOutcome.RECONCILIATION_REQUIRED,
-            evidence_batch=tuple(
-                failure_events(
-                    run_id=parsed.run_id,
-                    bundle_digest=parsed.bundle_content_digest,
-                    authorization_id=parsed.authorization_id,
-                )
-            ),
-            started=True,
-            uncertain_delivery=True,
-            report_sha256="0" * 64,
-        )
+        raise RuntimeError("managed run requires signed terminal reconciliation")
 
     def execute(
         self,
@@ -1622,45 +1668,20 @@ class HostedRunnerAdapter:
             # Once this call starts, the child can reach a real input edge. Any
             # lost or malformed result is uncertain and can never be retried.
             execution = self._runner(argv, run_dir, child_env)
-        except Exception:
+        except Exception as exc:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
-            return HostedRunResult(
-                dispatch_id=parsed.dispatch_id,
-                run_id=parsed.run_id,
-                outcome=outcome,
-                evidence_batch=tuple(
-                    failure_events(
-                        run_id=parsed.run_id,
-                        bundle_digest=parsed.payload.bundle.content_digest,
-                        authorization_id=parsed.payload.authorization.authorization_id,
-                    )
-                ),
-                started=True,
-                uncertain_delivery=True,
-                report_sha256="0" * 64,
-            )
+            raise RuntimeError(
+                "managed run requires signed terminal reconciliation"
+            ) from exc
 
         if execution.report_bytes is None:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
-            return HostedRunResult(
-                dispatch_id=parsed.dispatch_id,
-                run_id=parsed.run_id,
-                outcome=outcome,
-                evidence_batch=tuple(
-                    failure_events(
-                        run_id=parsed.run_id,
-                        bundle_digest=parsed.payload.bundle.content_digest,
-                        authorization_id=parsed.payload.authorization.authorization_id,
-                    )
-                ),
-                started=True,
-                uncertain_delivery=True,
-                report_sha256="0" * 64,
-            )
+            raise RuntimeError("managed run requires signed terminal reconciliation")
         report: RunReport | None = None
         report_digest = hashlib.sha256(execution.report_bytes).hexdigest()
+        terminalization_error: Exception | None
         try:
             report = RunReport.model_validate_json(execution.report_bytes)
             outcome = classify_transaction_outcome(report)
@@ -1702,19 +1723,23 @@ class HostedRunnerAdapter:
                 )
                 if proof.payload.run_receipt.transaction_outcome != outcome.value:
                     raise ValueError("terminal proof outcome differs from the report")
-        except Exception:  # noqa: BLE001 - post-delivery terminalization fails closed
+        except Exception as exc:  # noqa: BLE001 - terminalization fails closed
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
             proof = None
-        if (
-            outcome
-            in {
-                TransactionOutcome.VERIFIED,
-                TransactionOutcome.HALTED_BEFORE_EFFECT,
-            }
-            and proof is None
-        ):
+            terminalization_error = exc
+        else:
+            terminalization_error = None
+        if proof is None and outcome in {
+            TransactionOutcome.VERIFIED,
+            TransactionOutcome.HALTED_BEFORE_EFFECT,
+            TransactionOutcome.RECONCILIATION_REQUIRED,
+        }:
             outcome = TransactionOutcome.RECONCILIATION_REQUIRED
         self._ledger.record_outcome(reservation_key, outcome, run_id=parsed.run_id)
+        if outcome is TransactionOutcome.RECONCILIATION_REQUIRED and proof is None:
+            raise RuntimeError(
+                "managed run requires signed terminal reconciliation"
+            ) from terminalization_error
         if report is None:
             events = tuple(
                 failure_events(
@@ -1735,6 +1760,7 @@ class HostedRunnerAdapter:
                     effect_covered_consequential_steps=(
                         verified.effect_covered_consequential_steps
                     ),
+                    terminal_outcome=outcome.value,
                 )
             )
         uncertain = outcome is TransactionOutcome.RECONCILIATION_REQUIRED

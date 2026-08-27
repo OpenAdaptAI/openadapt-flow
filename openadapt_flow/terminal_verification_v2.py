@@ -87,6 +87,9 @@ DELIVERY_RECEIPT_ARTIFACT_SCHEMA: Final[
 PERMIT_CHAIN_ENTRY_SCHEMA: Final[
     Literal["openadapt.production-delivery-permit-chain-entry/v2"]
 ] = "openadapt.production-delivery-permit-chain-entry/v2"
+PENDING_PERMIT_SCHEMA: Final[
+    Literal["openadapt.production-delivery-pending-permit/v2"]
+] = "openadapt.production-delivery-pending-permit/v2"
 EXECUTION_AUTHORITY_DOMAIN: Final[bytes] = (
     b"openadapt.production-execution-authority.v2\0"
 )
@@ -1540,11 +1543,135 @@ class ProductionDeliveryPermit(ClosedSignedModel):
         return self._receipt.one_use_claim_id
 
 
+class ProductionPendingDeliveryPermit(ClosedSignedModel):
+    """One final signed permit whose delivery receipt is unresolved."""
+
+    schema_version: Literal["openadapt.production-delivery-pending-permit/v2"] = (
+        PENDING_PERMIT_SCHEMA
+    )
+    permit_artifact: ProductionDeliveryPermitArtifact
+    permit_artifact_sha256: str = Field(pattern=_SHA256_RE)
+    delivery_state: Literal["UNRESOLVED"] = "UNRESOLVED"
+    delivery_receipt_artifact: Literal[None] = None
+    delivery_receipt_artifact_sha256: Literal[None] = None
+    receipt_absence_observed_at: str
+    actuation_replay_authorized: Literal[False] = False
+
+    @model_validator(mode="after")
+    def _closed_pending_edge(self) -> "ProductionPendingDeliveryPermit":
+        permit = ProductionDeliveryPermitArtifact.model_validate(
+            self.permit_artifact.model_dump(mode="json")
+        )
+        if self.permit_artifact_sha256 != permit.artifact_sha256():
+            raise ValueError("pending delivery permit artifact digest is invalid")
+        issued = _parse_utc(permit.payload.issued_at, field="permit issued_at")
+        absence = _parse_utc(
+            self.receipt_absence_observed_at,
+            field="pending receipt absence observed_at",
+        )
+        registry_expires = _parse_utc(
+            permit.payload.qualification_signer_registry_expires_at,
+            field="permit registry expires_at",
+        )
+        if not issued <= absence < registry_expires:
+            raise ValueError("pending delivery permit chronology is invalid")
+        return self
+
+    @classmethod
+    def build(
+        cls,
+        permit_artifact: ProductionDeliveryPermitArtifact,
+        *,
+        receipt_absence_observed_at: str,
+    ) -> "ProductionPendingDeliveryPermit":
+        return cls(
+            permit_artifact=permit_artifact,
+            permit_artifact_sha256=permit_artifact.artifact_sha256(),
+            receipt_absence_observed_at=receipt_absence_observed_at,
+        )
+
+    @property
+    def _permit(self) -> ProductionDeliveryPermitPayload:
+        return self.permit_artifact.payload
+
+    @property
+    def execution_authority_id(self) -> str:
+        return self._permit.execution_authority_id
+
+    @property
+    def execution_authority_sha256(self) -> str:
+        return self._permit.execution_authority_sha256
+
+    @property
+    def permit_id(self) -> str:
+        return self._permit.permit_id
+
+    @property
+    def run_id(self) -> str:
+        return self._permit.run_id
+
+    @property
+    def flow_run_id_sha256(self) -> str:
+        return self._permit.flow_run_id_sha256
+
+    @property
+    def run_request_sha256(self) -> str:
+        return self._permit.run_request_sha256
+
+    @property
+    def action_request_sha256(self) -> str:
+        return self._permit.action_request_sha256
+
+    @property
+    def admission_artifact_sha256(self) -> str:
+        return self._permit.admission_artifact_sha256
+
+    @property
+    def evidence_identity_sha256(self) -> str:
+        return self._permit.evidence_identity_sha256
+
+    @property
+    def environment_digest(self) -> str:
+        return self._permit.environment_digest
+
+    @property
+    def qualification_signer_registry_sha256(self) -> str:
+        return self._permit.qualification_signer_registry_sha256
+
+    @property
+    def qualification_signer_registry_revision(self) -> int:
+        return self._permit.qualification_signer_registry_revision
+
+    @property
+    def qualification_signer_registry_expires_at(self) -> str:
+        return self._permit.qualification_signer_registry_expires_at
+
+    @property
+    def input_edge_sequence(self) -> int:
+        return self._permit.input_edge_sequence
+
+    @property
+    def authority_sequence(self) -> int:
+        return self._permit.authority_sequence
+
+    @property
+    def issued_at(self) -> str:
+        return self._permit.issued_at
+
+    @property
+    def authority_signer_sha256(self) -> str:
+        return self.permit_artifact.signer.signer_sha256()
+
+
 class ProductionDeliveryPermitChain(ClosedSignedModel):
     schema_version: Literal["openadapt.production-delivery-permit-chain/v2"] = (
         PERMIT_CHAIN_SCHEMA
     )
     entries: tuple[ProductionDeliveryPermit, ...] = Field(max_length=10_000)
+    pending: ProductionPendingDeliveryPermit | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
     permit_chain_sha256: str = Field(pattern=_SHA256_RE)
 
     @model_validator(mode="after")
@@ -1554,35 +1681,39 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
         # in-memory mutation cannot enter a trusted chain with a stale digest.
         for item in self.entries:
             ProductionDeliveryPermit.model_validate(item.model_dump(mode="json"))
-        expected = hashlib.sha256(
-            PERMIT_CHAIN_DOMAIN
-            + canonical_json(
-                {
-                    "schema_version": self.schema_version,
-                    "entries": [item.model_dump(mode="json") for item in self.entries],
-                }
+        if self.pending is not None:
+            ProductionPendingDeliveryPermit.model_validate(
+                self.pending.model_dump(mode="json")
             )
+        digest_payload: dict[str, Any] = {
+            "schema_version": self.schema_version,
+            "entries": [item.model_dump(mode="json") for item in self.entries],
+        }
+        if self.pending is not None:
+            digest_payload["pending"] = self.pending.model_dump(mode="json")
+        expected = hashlib.sha256(
+            PERMIT_CHAIN_DOMAIN + canonical_json(digest_payload)
         ).hexdigest()
         if self.permit_chain_sha256 != expected:
             raise ValueError("delivery permit chain digest is invalid")
-        if not self.entries:
+        all_permits: tuple[
+            ProductionDeliveryPermit | ProductionPendingDeliveryPermit, ...
+        ] = (*self.entries, *((self.pending,) if self.pending else ()))
+        if not all_permits:
             return self
-        authority = self.entries[0].execution_authority_id
-        authority_digest = self.entries[0].execution_authority_sha256
-        admission_digest = self.entries[0].admission_artifact_sha256
-        evidence_identity_digest = self.entries[0].evidence_identity_sha256
-        environment_digest = self.entries[0].environment_digest
-        registry_digest = self.entries[0].qualification_signer_registry_sha256
-        registry_revision = self.entries[0].qualification_signer_registry_revision
-        registry_expiry = self.entries[0].qualification_signer_registry_expires_at
-        run_request_digest = self.entries[0].run_request_sha256
-        run_id = self.entries[0].run_id
-        flow_run_id_sha256 = self.entries[0].flow_run_id_sha256
-        authority_signer_sha256 = self.entries[0].authority_signer_sha256
-        authenticated_runner_id_sha256 = self.entries[0].authenticated_runner_id_sha256
-        authenticated_session_id_sha256 = self.entries[
-            0
-        ].authenticated_session_id_sha256
+        first = all_permits[0]
+        authority = first.execution_authority_id
+        authority_digest = first.execution_authority_sha256
+        admission_digest = first.admission_artifact_sha256
+        evidence_identity_digest = first.evidence_identity_sha256
+        environment_digest = first.environment_digest
+        registry_digest = first.qualification_signer_registry_sha256
+        registry_revision = first.qualification_signer_registry_revision
+        registry_expiry = first.qualification_signer_registry_expires_at
+        run_request_digest = first.run_request_sha256
+        run_id = first.run_id
+        flow_run_id_sha256 = first.flow_run_id_sha256
+        authority_signer_sha256 = first.authority_signer_sha256
         if any(
             item.execution_authority_id != authority
             or item.execution_authority_sha256 != authority_digest
@@ -1596,33 +1727,49 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
             or item.qualification_signer_registry_expires_at != registry_expiry
             or item.run_request_sha256 != run_request_digest
             or item.authority_signer_sha256 != authority_signer_sha256
-            or item.authenticated_runner_id_sha256 != authenticated_runner_id_sha256
-            or item.authenticated_session_id_sha256 != authenticated_session_id_sha256
-            for item in self.entries
+            for item in all_permits
         ):
             raise ValueError("delivery permit chain changes its production authority")
-        input_sequences = tuple(item.input_edge_sequence for item in self.entries)
-        authority_sequences = tuple(item.authority_sequence for item in self.entries)
+        if self.entries:
+            authenticated_runner_id_sha256 = self.entries[
+                0
+            ].authenticated_runner_id_sha256
+            authenticated_session_id_sha256 = self.entries[
+                0
+            ].authenticated_session_id_sha256
+            if any(
+                item.authenticated_runner_id_sha256 != authenticated_runner_id_sha256
+                or item.authenticated_session_id_sha256
+                != authenticated_session_id_sha256
+                for item in self.entries
+            ):
+                raise ValueError(
+                    "delivery permit chain changes its authenticated runner"
+                )
+        input_sequences = tuple(item.input_edge_sequence for item in all_permits)
+        authority_sequences = tuple(item.authority_sequence for item in all_permits)
         delivery_sequences = tuple(
             item.runtime_delivery_sequence for item in self.entries
         )
-        exact = tuple(range(1, len(self.entries) + 1))
+        exact = tuple(range(1, len(all_permits) + 1))
         if input_sequences != exact:
             raise ValueError(
                 "delivery input-edge sequence must be exact and contiguous"
             )
         if authority_sequences != tuple(
-            range(authority_sequences[0], authority_sequences[0] + len(self.entries))
+            range(authority_sequences[0], authority_sequences[0] + len(all_permits))
         ):
             raise ValueError("delivery authority sequence must be contiguous")
-        if delivery_sequences != tuple(
-            range(delivery_sequences[0], delivery_sequences[0] + len(self.entries))
+        if delivery_sequences and delivery_sequences != tuple(
+            range(
+                delivery_sequences[0], delivery_sequences[0] + len(delivery_sequences)
+            )
         ):
             raise ValueError("runtime delivery sequence must be contiguous")
-        permit_ids = tuple(item.permit_id for item in self.entries)
+        permit_ids = tuple(item.permit_id for item in all_permits)
         if len(permit_ids) != len(set(permit_ids)):
             raise ValueError("delivery permit chain repeats a permit")
-        action_requests = tuple(item.action_request_sha256 for item in self.entries)
+        action_requests = tuple(item.action_request_sha256 for item in all_permits)
         if len(action_requests) != len(set(action_requests)):
             raise ValueError("delivery permit chain repeats an action request")
         claim_ids = tuple(item.one_use_claim_id for item in self.entries)
@@ -1640,20 +1787,36 @@ class ProductionDeliveryPermitChain(ClosedSignedModel):
             for previous, current in zip(event_times, event_times[1:])
         ):
             raise ValueError("delivery permit chronology is invalid")
+        if self.pending is not None and self.entries:
+            final_delivered = _parse_utc(
+                self.entries[-1].delivered_at,
+                field="permit delivered_at",
+            )
+            pending_issued = _parse_utc(
+                self.pending.issued_at,
+                field="pending permit issued_at",
+            )
+            if final_delivered > pending_issued:
+                raise ValueError("pending delivery permit chronology is invalid")
         return self
 
     @classmethod
     def build(
-        cls, entries: tuple[ProductionDeliveryPermit, ...]
+        cls,
+        entries: tuple[ProductionDeliveryPermit, ...],
+        *,
+        pending: ProductionPendingDeliveryPermit | None = None,
     ) -> "ProductionDeliveryPermitChain":
-        payload = {
+        payload: dict[str, Any] = {
             "schema_version": PERMIT_CHAIN_SCHEMA,
             "entries": [item.model_dump(mode="json") for item in entries],
         }
+        if pending is not None:
+            payload["pending"] = pending.model_dump(mode="json")
         digest = hashlib.sha256(
             PERMIT_CHAIN_DOMAIN + canonical_json(payload)
         ).hexdigest()
-        return cls(entries=entries, permit_chain_sha256=digest)
+        return cls(entries=entries, pending=pending, permit_chain_sha256=digest)
 
 
 def build_production_evidence_manifests(
@@ -1915,6 +2078,8 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
     execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
     permit_chain: ProductionDeliveryPermitChain
     permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    acknowledged_permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    pending_permit_count: StrictInt = Field(ge=0, le=1)
     final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
@@ -1943,8 +2108,8 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
         receipt = self.run_receipt
         outcome = self.execution_outcome
         manifests = self.evidence_manifests
-        if chain.entries:
-            final = chain.entries[-1]
+        final = chain.pending or (chain.entries[-1] if chain.entries else None)
+        if final is not None:
             if (
                 self.execution_authority_id,
                 self.execution_authority_sha256,
@@ -1978,19 +2143,28 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 raise ValueError(
                     "terminal qualification state does not match its permits"
                 )
+            expected_final_delivery_sequence = (
+                chain.entries[-1].runtime_delivery_sequence if chain.entries else 0
+            )
             if (
                 self.permit_count,
+                self.acknowledged_permit_count,
+                self.pending_permit_count,
                 self.final_authority_sequence,
                 self.final_runtime_delivery_sequence,
             ) != (
+                len(chain.entries) + (1 if chain.pending is not None else 0),
                 len(chain.entries),
+                1 if chain.pending is not None else 0,
                 final.authority_sequence,
-                final.runtime_delivery_sequence,
+                expected_final_delivery_sequence,
             ):
                 raise ValueError("terminal permit counts do not match the permit chain")
         elif (
             receipt.transaction_outcome != "HALTED_BEFORE_EFFECT"
             or self.permit_count != 0
+            or self.acknowledged_permit_count != 0
+            or self.pending_permit_count != 0
             or self.final_authority_sequence != 0
             or self.final_runtime_delivery_sequence != 0
         ):
@@ -2074,7 +2248,8 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 outcome.outcome != "VERIFIED"
                 or not outcome.production_eligible
                 or not outcome.execution_completed
-                or not chain.entries
+                or self.acknowledged_permit_count < 1
+                or self.pending_permit_count != 0
             ):
                 raise ValueError("terminal VERIFIED proof is incomplete")
         elif transaction_outcome == "HALTED_BEFORE_EFFECT":
@@ -2083,6 +2258,7 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 or outcome.production_eligible
                 or outcome.execution_completed
                 or receipt.production_eligible
+                or self.permit_count != 0
                 or any(
                     not isinstance(item, ProductionTerminalEffectState)
                     or item.absence_basis not in {"not_actuated", "verifier_refuted"}
@@ -2090,13 +2266,46 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
                 )
             ):
                 raise ValueError("terminal HALTED proof lacks exact effect absence")
-        elif (
-            transaction_outcome != "RECONCILIATION_REQUIRED"
-            or outcome.outcome == "VERIFIED"
-            or outcome.production_eligible
-            or receipt.production_eligible
-            or not chain.entries
-        ):
+        elif transaction_outcome == "RECONCILIATION_REQUIRED":
+            if (
+                outcome.outcome == "VERIFIED"
+                or outcome.production_eligible
+                or receipt.production_eligible
+                or self.permit_count < 1
+            ):
+                raise ValueError("terminal reconciliation proof is invalid")
+            if chain.pending is not None:
+                uncertain_records = tuple(
+                    item
+                    for item in manifests.effect.records
+                    if isinstance(item, ProductionTerminalEffectState)
+                    and item.attempt_state == "delivery_uncertain"
+                )
+                if not uncertain_records or any(
+                    item.observed_effect not in {"conflicting", "unknown"}
+                    or item.resolved_delivery_uncertainty
+                    or item.absence_basis != "none"
+                    for item in uncertain_records
+                ):
+                    raise ValueError(
+                        "terminal pending delivery lacks unresolved effect evidence"
+                    )
+            elif not any(
+                isinstance(item, ProductionTerminalEffectState)
+                and (
+                    item.final_verdict == "indeterminate"
+                    or item.observed_effect in {"conflicting", "unknown"}
+                    or (
+                        item.attempt_state == "delivery_uncertain"
+                        and not item.resolved_delivery_uncertainty
+                    )
+                )
+                for item in manifests.effect.records
+            ):
+                raise ValueError(
+                    "terminal reconciliation proof lacks inconclusive effect evidence"
+                )
+        else:
             raise ValueError("terminal reconciliation proof is invalid")
         if transaction_outcome != "VERIFIED" and (
             receipt.source_receipt_digest != self.run_report_sha256
@@ -2107,7 +2316,24 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
         issued = _parse_utc(self.issued_at, field="terminal issued_at")
         if not verified <= issued <= verified + timedelta(minutes=5):
             raise ValueError("terminal proof issue time is invalid")
-        if chain.entries:
+        if chain.pending is not None:
+            pending_issued = _parse_utc(
+                chain.pending.issued_at,
+                field="pending permit issued_at",
+            )
+            absence_observed = _parse_utc(
+                chain.pending.receipt_absence_observed_at,
+                field="pending receipt absence observed_at",
+            )
+            registry_expires = _parse_utc(
+                chain.pending.qualification_signer_registry_expires_at,
+                field="pending permit registry expires_at",
+            )
+            if not pending_issued <= absence_observed <= verified < registry_expires:
+                raise ValueError(
+                    "terminal verification is outside pending permit chronology"
+                )
+        elif chain.entries:
             final = chain.entries[-1]
             final_delivered = _parse_utc(
                 final.delivered_at, field="permit delivered_at"
@@ -2220,6 +2446,12 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
     execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
     permit_chain_sha256: str = Field(pattern=_SHA256_RE)
     permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    acknowledged_permit_count: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    pending_permit_count: StrictInt = Field(ge=0, le=1)
+    pending_permit_artifact_sha256: str | None = Field(
+        default=None,
+        pattern=_SHA256_RE,
+    )
     final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
     authenticated_runner_id_sha256: str = Field(pattern=_SHA256_RE)
@@ -2235,10 +2467,21 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
 
     @model_validator(mode="after")
     def _closed_delivery_state(self) -> "ProductionTerminalVerificationExpected":
-        if len(self.acknowledged_one_use_claim_ids) != self.permit_count:
+        if self.permit_count != (
+            self.acknowledged_permit_count + self.pending_permit_count
+        ):
+            raise ValueError("live delivery permit counts are inconsistent")
+        if len(self.acknowledged_one_use_claim_ids) != self.acknowledged_permit_count:
             raise ValueError("live delivery claim count does not match permit count")
-        if len(set(self.acknowledged_one_use_claim_ids)) != self.permit_count:
+        if (
+            len(set(self.acknowledged_one_use_claim_ids))
+            != self.acknowledged_permit_count
+        ):
             raise ValueError("live delivery claims are not globally one-use")
+        if (self.pending_permit_artifact_sha256 is not None) != (
+            self.pending_permit_count == 1
+        ):
+            raise ValueError("live pending delivery binding is inconsistent")
         for claim_id in self.acknowledged_one_use_claim_ids:
             if _UUID_RE.fullmatch(claim_id) is None:
                 raise ValueError("live delivery claim id is invalid")
@@ -2308,6 +2551,7 @@ _EXPECTED_FIELDS: Final[tuple[str, ...]] = tuple(
         "authenticated_runner_id_sha256",
         "authenticated_session_id_sha256",
         "acknowledged_one_use_claim_ids",
+        "pending_permit_artifact_sha256",
     }
 )
 
@@ -2401,8 +2645,19 @@ def build_production_terminal_verification(
         execution_authority_sha256=context.execution_authority_sha256,
         execution_authority_signer_sha256=(context.execution_authority_signer_sha256),
         permit_chain=context.permit_chain,
-        permit_count=len(context.permit_chain.entries),
-        final_authority_sequence=(final.authority_sequence if final is not None else 0),
+        permit_count=(
+            len(context.permit_chain.entries)
+            + (1 if context.permit_chain.pending is not None else 0)
+        ),
+        acknowledged_permit_count=len(context.permit_chain.entries),
+        pending_permit_count=(1 if context.permit_chain.pending is not None else 0),
+        final_authority_sequence=(
+            context.permit_chain.pending.authority_sequence
+            if context.permit_chain.pending is not None
+            else final.authority_sequence
+            if final is not None
+            else 0
+        ),
         final_runtime_delivery_sequence=(
             final.runtime_delivery_sequence if final is not None else 0
         ),
@@ -2487,6 +2742,13 @@ def verify_production_terminal_verification(
         raise ProductionTerminalVerificationError(
             "production terminal one-use claims do not match live state"
         )
+    pending_permit_artifact_sha256 = (
+        chain.pending.permit_artifact_sha256 if chain.pending is not None else None
+    )
+    if pending_permit_artifact_sha256 != expected.pending_permit_artifact_sha256:
+        raise ProductionTerminalVerificationError(
+            "production terminal pending permit does not match live state"
+        )
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     if _parse_utc(payload.issued_at, field="terminal issued_at") > current + timedelta(
         minutes=5
@@ -2499,6 +2761,8 @@ def verify_production_terminal_verification(
 
 def rebuild_production_delivery_permit_chain(
     permits: tuple[ProductionDeliveryPermit, ...],
+    *,
+    pending: ProductionPendingDeliveryPermit | None = None,
 ) -> ProductionDeliveryPermitChain:
     """Rebuild the permit chain from independently retained permit records.
 
@@ -2508,15 +2772,33 @@ def rebuild_production_delivery_permit_chain(
     rebuilds the chain, and passes the rebuilt digest as the expected value.
     """
 
-    return ProductionDeliveryPermitChain.build(permits)
+    if not permits and pending is None:
+        raise ProductionTerminalVerificationError(
+            "retained production delivery artifact count is invalid"
+        )
+    if len(permits) + (1 if pending is not None else 0) > 10_000:
+        raise ProductionTerminalVerificationError(
+            "retained production delivery artifact count is invalid"
+        )
+    return ProductionDeliveryPermitChain.build(permits, pending=pending)
 
 
 def rebuild_production_delivery_permit_chain_from_artifacts(
     artifacts: tuple[tuple[bytes, bytes], ...],
+    *,
+    pending_permit_artifact: bytes | None = None,
+    receipt_absence_observed_at: str | None = None,
 ) -> ProductionDeliveryPermitChain:
     """Rebuild a chain from exact retained permit and receipt envelope bytes."""
 
-    if not artifacts or len(artifacts) > 10_000:
+    has_pending = pending_permit_artifact is not None
+    if has_pending != (receipt_absence_observed_at is not None):
+        raise ProductionTerminalVerificationError(
+            "retained pending delivery binding is incomplete"
+        )
+    if (not artifacts and not has_pending) or len(artifacts) + (
+        1 if has_pending else 0
+    ) > 10_000:
         raise ProductionTerminalVerificationError(
             "retained production delivery artifact count is invalid"
         )
@@ -2550,7 +2832,33 @@ def rebuild_production_delivery_permit_chain_from_artifacts(
                 "retained production delivery artifact is not canonical"
             )
         entries.append(ProductionDeliveryPermit.build(permit, receipt))
-    return ProductionDeliveryPermitChain.build(tuple(entries))
+    pending: ProductionPendingDeliveryPermit | None = None
+    if pending_permit_artifact is not None:
+        if (
+            len(pending_permit_artifact) == 0
+            or len(pending_permit_artifact) > MAX_DELIVERY_ARTIFACT_BYTES
+        ):
+            raise ProductionTerminalVerificationError(
+                "retained pending delivery artifact size is invalid"
+            )
+        try:
+            permit = ProductionDeliveryPermitArtifact.model_validate_json(
+                pending_permit_artifact
+            )
+        except ValueError as exc:
+            raise ProductionTerminalVerificationError(
+                "retained pending delivery artifact is invalid"
+            ) from exc
+        if permit.canonical_bytes() != pending_permit_artifact:
+            raise ProductionTerminalVerificationError(
+                "retained pending delivery artifact is not canonical"
+            )
+        assert receipt_absence_observed_at is not None
+        pending = ProductionPendingDeliveryPermit.build(
+            permit,
+            receipt_absence_observed_at=receipt_absence_observed_at,
+        )
+    return ProductionDeliveryPermitChain.build(tuple(entries), pending=pending)
 
 
 def verify_production_terminal_verification_from_report(

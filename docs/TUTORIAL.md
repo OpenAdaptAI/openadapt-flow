@@ -1,11 +1,11 @@
-# The bundled tutorial, end to end
+# The optional bundled product check
 
 `openadapt-flow tutorial` (which `openadapt quickstart` delegates to) is the
-complete free path against the bundled MockMed application, a synthetic
-practice-management fixture served through its real transactional backend.
+optional installation and product check. It runs against MockMed, a bundled
+synthetic practice-management fixture with a real transactional backend.
 
 ```bash
-openadapt-flow tutorial                                  # the whole loop, VERIFIED
+openadapt-flow tutorial                                  # optional product check, VERIFIED
 ```
 
 ## What `tutorial` does
@@ -17,6 +17,11 @@ under the **Standard** profile, and verifies the write by reading the system of
 record out of band — a path the application itself never calls, so the screen
 cannot influence it. It ends `VERIFIED` with zero model calls, and writes a
 shareable `receipt.png` / `receipt.json` beside the run.
+
+For your first real workflow, use a small read-only task and test data. Record
+it, inspect the compiled bundle, replay it with the browser visible, and review
+the run report. The exact commands are in
+[Record your own app](../README.md#record-your-own-app-on-any-substrate).
 
 ## What `--guided` does
 

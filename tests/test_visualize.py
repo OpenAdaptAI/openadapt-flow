@@ -31,8 +31,10 @@ from openadapt_flow.ir import (
 from openadapt_flow.runtime.effects import Effect, EffectKind
 from openadapt_flow.visualize import (
     SPEC_VERSION,
+    PresentationProfile,
     ProgramGraphSpec,
     build_program_graph,
+    project_program_graph,
     render_html,
     render_mermaid,
 )
@@ -193,6 +195,41 @@ def test_spec_is_json_serializable_and_roundtrips() -> None:
     assert len(again.nodes) == len(spec.nodes)
 
 
+def test_remote_safe_projection_keeps_topology_and_drops_recorded_values() -> None:
+    source = build_program_graph(_mixed_workflow())
+    projected = project_program_graph(source, PresentationProfile.REMOTE_SAFE)
+
+    assert [(edge.source, edge.target, edge.kind) for edge in projected.edges] == [
+        (edge.source, edge.target, edge.kind) for edge in source.edges
+    ]
+    assert [node.id for node in projected.nodes] == [node.id for node in source.nodes]
+    assert projected.bundle.name == "Compiled program"
+    assert projected.bundle.params[0].name == "input_1"
+    assert projected.bundle.params[0].example is None
+    assert projected.bundle.provenance.content_digest is None
+
+    payload = projected.model_dump_json().lower()
+    for private_value in (
+        "unit-mixed",
+        "patient row",
+        "#row-1",
+        "click save",
+        "row text too generic",
+        '"p1"',
+        '"hello"',
+    ):
+        assert private_value not in payload
+
+
+def test_operator_projection_is_an_independent_complete_copy() -> None:
+    source = build_program_graph(_mixed_workflow())
+    projected = project_program_graph(source, PresentationProfile.OPERATOR_LOCAL)
+    assert projected == source
+    assert projected is not source
+    projected.nodes[0].title = "changed"
+    assert source.nodes[0].title != "changed"
+
+
 def test_render_html_is_self_contained() -> None:
     spec = build_program_graph(_mixed_workflow())
     doc = render_html(spec)
@@ -204,6 +241,9 @@ def test_render_html_is_self_contained() -> None:
     assert "OpenAdaptProgramGraph.render" in doc
     assert "program-graph-spec" in doc
     assert "click Save" in doc
+    assert "Compiled topology" in doc
+    assert "Program evidence lanes" in doc
+    assert "End of declared steps" in doc
 
 
 def test_render_mermaid_is_valid_flowchart() -> None:
@@ -341,8 +381,20 @@ def test_cli_visualize_writes_outputs(tmp_path) -> None:
     assert out_html.exists() and out_html.read_text().startswith("<!doctype html>")
 
     out_json = tmp_path / "graph.json"
-    rc = main(["visualize", str(_SHOWCASE), "--format", "json", "--out", str(out_json)])
+    rc = main(
+        [
+            "visualize",
+            str(_SHOWCASE),
+            "--format",
+            "json",
+            "--profile",
+            "remote-safe",
+            "--out",
+            str(out_json),
+        ]
+    )
     assert rc == 0
     data = json.loads(out_json.read_text())
     assert data["spec_version"] == SPEC_VERSION
-    assert data["bundle"]["name"] == "openemr-showcase"
+    assert data["bundle"]["name"] == "Compiled program"
+    assert "admin" not in out_json.read_text().lower()

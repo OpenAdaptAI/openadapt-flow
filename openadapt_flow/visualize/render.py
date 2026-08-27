@@ -49,7 +49,7 @@ def render_html(spec: ProgramGraphSpec, *, title: str | None = None) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(page_title)}</title>
 <style>
-body {{ margin: 0; padding: 24px; max-width: 900px; margin-inline: auto;
+body {{ margin: 0; padding: 24px; max-width: 1240px; margin-inline: auto;
        background: Canvas; color: CanvasText; }}
 {css}
 </style>

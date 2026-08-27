@@ -75,6 +75,7 @@ def _broken_result(root: Path) -> BreakItResult:
         effects_refuted=1,
         halt_reason="record_written refuted against the rest system of record",
         system_of_record_records=0,
+        rejected_writes=1,
     )
 
 

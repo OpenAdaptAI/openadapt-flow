@@ -37,7 +37,10 @@ from openadapt_flow.tutorial import TutorialResult, run_tutorial
 def rejected_write_path(tmp_path_factory: pytest.TempPathFactory) -> TutorialResult:
     """Run the advanced simulation once for the whole module."""
 
-    return run_tutorial(tmp_path_factory.mktemp("rejected-write"), break_it=True)
+    return run_tutorial(
+        tmp_path_factory.mktemp("rejected-write"),
+        simulate_rejected_write=True,
+    )
 
 
 def _report(run_dir: Path) -> RunReport:
@@ -66,9 +69,10 @@ def test_the_engine_halts_on_the_injected_fault(
     assert broken.fault == "optimistic"
     assert broken.execution_outcome == "HALTED"
     assert broken.transaction_outcome == "RECONCILIATION_REQUIRED"
-    assert broken.transaction_billable is not True
+    assert broken.transaction_billable is False
     # Nothing landed: the write the screen claimed does not exist.
     assert broken.system_of_record_records == 0
+    assert broken.rejected_writes == 1
     assert broken.effects_refuted >= 1
     # The engine's own explanation names the refuted contract, not a guess.
     assert "record_written" in broken.halt_reason

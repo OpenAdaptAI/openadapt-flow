@@ -65,10 +65,13 @@ def _verified_result(
     )
 
 
-def _broken_result(root: Path) -> BreakItResult:
+def _broken_result(
+    root: Path, *, run_dir_name: str = "run-rejected-write"
+) -> BreakItResult:
+    run_dir = root / run_dir_name
     return BreakItResult(
-        run_dir=root / "run-rejected-write",
-        report_path=root / "run-rejected-write" / "REPORT.md",
+        run_dir=run_dir,
+        report_path=run_dir / "REPORT.md",
         fault="optimistic",
         execution_outcome="HALTED",
         transaction_outcome="RECONCILIATION_REQUIRED",
@@ -79,6 +82,7 @@ def _broken_result(root: Path) -> BreakItResult:
         effects_refuted=1,
         halt_reason="record_written refuted against the rest system of record",
         system_of_record_records=0,
+        rejected_writes=1,
     )
 
 
@@ -105,7 +109,8 @@ def test_simulate_rejected_write_reaches_tutorial_and_drives_the_narrative(
         )
         == 0
     )
-    assert seen["break_it"] is True
+    assert seen["simulate_rejected_write"] is True
+    assert seen["break_it"] is False
 
     out = capsys.readouterr().out
     # The two runs are labeled so VERIFIED is never misread as the broken one.
@@ -116,6 +121,7 @@ def test_simulate_rejected_write_reaches_tutorial_and_drives_the_narrative(
     assert '"Encounter saved"' in out
     assert "1/2 declared effect(s) REFUTED" in out
     assert "0 record(s)" in out
+    assert "1 rejected write attempt (no retry)" in out
     assert "HALTED at the consequential step" in out
     assert "RECONCILIATION_REQUIRED" in out
     # The engine's own halt reason is quoted, not paraphrased.
@@ -140,6 +146,7 @@ def test_plain_tutorial_points_at_a_real_first_workflow(
 
     monkeypatch.setattr(tutorial_module, "run_tutorial", fake_run_tutorial)
     assert main(["tutorial", "--out", str(tmp_path / "t")]) == 0
+    assert seen["simulate_rejected_write"] is False
     assert seen["break_it"] is False
 
     out = capsys.readouterr().out
@@ -184,14 +191,19 @@ def test_deprecated_break_it_alias_warns_and_runs_the_same_fixture(
 
     def fake_run_tutorial(work_dir: Path, **kwargs: Any) -> TutorialResult:
         seen.update(kwargs)
-        return _verified_result(Path(work_dir), break_it=_broken_result(Path(work_dir)))
+        return _verified_result(
+            Path(work_dir),
+            break_it=_broken_result(Path(work_dir), run_dir_name="run-broken"),
+        )
 
     monkeypatch.setattr(tutorial_module, "run_tutorial", fake_run_tutorial)
     assert main(["tutorial", "--break-it", "--out", str(tmp_path / "t")]) == 0
+    assert seen["simulate_rejected_write"] is False
     assert seen["break_it"] is True
 
     captured = capsys.readouterr()
     assert "rejected-write verification" in captured.out
+    assert str(tmp_path / "t" / "run-broken" / "REPORT.md") in captured.out
     assert captured.err == (
         "warning: --break-it is deprecated; use --simulate-rejected-write.\n"
     )
@@ -212,14 +224,26 @@ def _fake_workflow() -> Any:
 
 
 def _wire_break_it_fakes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, report: Any
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    report: Any,
+    *,
+    record_count: int = 0,
+    rejected_writes: int = 1,
 ) -> None:
+    fault_db = SimpleNamespace(
+        snapshot=lambda: {"rejected_writes": rejected_writes}
+    )
     monkeypatch.setattr(
         fault_server_module,
         "serve",
-        lambda: ("http://127.0.0.1:9/", None, lambda: None),
+        lambda: ("http://127.0.0.1:9/", fault_db, lambda: None),
     )
-    monkeypatch.setattr(tutorial_module, "_records", lambda base_url: [])
+    monkeypatch.setattr(
+        tutorial_module,
+        "_records",
+        lambda base_url: [{} for _ in range(record_count)],
+    )
     monkeypatch.setattr(
         tutorial_module, "run_tutorial_workflow", lambda **kwargs: report
     )
@@ -247,15 +271,13 @@ def test_run_break_it_refuses_an_uncaught_fault(
         )
 
 
-def test_run_break_it_extracts_the_narrative_from_the_halted_report(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _halted_report() -> Any:
     save_result = SimpleNamespace(
         step_id="step_005",
         postconditions_ok=True,
         effect_evidence=[SimpleNamespace(final_verdict="refuted")],
     )
-    report = SimpleNamespace(
+    return SimpleNamespace(
         execution_outcome="HALTED",
         transaction_outcome="RECONCILIATION_REQUIRED",
         transaction_billable=False,
@@ -264,8 +286,16 @@ def test_run_break_it_extracts_the_narrative_from_the_halted_report(
             observed_texts=["MockMed", "Encountersaved-"],
             reason="record_written refuted -- nothing landed",
         ),
-        outcome_envelope=SimpleNamespace(required_contracts=SimpleNamespace(effect=2)),
+        outcome_envelope=SimpleNamespace(
+            required_contracts=SimpleNamespace(effect=2)
+        ),
     )
+
+
+def test_run_break_it_extracts_the_narrative_from_the_halted_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report = _halted_report()
     _wire_break_it_fakes(monkeypatch, tmp_path, report)
 
     broken = _run_break_it(
@@ -282,5 +312,76 @@ def test_run_break_it_extracts_the_narrative_from_the_halted_report(
     assert broken.effects_required == 2
     assert broken.effects_refuted == 1
     assert broken.system_of_record_records == 0
+    assert broken.rejected_writes == 1
     assert broken.halt_reason == "record_written refuted -- nothing landed"
     assert broken.report_path == tmp_path / "run-rejected-write" / "REPORT.md"
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "wrong_transaction_outcome",
+        "billable",
+        "unknown_billing",
+        "missing_consequential_result",
+        "screen_postcondition_failed",
+        "effect_not_refuted",
+        "effect_not_required",
+        "unrelated_halt_reason",
+        "missing_halt",
+        "record_persisted",
+        "no_rejected_write",
+        "retried_rejected_write",
+    ],
+)
+def test_run_break_it_requires_the_complete_rejected_write_contract(
+    defect: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _halted_report()
+    record_count = 0
+    rejected_writes = 1
+
+    if defect == "wrong_transaction_outcome":
+        report.transaction_outcome = "HALTED"
+    elif defect == "billable":
+        report.transaction_billable = True
+    elif defect == "unknown_billing":
+        report.transaction_billable = None
+    elif defect == "missing_consequential_result":
+        report.results = []
+    elif defect == "screen_postcondition_failed":
+        report.results[0].postconditions_ok = False
+    elif defect == "effect_not_refuted":
+        report.results[0].effect_evidence[0].final_verdict = "confirmed"
+    elif defect == "effect_not_required":
+        report.outcome_envelope.required_contracts.effect = 0
+    elif defect == "unrelated_halt_reason":
+        report.halt.reason = "the browser closed"
+    elif defect == "missing_halt":
+        report.halt = None
+    elif defect == "record_persisted":
+        record_count = 1
+    elif defect == "no_rejected_write":
+        rejected_writes = 0
+    elif defect == "retried_rejected_write":
+        rejected_writes = 2
+    else:  # pragma: no cover - the parametrization owns this value.
+        raise AssertionError(f"unknown defect: {defect}")
+
+    _wire_break_it_fakes(
+        monkeypatch,
+        tmp_path,
+        report,
+        record_count=record_count,
+        rejected_writes=rejected_writes,
+    )
+    with pytest.raises(TutorialError, match="FAILED its evidence contract"):
+        _run_break_it(
+            workflow=_fake_workflow(),
+            bundle_dir=tmp_path / "bundle",
+            run_dir=tmp_path / "run-rejected-write",
+            headed=False,
+            say=lambda message: None,
+        )

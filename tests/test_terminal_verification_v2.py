@@ -69,6 +69,7 @@ from openadapt_flow.terminal_verification_v2 import (
     sign_production_delivery_receipt,
     sign_production_delivery_result_loss_closure,
     sign_production_terminal_verification,
+    verify_production_delivery_result_loss_closure_binding,
     verify_production_terminal_verification,
 )
 from tests.test_run_receipt import _report as _production_report
@@ -806,8 +807,8 @@ def _result_loss_request() -> ProductionDeliveryResultLossClosureRequest:
         dispatch_session_id="00000000-0000-4000-8000-000000000010",
         run_id=IDS["run_id"],
         managed_dispatch_binding_sha256="sha256:" + SHA_C,
-        authenticated_runner_id_sha256=SHA_A,
-        authenticated_session_id_sha256=SHA_B,
+        authenticated_runner_id_sha256=SHA_B,
+        authenticated_session_id_sha256=SHA_C,
         execution_authority_id=IDS["execution_authority_id"],
         execution_authority_sha256=SHA_A,
         execution_authority_signer_sha256=(_permit_entry().authority_signer_sha256),
@@ -847,8 +848,12 @@ def _result_loss_closure(
             dispatch_session_id="00000000-0000-4000-8000-000000000010",
             managed_dispatch_binding_sha256="sha256:" + SHA_C,
             idempotency_key_sha256=SHA_D,
-            authenticated_runner_id_sha256=SHA_A,
-            authenticated_session_id_sha256=SHA_B,
+            authenticated_runner_id_sha256=(
+                request.child_start_evidence.authenticated_runner_id_sha256
+            ),
+            authenticated_session_id_sha256=(
+                request.child_start_evidence.authenticated_session_id_sha256
+            ),
             execution_authority_id=IDS["execution_authority_id"],
             execution_authority_sha256=SHA_A,
             execution_authority_signer_sha256=final.authority_signer_sha256,
@@ -900,8 +905,12 @@ def _managed_result_loss_payload(
         dispatch_session_id="00000000-0000-4000-8000-000000000010",
         managed_dispatch_binding_sha256="sha256:" + SHA_C,
         idempotency_key_sha256=SHA_D,
-        authenticated_runner_id_sha256=SHA_A,
-        authenticated_session_id_sha256=SHA_B,
+        authenticated_runner_id_sha256=(
+            request.child_start_evidence.authenticated_runner_id_sha256
+        ),
+        authenticated_session_id_sha256=(
+            request.child_start_evidence.authenticated_session_id_sha256
+        ),
         execution_authority_id=IDS["execution_authority_id"],
         execution_authority_sha256=SHA_A,
         execution_authority_signer_sha256=final.authority_signer_sha256,
@@ -1328,6 +1337,44 @@ def test_terminal_v2_signs_ack_won_managed_result_loss_without_uncertainty() -> 
     assert payload.managed_result_loss.pending_permit_artifact_sha256 is None
     assert payload.managed_result_loss.pending_action_request_sha256 is None
     assert payload.evidence_manifests.effect.records == ()
+
+
+@pytest.mark.parametrize(
+    "identity_field",
+    ["authenticated_runner_id_sha256", "authenticated_session_id_sha256"],
+)
+def test_ack_won_result_loss_closure_rejects_receipt_identity_mismatch(
+    identity_field: str,
+) -> None:
+    payload = _managed_result_loss_acknowledged_payload()
+    closure = payload.delivery_result_loss_closure
+    loss = payload.managed_result_loss
+    assert closure is not None
+    assert loss is not None
+    mismatched_payload = closure.payload.model_copy(update={identity_field: SHA_E})
+    mismatched_closure = sign_production_delivery_result_loss_closure(
+        mismatched_payload,
+        _authority_key(),
+    )
+    loss_values = loss.model_dump(mode="json")
+    loss_values.pop("evidence_sha256")
+    loss_values[identity_field] = SHA_E
+    loss_values["delivery_result_loss_closure_artifact_sha256"] = (
+        mismatched_closure.artifact_sha256()
+    )
+    mismatched_loss = ManagedResultLossEvidence.create(**loss_values)
+
+    with pytest.raises(
+        ValueError,
+        match="authenticated delivery identity",
+    ):
+        verify_production_delivery_result_loss_closure_binding(
+            mismatched_closure,
+            permit_chain=payload.permit_chain,
+            result_loss=mismatched_loss,
+            tenant_id=payload.tenant_id,
+            terminal_verified_at=payload.verified_at,
+        )
 
 
 @pytest.mark.parametrize(

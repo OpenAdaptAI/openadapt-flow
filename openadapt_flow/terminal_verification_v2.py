@@ -2128,6 +2128,20 @@ def verify_production_delivery_result_loss_closure_binding(
         result_loss.run_store_identity_sha256,
     ):
         raise ValueError("result-loss closure identity binding is invalid")
+    if permit_chain.entries and any(
+        (
+            item.authenticated_runner_id_sha256,
+            item.authenticated_session_id_sha256,
+        )
+        != (
+            payload.authenticated_runner_id_sha256,
+            payload.authenticated_session_id_sha256,
+        )
+        for item in permit_chain.entries
+    ):
+        raise ValueError(
+            "result-loss closure authenticated delivery identity is invalid"
+        )
     if (
         payload.permit_chain_sha256,
         payload.permit_count,

@@ -5781,7 +5781,7 @@
     },
     {
       "path": "tests/fixtures/terminal_verification_v2_terminal_vectors.json",
-      "sha256": "314c902ca5420d312626d521cec05652848f503e76226cb7168ed2384c759376"
+      "sha256": "0e94c1b106ca06ef6978c5923770b6b4ae32661deb68ce81078fede9a611dd5f"
     },
     {
       "path": "tests/fixtures/theme-region-stable-overhalt-v1.16.1.json",

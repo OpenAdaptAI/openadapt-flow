@@ -1901,9 +1901,7 @@ def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:
         closure_raw = b64decode(
             vector["closure_artifact_canonical_base64"], validate=True
         )
-        chain_raw = b64decode(
-            vector["permit_chain_canonical_base64"], validate=True
-        )
+        chain_raw = b64decode(vector["permit_chain_canonical_base64"], validate=True)
         result_raw = b64decode(vector["result_canonical_base64"], validate=True)
         request = ProductionDeliveryResultLossClosureRequest.model_validate_json(
             request_raw
@@ -1926,9 +1924,9 @@ def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:
         assert b64decode(vector["request_digest_domain_base64"], validate=True) == (
             RESULT_LOSS_CLOSURE_REQUEST_DOMAIN
         )
-        assert b64decode(
-            vector["payload_signature_domain_base64"], validate=True
-        ) == (RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN)
+        assert b64decode(vector["payload_signature_domain_base64"], validate=True) == (
+            RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN
+        )
         assert request.canonical_bytes() == request_raw
         assert request.request_sha256() == vector["request_sha256"]
         assert closure.canonical_bytes() == closure_raw

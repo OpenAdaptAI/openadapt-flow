@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import struct
 import time
 import uuid
 from copy import deepcopy
@@ -216,6 +217,26 @@ if TYPE_CHECKING:
 # the recorded region (real apps re-layout by a few pixels between runs),
 # and the minimum template-match score to accept it.
 PC_TEMPLATE_SEARCH_PAD = 80
+
+
+def _frame_viewport(frame_png: bytes) -> tuple[int, int]:
+    """Return the viewport of THIS frame, read from the frame itself.
+
+    ``self.backend.viewport`` is a live read. Pairing it with an
+    already-captured frame lets a resize or move between capture and use
+    reinterpret that frame under geometry it never had, which can place a
+    coordinate where the operator never demonstrated one. A PNG carries its own
+    dimensions in the IHDR chunk, so the frame can always answer for itself.
+    """
+
+    if len(frame_png) < 24 or not frame_png.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("frame viewport requires valid PNG bytes")
+    width, height = struct.unpack(">II", frame_png[16:24])
+    if width <= 0 or height <= 0:
+        raise ValueError("frame viewport must be positive")
+    return int(width), int(height)
+
+
 PC_TEMPLATE_THRESHOLD = 0.9
 # REGION_STABLE asserts recorded structure, not palette.  The ordinary
 # grayscale template matcher remains the first (stricter) check; this edge-map
@@ -8816,7 +8837,7 @@ class Replayer:
             self.grounder if allow_grounder else None,
             step.intent,
             template_png=template_png,
-            viewport=self.backend.viewport,
+            viewport=_frame_viewport(screen_png),
             structural=structural,
             allow_target_ocr=allow_target_ocr,
         )
@@ -10848,7 +10869,7 @@ class Replayer:
                     None,  # NEVER ground a dismissal: stay model-free
                     it.name,
                     template_png=template_png,
-                    viewport=self.backend.viewport,
+                    viewport=_frame_viewport(before_png),
                     structural=structural,
                 )
                 if res is None:
@@ -11178,7 +11199,7 @@ class Replayer:
             frame_png,
             runtime_params_for_gui(params),
             vision=self.vision,
-            viewport=self.backend.viewport,
+            viewport=_frame_viewport(frame_png),
             asset_loader=lambda rel: self._asset_bytes(
                 bundle_dir,
                 rel,
@@ -12582,7 +12603,7 @@ class Replayer:
                 None,  # scroll readiness must remain deterministic and model-free
                 step.intent,
                 template_png=template_png,
-                viewport=self.backend.viewport,
+                viewport=_frame_viewport(frame_png),
                 structural=structural,
             )
         except OcrResolutionRefused:
@@ -13073,7 +13094,7 @@ class Replayer:
             template_png = self._postcondition_template(pc, bundle_dir)
             if template_png is not None:
                 search = pad_region(
-                    region, PC_TEMPLATE_SEARCH_PAD, self.backend.viewport
+                    region, PC_TEMPLATE_SEARCH_PAD, _frame_viewport(frame_png)
                 )
                 match = self.vision.find_template(
                     frame_png,

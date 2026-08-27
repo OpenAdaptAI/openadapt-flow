@@ -58,6 +58,7 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionDeliveryPermitChain,
     ProductionDeliveryPermitPayload,
     ProductionDeliveryReceiptPayload,
+    delivery_authority_signer_sha256,
     evidence_runner_signer_sha256,
     sign_production_delivery_permit,
     sign_production_delivery_receipt,
@@ -66,7 +67,12 @@ from openadapt_flow.terminal_verification_v2 import (
 from openadapt_flow.transaction import TransactionOutcome
 from tests.test_run_receipt import _report as _production_report
 from tests.test_runner_client_lib import dispatch_payload
-from tests.test_terminal_verification_v2 import _payload, _private_key
+from tests.test_terminal_verification_v2 import (
+    _halted_payload,
+    _payload,
+    _private_key,
+    _reconciliation_payload,
+)
 
 pytest_plugins = ("tests.test_runner_client_lib",)
 
@@ -182,6 +188,11 @@ def _hosted_dispatch(workflow) -> HostedDispatch:
         artifact_bytes_base64=b64encode(artifact_raw).decode("ascii"),
         artifact_sha256=hashlib.sha256(artifact_raw).hexdigest(),
     )
+    authority_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64)))
+    authority_public_key = authority_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
     return HostedDispatch(
         schema_version="openadapt.hosted-runner/v1",
         dispatch_id="11111111-1111-4111-8111-111111111111",
@@ -192,6 +203,11 @@ def _hosted_dispatch(workflow) -> HostedDispatch:
         run_id=payload.run_id,
         workflow_id=workflow_id,
         workflow_version_id=version_id,
+        execution_authority_id="00000000-0000-4000-8000-000000000008",
+        execution_authority_sha256="1" * 64,
+        execution_authority_signer_sha256=delivery_authority_signer_sha256(
+            authority_public_key
+        ),
         idempotency_key="hosted-dispatch-0001",
         lease_token="oal_" + "a" * 64,
         lease_expires_at="2099-01-01T00:00:00Z",
@@ -618,7 +634,7 @@ def test_outer_adapter_builds_stores_rereads_and_verifies_terminal_v2(
         def __init__(self, _run_dir, _store):
             pass
 
-        def production_delivery_permit_chain(self):
+        def production_delivery_permit_chain(self, **_kwargs):
             return chain
 
     fixed_now = datetime(2026, 8, 26, 12, 0, 2, tzinfo=timezone.utc)
@@ -1209,6 +1225,66 @@ def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) 
     assert callback.workflow_admission_sha256 == (
         dispatch.workflow_admission.artifact_sha256
     )
+
+
+@pytest.mark.parametrize(
+    ("outcome", "payload_factory", "uncertain_delivery"),
+    [
+        (
+            TransactionOutcome.HALTED_BEFORE_EFFECT,
+            _halted_payload,
+            False,
+        ),
+        (
+            TransactionOutcome.RECONCILIATION_REQUIRED,
+            _reconciliation_payload,
+            True,
+        ),
+    ],
+)
+def test_recovery_callback_retains_signed_non_success_terminal_v2(
+    tmp_path,
+    sealed,
+    outcome,
+    payload_factory,
+    uncertain_delivery,
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    proof = sign_production_terminal_verification(payload_factory(), _private_key())
+    binding = adapter.recovery_binding(dispatch).model_copy(
+        update={"run_id": proof.payload.run_id}
+    )
+    result = HostedRunResult(
+        dispatch_id=dispatch.dispatch_id,
+        run_id=binding.run_id,
+        outcome=outcome,
+        evidence_batch=(),
+        terminal_verification=proof,
+        started=True,
+        uncertain_delivery=uncertain_delivery,
+        report_sha256=proof.payload.run_report_sha256,
+    )
+
+    callback = adapter.callback_request(binding, result)
+    terminal = HostedTerminalEvent.model_validate(callback.events[-1])
+
+    assert terminal.outcome == outcome.value
+    assert terminal.uncertain_delivery is uncertain_delivery
+    assert terminal.terminal_verification_artifact_bytes_base64 is not None
+    assert terminal.terminal_verification_artifact_sha256 == proof.artifact_sha256()
+
+
+def test_safe_halt_callback_requires_signed_terminal_proof() -> None:
+    with pytest.raises(ValueError, match="requires exact terminal verification"):
+        HostedTerminalEvent(
+            run_id=_halted_payload().run_id,
+            outcome="HALTED_BEFORE_EFFECT",
+            report_sha256="b" * 64,
+            started=True,
+            uncertain_delivery=False,
+        )
 
 
 def test_callback_refuses_terminal_proof_for_a_different_run(tmp_path, sealed) -> None:

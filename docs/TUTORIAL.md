@@ -19,8 +19,8 @@ cannot influence it. It ends `VERIFIED` with zero model calls, and writes a
 shareable `receipt.png` / `receipt.json` beside the run.
 
 For your first real workflow, use a small read-only task and test data. Record
-it, inspect the compiled bundle, replay it with the browser visible, and review
-the run report. The exact commands are in
+it, inspect and lint the compiled bundle, then continue to supervised replay
+only if it contains the read-only task you selected. The exact commands are in
 [Record your own app](../README.md#record-your-own-app-on-any-substrate).
 
 ## What `--guided` does

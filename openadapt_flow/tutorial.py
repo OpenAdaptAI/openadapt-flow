@@ -167,16 +167,17 @@ def _next_steps_block() -> str:
         "--name my-task\n"
         "  Inspect      openadapt-flow visualize bundle -o graph.html\n"
         "  Lint         openadapt-flow lint bundle\n"
+        "Confirm that the bundle contains only the read-only task you "
+        "selected. If lint reports a state-changing, unknown, consequential, "
+        "or irreversible action, stop and qualify its identity, effect, and "
+        "policy evidence before Flow first actuates it:\n"
+        "  https://openadapt.ai/qualify\n"
         "  Replay       openadapt-flow replay bundle --backend web "
         "--url https://your-app.example --headed --run-dir first-run\n"
         "  Review       first-run/REPORT.md\n"
         "Confirm that the recorded steps and final result match what you "
         "expected before you expand the task.\n"
-        "Qualify the exact app and environment before unattended use. If an "
-        "action is state-changing, unknown, consequential, or irreversible, "
-        "qualify its identity, effect, and policy evidence before Flow first "
-        "actuates it:\n"
-        "  https://openadapt.ai/qualify"
+        "Qualify the exact app and environment before unattended use."
     )
 
 

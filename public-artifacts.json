@@ -885,11 +885,11 @@
     },
     {
       "path": "docs/showcase-openemr/program-graph.html",
-      "sha256": "58ae2e2bfa549a0986b50a34c6c4e29b5eac9ace9248712fa0d5c4ba05a587e6"
+      "sha256": "472eb493cd43aa35d3032687ea5027496f7c37d30c6603c78af9647d20743bd0"
     },
     {
       "path": "docs/showcase-openemr/program-graph.json",
-      "sha256": "949271190e203f4b8f36e5eb77ccdef811dbdc284249ebffcd272c0300759d8a"
+      "sha256": "38bbecff45f48b4d00a4fb95e4cc8186fefc83478962666f90fe82495f749871"
     },
     {
       "path": "docs/showcase-openemr/program-graph.png",
@@ -3085,11 +3085,11 @@
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v1/artifacts/compiled/program-graph.html",
-      "sha256": "c4922ed220fee77bea676d4e9a15c797685573e5d31ff6616f80d3223caac6dd"
+      "sha256": "24f2fb5955237f9a48dff5a503bf1998cbb4330ca8876b22bb3b8cafbeff0f03"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v1/artifacts/compiled/program-graph.json",
-      "sha256": "0c346b7bb23ad508d1731655c2c7e7947776fcd6256334b3b6fb2194b477e461"
+      "sha256": "fc3c50e206c41f59f016163ae43be768f110f4b9b3875e966e1dd25765f7886e"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v1/artifacts/media/recording.webm",
@@ -4353,11 +4353,11 @@
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v2/artifacts/compiled/program-graph.html",
-      "sha256": "845b4aff2bd3ce524739db67cb36ab5b4929785779a2105cbda24c014a56500f"
+      "sha256": "8464906f96196849e8114600178671454ebff1374dafd47fe10ff3768a1adb68"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v2/artifacts/compiled/program-graph.json",
-      "sha256": "b3e6862e1c1e142858e4e5237a4af90af26c9515ce0e8cec194ba6998558d6b8"
+      "sha256": "d41091de8a55a9f6688d9b4de324ad2ebab9d811fa7f048564a736c52e5d2476"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v2/artifacts/media/recording.webm",
@@ -5621,11 +5621,11 @@
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v3/artifacts/compiled/program-graph.html",
-      "sha256": "15f97a7e127bbea3188f421ffd3b2bc8a18d6bffa0d61e117dabee43da355883"
+      "sha256": "8464906f96196849e8114600178671454ebff1374dafd47fe10ff3768a1adb68"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v3/artifacts/compiled/program-graph.json",
-      "sha256": "016e509e71d6f649f8f3ff37e723f551ee0c32e081a1f1fc00713eab6ef3ebe3"
+      "sha256": "d41091de8a55a9f6688d9b4de324ad2ebab9d811fa7f048564a736c52e5d2476"
     },
     {
       "path": "public-demo/evidence-packs/mockmed-triage-v3/artifacts/media/recording.webm",

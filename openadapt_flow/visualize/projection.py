@@ -31,6 +31,7 @@ from typing import Final, Optional
 from pydantic import BaseModel
 
 from openadapt_flow.visualize.spec import (
+    PROJECTED_BUNDLE_NAME,
     BundleMeta,
     EffectInfo,
     GraphEdge,
@@ -486,7 +487,7 @@ def _project_provenance(provenance: ProvenanceInfo) -> ProvenanceInfo:
 
 def _project_bundle(bundle: BundleMeta) -> BundleMeta:
     return BundleMeta(
-        name="Compiled program",
+        name=PROJECTED_BUNDLE_NAME,
         schema_version=bundle.schema_version,
         is_program=bundle.is_program,
         contains_phi=bundle.contains_phi,

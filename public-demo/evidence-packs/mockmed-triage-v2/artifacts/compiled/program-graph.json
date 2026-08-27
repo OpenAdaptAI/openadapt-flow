@@ -3,7 +3,7 @@
     "action_count": 6,
     "api_binding_count": 0,
     "contains_phi": false,
-    "created_at": "2026-07-25T19:27:32.383972+00:00",
+    "created_at": null,
     "effect_count": 2,
     "encrypted": false,
     "halt_point_count": 1,
@@ -11,12 +11,12 @@
     "identity_unarmed_count": 0,
     "irreversible_count": 1,
     "is_program": false,
-    "name": "mockmed-triage",
+    "name": "Compiled program",
     "params": [
       {
         "choices": [],
-        "example": "Synthetic follow-up in two weeks",
-        "name": "note",
+        "example": null,
+        "name": "input_1",
         "required": true,
         "secret": false,
         "type": "string"
@@ -27,17 +27,14 @@
       "certification_status": "certified",
       "certified": true,
       "compiler_version": "1.23.0",
-      "content_digest": "8c0bcebb84733d34b16a48d0dc9a612a15ce71842fca0761c2db5fc12a39e6cf",
+      "content_digest": null,
       "expires_at": null,
-      "policy_name": "clinical-write",
+      "policy_name": null,
       "source_recording_sha256": null
     },
     "schema_version": 2,
     "step_count": 6,
-    "viewport": [
-      1280,
-      800
-    ]
+    "viewport": null
   },
   "edges": [
     {
@@ -123,25 +120,25 @@
             "present": false
           },
           {
-            "detail": "#open-p1",
+            "detail": "",
             "label": "DOM / accessibility selector",
             "name": "structural",
             "present": true
           },
           {
-            "detail": "templates/step_000.png",
+            "detail": "",
             "label": "Image template match",
             "name": "template",
             "present": true
           },
           {
-            "detail": "Open",
+            "detail": "",
             "label": "OCR text match",
             "name": "ocr",
             "present": true
           },
           {
-            "detail": "2 landmark(s)",
+            "detail": "",
             "label": "Nearby-landmark geometry",
             "name": "landmarks",
             "present": true
@@ -150,8 +147,10 @@
         "top_rung": "structural"
       },
       "risk": "reversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "click 'Open'",
+      "title": "Select an interface target",
       "wait_until": null
     },
     {
@@ -193,25 +192,25 @@
             "present": false
           },
           {
-            "detail": "#new-encounter",
+            "detail": "",
             "label": "DOM / accessibility selector",
             "name": "structural",
             "present": true
           },
           {
-            "detail": "templates/step_001.png",
+            "detail": "",
             "label": "Image template match",
             "name": "template",
             "present": true
           },
           {
-            "detail": "New Encounter",
+            "detail": "",
             "label": "OCR text match",
             "name": "ocr",
             "present": true
           },
           {
-            "detail": "2 landmark(s)",
+            "detail": "",
             "label": "Nearby-landmark geometry",
             "name": "landmarks",
             "present": true
@@ -220,8 +219,10 @@
         "top_rung": "structural"
       },
       "risk": "reversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "click 'New Encounter'",
+      "title": "Select an interface target",
       "wait_until": null
     },
     {
@@ -262,25 +263,25 @@
             "present": false
           },
           {
-            "detail": "#type-triage",
+            "detail": "",
             "label": "DOM / accessibility selector",
             "name": "structural",
             "present": true
           },
           {
-            "detail": "templates/step_002.png",
+            "detail": "",
             "label": "Image template match",
             "name": "template",
             "present": true
           },
           {
-            "detail": "Triage",
+            "detail": "",
             "label": "OCR text match",
             "name": "ocr",
             "present": true
           },
           {
-            "detail": "2 landmark(s)",
+            "detail": "",
             "label": "Nearby-landmark geometry",
             "name": "landmarks",
             "present": true
@@ -289,8 +290,10 @@
         "top_rung": "structural"
       },
       "risk": "reversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "click 'Triage'",
+      "title": "Select an interface target",
       "wait_until": null
     },
     {
@@ -331,13 +334,13 @@
             "present": false
           },
           {
-            "detail": "#note-label",
+            "detail": "",
             "label": "DOM / accessibility selector",
             "name": "structural",
             "present": true
           },
           {
-            "detail": "templates/step_003.png",
+            "detail": "",
             "label": "Image template match",
             "name": "template",
             "present": true
@@ -349,7 +352,7 @@
             "present": false
           },
           {
-            "detail": "2 landmark(s)",
+            "detail": "",
             "label": "Nearby-landmark geometry",
             "name": "landmarks",
             "present": true
@@ -358,8 +361,10 @@
         "top_rung": "structural"
       },
       "risk": "reversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "click target 'Note'",
+      "title": "Select an interface target",
       "wait_until": null
     },
     {
@@ -384,13 +389,15 @@
       "key": null,
       "kind": "action",
       "outcome": null,
-      "param": "note",
+      "param": null,
       "postconditions": [],
       "reason": "",
       "resolution": null,
       "risk": "reversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "type <note>",
+      "title": "Enter an approved input",
       "wait_until": null
     },
     {
@@ -406,19 +413,19 @@
           "kind": "record_written",
           "needs_operator_confirmation": false,
           "risk": "irreversible",
-          "summary": "exactly 1 record(s) where patient_id=p1, type=Triage, source=replay, key=mockmed-triage-p1-v1"
+          "summary": "Independent effect contract"
         },
         {
           "kind": "field_equals",
           "needs_operator_confirmation": false,
           "risk": "irreversible",
-          "summary": "record field note == Synthetic follow-up in two weeks"
+          "summary": "Independent effect contract"
         }
       ],
       "guard": null,
       "guard_on_unmet": null,
       "halts": [
-        "halts if the system-of-record effect is not confirmed"
+        "declared stop rule 1"
       ],
       "has_api_binding": false,
       "id": "step_005",
@@ -449,25 +456,25 @@
             "present": false
           },
           {
-            "detail": "#save-encounter",
+            "detail": "",
             "label": "DOM / accessibility selector",
             "name": "structural",
             "present": true
           },
           {
-            "detail": "templates/step_005.png",
+            "detail": "",
             "label": "Image template match",
             "name": "template",
             "present": true
           },
           {
-            "detail": "Save Encounter",
+            "detail": "",
             "label": "OCR text match",
             "name": "ocr",
             "present": true
           },
           {
-            "detail": "2 landmark(s)",
+            "detail": "",
             "label": "Nearby-landmark geometry",
             "name": "landmarks",
             "present": true
@@ -476,8 +483,10 @@
         "top_rung": "structural"
       },
       "risk": "irreversible",
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "click 'Save Encounter'",
+      "title": "Select an interface target",
       "wait_until": null
     },
     {
@@ -500,8 +509,10 @@
       "reason": "",
       "resolution": null,
       "risk": null,
+      "risk_explanation": null,
+      "risk_review_required": false,
       "secret": false,
-      "title": "Success",
+      "title": "End of declared steps",
       "wait_until": null
     }
   ],

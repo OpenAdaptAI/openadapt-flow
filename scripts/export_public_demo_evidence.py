@@ -114,7 +114,12 @@ from openadapt_flow.runtime.authorization import (
 from openadapt_flow.runtime.effects import RestRecordVerifier
 from openadapt_flow.transaction import IdempotencyLedger
 from openadapt_flow.verification import VerificationTier
-from openadapt_flow.visualize import build_program_graph, render_html
+from openadapt_flow.visualize import (
+    PresentationProfile,
+    build_program_graph,
+    project_program_graph,
+    render_html,
+)
 
 SCHEMA_VERSION = "openadapt.public-demo-evidence/v1"
 OUTCOME_SCHEMA_VERSION = "openadapt.public-demo-outcome/v1"
@@ -2577,7 +2582,15 @@ def export_pack(
         )
 
         compiled_dir = artifacts / "compiled"
-        graph = build_program_graph(workflow)
+        # The evidence pack is published to anyone, so the graph crosses the
+        # boundary here and BOTH artifacts carry the projected spec. render_html
+        # embeds the whole spec as JSON, so rendering an unprojected graph would
+        # ship recorded titles, DOM selectors, and template paths in the HTML
+        # even though the page never displays them.
+        graph = project_program_graph(
+            build_program_graph(workflow),
+            PresentationProfile.PUBLIC_SYNTHETIC,
+        )
         _write_json(
             compiled_dir / "program-graph.json",
             graph.model_dump(mode="json"),

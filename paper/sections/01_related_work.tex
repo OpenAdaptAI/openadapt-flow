@@ -50,7 +50,19 @@ between related executions \cite{chen2018metamorphic}, and regression and
 differential oracles compare against a trusted prior or a reference
 implementation. Our silent-wrong-effect rate is in this family: it is a partial,
 state-based oracle that reads the system of record out of band rather than
-deriving a full specification of correctness. The faults \system{} targets---
+deriving a full specification of correctness.
+
+Asserting against the backend rather than the interface is, importantly, not
+new: mature end-to-end test suites routinely check a database row or an API
+response after driving a UI, precisely because UI-level assertions are brittle
+and flaky \cite{leotta2013capture,luo2014flaky}, and commercial RPA platforms
+expose database and API activities that a workflow author can use the same way.
+We claim no novelty for the idea of reading the backend. Our contributions are
+that this check is (i) made a \emph{first-class runtime gate} rather than an
+optional test assertion---an unverifiable effect halts production execution---
+(ii) turned into a reported \emph{metric} for automation reliability, and (iii)
+measured against an oracle that is operationally independent of both the write
+path and the automation's own verifier. The faults \system{} targets---
 duplicate submission, double delivery, stale overwrite---are the same
 exactly-once and idempotency hazards studied in transactional systems
 \cite{gray1981transaction}. These

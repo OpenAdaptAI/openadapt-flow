@@ -12,11 +12,13 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 from openadapt_flow.qualification_admission_v2 import canonical_json
-from openadapt_flow.runner.hosted_adapter import HostedTerminalEvent
+from openadapt_flow.runner.hosted_adapter import (
+    HostedTerminalEventV2,
+)
 from openadapt_flow.terminal_verification_v2 import (
     RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN,
     RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
-    SIGNATURE_DOMAIN,
+    SIGNATURE_DOMAIN_V3,
     evidence_runner_key_id,
     evidence_runner_signer_sha256,
     sign_production_terminal_verification,
@@ -51,7 +53,7 @@ def _vector(name: str) -> dict[str, object]:
     envelope = sign_production_terminal_verification(payload, _private_key())
     raw = canonical_json(envelope)
     effect_records = payload.evidence_manifests.effect.records
-    callback = HostedTerminalEvent(
+    callback = HostedTerminalEventV2(
         run_id=payload.run_id,
         outcome=payload.run_receipt.transaction_outcome,
         report_sha256=payload.run_report_sha256,
@@ -138,8 +140,8 @@ def build_fixture() -> dict[str, object]:
         "key_id": evidence_runner_key_id(public_bytes),
         "private_key_base64": b64encode(private_bytes).decode("ascii"),
         "public_key_base64": b64encode(public_bytes).decode("ascii"),
-        "schema_version": "openadapt.production-terminal-cross-language-vectors/v2",
-        "signature_domain_base64": b64encode(SIGNATURE_DOMAIN).decode("ascii"),
+        "schema_version": "openadapt.production-terminal-cross-language-vectors/v3",
+        "signature_domain_base64": b64encode(SIGNATURE_DOMAIN_V3).decode("ascii"),
         "signer_sha256": evidence_runner_signer_sha256(public_bytes),
         "managed_result_loss_closure_vector": _result_loss_closure_vector(managed),
         "managed_result_loss_acknowledged_closure_vector": (

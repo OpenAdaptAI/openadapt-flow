@@ -63,6 +63,10 @@ SCHEMA: Final[Literal["openadapt.production-terminal-verification/v2"]] = (
     "openadapt.production-terminal-verification/v2"
 )
 SIGNATURE_DOMAIN: Final[bytes] = b"openadapt-production-terminal-verification-v2\0"
+SCHEMA_V3: Final[Literal["openadapt.production-terminal-verification/v3"]] = (
+    "openadapt.production-terminal-verification/v3"
+)
+SIGNATURE_DOMAIN_V3: Final[bytes] = b"openadapt-production-terminal-verification-v3\0"
 PERMIT_CHAIN_DOMAIN: Final[bytes] = b"openadapt-managed-delivery-permit-chain-v2\0"
 PERMIT_CHAIN_SCHEMA: Final[Literal["openadapt.production-delivery-permit-chain/v2"]] = (
     "openadapt.production-delivery-permit-chain/v2"
@@ -2444,8 +2448,119 @@ def build_production_evidence_manifests(
     )
 
 
-class ProductionTerminalVerificationPayload(ClosedSignedModel):
+class ProductionTerminalVerificationPayloadV2(ClosedSignedModel):
+    """Exact Flow 1.34.0 success-only terminal payload.
+
+    Keep this wire shape frozen. New terminal outcomes use v3. The validator
+    projects the legacy success into the current verifier so both readers keep
+    the same safety checks without adding fields to the signed v2 bytes.
+    """
+
     schema_version: Literal["openadapt.production-terminal-verification/v2"] = SCHEMA
+    terminal_sequence: Literal[1] = 1
+    execution_purpose: Literal["production"] = "production"
+    run_id: str = Field(pattern=_UUID_RE)
+    flow_run_id_sha256: str = Field(pattern=_SHA256_RE)
+    tenant_id: str = Field(pattern=_UUID_RE)
+    workflow_id: str = Field(pattern=_UUID_RE)
+    workflow_version_id: str = Field(pattern=_UUID_RE)
+    bundle_version_id: str = Field(pattern=_UUID_RE)
+    bundle_artifact_sha256: str = Field(pattern=_SHA256_RE)
+    bundle_content_digest: str = Field(pattern=_SHA256_RE)
+    environment_digest: str = Field(pattern=_SHA256_RE)
+    environment_contract_sha256: str = Field(pattern=_SHA256_RE)
+    runtime_environment_sha256: str = Field(pattern=_SHA256_RE)
+    identity_contract_sha256: str = Field(pattern=_SHA256_RE)
+    effect_contract_sha256: str = Field(pattern=_SHA256_RE)
+    runtime_validation_id: str = Field(pattern=_UUID_RE)
+    runtime_substrate: Literal["web", "windows", "macos", "linux", "rdp", "citrix"]
+    admission_id: str = Field(pattern=_UUID_RE)
+    admission_artifact_sha256: str = Field(pattern=_SHA256_RE)
+    admission_policy_sha256: str = Field(pattern=_SHA256_RE)
+    evidence_identity_sha256: str = Field(pattern=_SHA256_RE)
+    admitted_runtime_build_sha256: str = Field(pattern=_SHA256_RE)
+    evidence_runner_signer_sha256: str = Field(pattern=_SHA256_RE)
+    qualification_signer_registry_sha256: str = Field(pattern=_SHA256_RE)
+    qualification_signer_registry_revision: StrictInt = Field(
+        ge=1, le=JS_MAX_SAFE_INTEGER
+    )
+    execution_authority_id: str = Field(pattern=_ID_RE)
+    execution_authority_sha256: str = Field(pattern=_SHA256_RE)
+    execution_authority_signer_sha256: str = Field(pattern=_SHA256_RE)
+    permit_chain: ProductionDeliveryPermitChain
+    permit_count: StrictInt = Field(ge=1, le=JS_MAX_SAFE_INTEGER)
+    final_authority_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    final_runtime_delivery_sequence: StrictInt = Field(ge=0, le=JS_MAX_SAFE_INTEGER)
+    workflow_contract_sha256: str = Field(pattern=_SHA256_RE)
+    execution_outcome: ProductionExecutionOutcome
+    execution_outcome_sha256: str = Field(pattern=_SHA256_RE)
+    run_receipt: ProductionRunReceipt
+    run_receipt_sha256: str = Field(pattern=_SHA256_RE)
+    run_report_sha256: str = Field(pattern=_SHA256_RE)
+    run_report_object_version: str = Field(pattern=_ID_RE)
+    run_report_object_sha256: str = Field(pattern=_SHA256_RE)
+    evidence_manifests: ProductionEvidenceManifests
+    verified_at: str
+    issued_at: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _frozen_v2_shape(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            permit_chain = value.get("permit_chain")
+            if isinstance(permit_chain, dict) and "pending" in permit_chain:
+                raise ValueError("terminal v2 permit chain has unexpected fields")
+            execution_outcome = value.get("execution_outcome")
+            if isinstance(execution_outcome, dict) and (
+                "managed_result_loss_evidence_sha256" in execution_outcome
+            ):
+                raise ValueError("terminal v2 execution outcome has unexpected fields")
+            run_receipt = value.get("run_receipt")
+            if isinstance(run_receipt, dict) and (
+                "managed_result_loss_evidence_sha256" in run_receipt
+            ):
+                raise ValueError("terminal v2 run receipt has unexpected fields")
+            manifests = value.get("evidence_manifests")
+            effect = manifests.get("effect") if isinstance(manifests, dict) else None
+            records = effect.get("records") if isinstance(effect, dict) else None
+            if isinstance(records, (list, tuple)):
+                legacy_effect_fields = set(ProductionEffectEvidence.model_fields)
+                if any(
+                    isinstance(record, dict)
+                    and set(record).difference(legacy_effect_fields)
+                    for record in records
+                ):
+                    raise ValueError(
+                        "terminal v2 effect evidence has unexpected fields"
+                    )
+        return value
+
+    @model_validator(mode="after")
+    def _frozen_v2_success(self) -> "ProductionTerminalVerificationPayloadV2":
+        if self.permit_chain.pending is not None:
+            raise ValueError("terminal v2 cannot carry a pending permit")
+        projected = self.model_dump(mode="json")
+        projected.update(
+            {
+                "schema_version": SCHEMA_V3,
+                "acknowledged_permit_count": self.permit_count,
+                "pending_permit_count": 0,
+            }
+        )
+        try:
+            ProductionTerminalVerificationPayloadV3.model_validate(projected)
+        except ValueError as exc:
+            raise ValueError("terminal v2 success proof is invalid") from exc
+        if self.run_receipt.transaction_outcome != "VERIFIED":
+            raise ValueError("terminal v2 is success-only")
+        return self
+
+    def canonical_bytes(self) -> bytes:
+        return canonical_json(self)
+
+
+class ProductionTerminalVerificationPayloadV3(ClosedSignedModel):
+    schema_version: Literal["openadapt.production-terminal-verification/v3"] = SCHEMA_V3
     terminal_sequence: Literal[1] = 1
     execution_purpose: Literal["production"] = "production"
     run_id: str = Field(pattern=_UUID_RE)
@@ -2505,7 +2620,7 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
     issued_at: str
 
     @model_validator(mode="after")
-    def _closed_terminal_outcome(self) -> "ProductionTerminalVerificationPayload":
+    def _closed_terminal_outcome(self) -> "ProductionTerminalVerificationPayloadV3":
         if hashlib.sha256(self.run_id.encode("utf-8")).hexdigest() != (
             self.flow_run_id_sha256
         ):
@@ -2817,6 +2932,10 @@ class ProductionTerminalVerificationPayload(ClosedSignedModel):
         return canonical_json(self)
 
 
+# Keep the established Python API name on the current wire type.
+ProductionTerminalVerificationPayload = ProductionTerminalVerificationPayloadV3
+
+
 class EvidenceRunnerSigner(ClosedSignedModel):
     algorithm: Literal["ed25519"] = "ed25519"
     key_id: str = Field(pattern=_RUNNER_KEY_ID_RE)
@@ -2843,7 +2962,44 @@ class EvidenceRunnerSigner(ClosedSignedModel):
         return self
 
 
-class ProductionTerminalVerificationEnvelope(ClosedSignedModel):
+class ProductionTerminalVerificationEnvelopeV2(ClosedSignedModel):
+    """Exact Flow 1.34.0 envelope for a success-only v2 payload."""
+
+    payload: ProductionTerminalVerificationPayloadV2
+    signer: EvidenceRunnerSigner
+    signature: str = Field(min_length=86, max_length=86)
+
+    @field_validator("signature")
+    @classmethod
+    def _canonical_signature(cls, value: str) -> str:
+        try:
+            decoded = urlsafe_b64decode(value + "==")
+        except ValueError as exc:
+            raise ValueError("terminal signature is invalid") from exc
+        if (
+            len(decoded) != 64
+            or urlsafe_b64encode(decoded).decode("ascii").rstrip("=") != value
+        ):
+            raise ValueError("terminal signature is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _signer_matches_payload(self) -> "ProductionTerminalVerificationEnvelopeV2":
+        public_key = b64decode(self.signer.public_key, validate=True)
+        if (
+            evidence_runner_signer_sha256(public_key)
+            != self.payload.evidence_runner_signer_sha256
+        ):
+            raise ValueError("terminal signer does not match the admitted runner")
+        return self
+
+    def artifact_sha256(self) -> str:
+        return _sha256(self)
+
+
+class ProductionTerminalVerificationEnvelopeV3(ClosedSignedModel):
+    """Current v3 envelope for all signed terminal outcomes."""
+
     payload: ProductionTerminalVerificationPayload
     signer: EvidenceRunnerSigner
     signature: str = Field(min_length=86, max_length=86)
@@ -2874,6 +3030,86 @@ class ProductionTerminalVerificationEnvelope(ClosedSignedModel):
 
     def artifact_sha256(self) -> str:
         return _sha256(self)
+
+
+# Keep the established Python API name on the current wire type.
+ProductionTerminalVerificationEnvelope = ProductionTerminalVerificationEnvelopeV3
+
+
+def sign_production_terminal_verification_v2(
+    payload: ProductionTerminalVerificationPayloadV2,
+    private_key: Ed25519PrivateKey,
+) -> ProductionTerminalVerificationEnvelopeV2:
+    """Sign one frozen Flow 1.34.0 success payload without changing its bytes."""
+
+    payload = ProductionTerminalVerificationPayloadV2.model_validate(
+        payload.model_dump(mode="json")
+    )
+    public_key = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    signer = EvidenceRunnerSigner(
+        key_id=evidence_runner_key_id(public_key),
+        public_key=b64encode(public_key).decode("ascii"),
+    )
+    if (
+        evidence_runner_signer_sha256(public_key)
+        != payload.evidence_runner_signer_sha256
+    ):
+        raise ProductionTerminalVerificationError(
+            "terminal signer does not match the admitted runner"
+        )
+    signature = private_key.sign(SIGNATURE_DOMAIN + payload.canonical_bytes())
+    return ProductionTerminalVerificationEnvelopeV2(
+        payload=payload,
+        signer=signer,
+        signature=urlsafe_b64encode(signature).decode("ascii").rstrip("="),
+    )
+
+
+def verify_production_terminal_verification_v2_signature(
+    envelope: ProductionTerminalVerificationEnvelopeV2,
+) -> str:
+    """Verify the frozen v2 signature for dual-read compatibility."""
+
+    envelope = ProductionTerminalVerificationEnvelopeV2.model_validate(
+        envelope.model_dump(mode="json")
+    )
+    try:
+        Ed25519PublicKey.from_public_bytes(
+            b64decode(envelope.signer.public_key, validate=True)
+        ).verify(
+            urlsafe_b64decode(envelope.signature + "=="),
+            SIGNATURE_DOMAIN + envelope.payload.canonical_bytes(),
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise ProductionTerminalVerificationError(
+            "production terminal v2 signature is invalid"
+        ) from exc
+    return envelope.artifact_sha256()
+
+
+def verify_production_terminal_verification_v3_signature(
+    envelope: ProductionTerminalVerificationEnvelopeV3,
+) -> str:
+    """Verify the current v3 signature without claiming independent state."""
+
+    envelope = ProductionTerminalVerificationEnvelopeV3.model_validate(
+        envelope.model_dump(mode="json")
+    )
+    try:
+        Ed25519PublicKey.from_public_bytes(
+            b64decode(envelope.signer.public_key, validate=True)
+        ).verify(
+            urlsafe_b64decode(envelope.signature + "=="),
+            SIGNATURE_DOMAIN_V3 + envelope.payload.canonical_bytes(),
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise ProductionTerminalVerificationError(
+            "production terminal v3 signature is invalid"
+        ) from exc
+    return envelope.artifact_sha256()
 
 
 class ProductionTerminalVerificationExpected(ClosedSignedModel):
@@ -2968,7 +3204,7 @@ class ProductionTerminalVerificationExpected(ClosedSignedModel):
 
 
 class ProductionTerminalVerificationContext(ClosedSignedModel):
-    """Independent exact bindings needed to produce one terminal v2 proof."""
+    """Independent exact bindings needed to produce one terminal v3 proof."""
 
     run_id: str = Field(pattern=_UUID_RE)
     tenant_id: str = Field(pattern=_UUID_RE)
@@ -3063,7 +3299,7 @@ def sign_production_terminal_verification(
         raise ProductionTerminalVerificationError(
             "terminal signer does not match the admitted runner"
         )
-    signature = private_key.sign(SIGNATURE_DOMAIN + payload.canonical_bytes())
+    signature = private_key.sign(SIGNATURE_DOMAIN_V3 + payload.canonical_bytes())
     return ProductionTerminalVerificationEnvelope(
         payload=payload,
         signer=signer,
@@ -3192,7 +3428,7 @@ def verify_production_terminal_verification(
     try:
         Ed25519PublicKey.from_public_bytes(public_key_bytes).verify(
             urlsafe_b64decode(envelope.signature + "=="),
-            SIGNATURE_DOMAIN + payload.canonical_bytes(),
+            SIGNATURE_DOMAIN_V3 + payload.canonical_bytes(),
         )
     except (InvalidSignature, ValueError) as exc:
         raise ProductionTerminalVerificationError(

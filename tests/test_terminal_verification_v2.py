@@ -28,6 +28,7 @@ from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.receipt import RunReceipt
 from openadapt_flow.runner.hosted_adapter import (
     HostedTerminalEvent,
+    HostedTerminalEventV1,
     ManagedChildStartEvidence,
     ProductionDeliveryResultLossClosureRequest,
     ProductionDeliveryResultLossClosureResult,
@@ -36,6 +37,7 @@ from openadapt_flow.terminal_verification_v2 import (
     RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN,
     RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
     SIGNATURE_DOMAIN,
+    SIGNATURE_DOMAIN_V3,
     ProductionAuthorizationEvidenceManifest,
     ProductionDeliveryPermit,
     ProductionDeliveryPermitChain,
@@ -57,9 +59,11 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionTerminalEffectState,
     ProductionTerminalVerificationContext,
     ProductionTerminalVerificationEnvelope,
+    ProductionTerminalVerificationEnvelopeV2,
     ProductionTerminalVerificationError,
     ProductionTerminalVerificationExpected,
     ProductionTerminalVerificationPayload,
+    ProductionTerminalVerificationPayloadV2,
     TerminalContractCounts,
     build_evidence_manifest,
     build_production_terminal_verification,
@@ -72,6 +76,7 @@ from openadapt_flow.terminal_verification_v2 import (
     sign_production_terminal_verification,
     verify_production_delivery_result_loss_closure_binding,
     verify_production_terminal_verification,
+    verify_production_terminal_verification_v2_signature,
 )
 from tests.test_run_receipt import _report as _production_report
 
@@ -1834,7 +1839,7 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
         )
     )
     assert b64decode(fixture["signature_domain_base64"], validate=True) == (
-        SIGNATURE_DOMAIN
+        SIGNATURE_DOMAIN_V3
     )
     key = Ed25519PrivateKey.from_private_bytes(
         b64decode(fixture["private_key_base64"], validate=True)
@@ -1890,6 +1895,117 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
         assert callback.terminal_verification_artifact_sha256 == (
             envelope.artifact_sha256()
         )
+
+
+def test_flow_v1_34_terminal_verified_golden_is_exact() -> None:
+    golden = json.loads(
+        Path("tests/fixtures/flow_v1_34_0_terminal_verified.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert golden["release_tag"] == "v1.34.0"
+    assert golden["source_commit"] == ("30fc60e55778a0e0f92b9776117cafcfe2512249")
+    assert golden["annotated_tag_object"] == (
+        "7bd2c47182b514053a14e2c7e861694cda1387ba"
+    )
+    assert golden["source_commit"] != golden["annotated_tag_object"]
+    assert (
+        b64decode(golden["signature_domain_base64"], validate=True) == SIGNATURE_DOMAIN
+    )
+    legacy_raw = b64decode(golden["envelope_canonical_base64"], validate=True)
+    legacy_envelope = ProductionTerminalVerificationEnvelopeV2.model_validate_json(
+        legacy_raw
+    )
+    assert canonical_json(legacy_envelope) == legacy_raw
+    assert legacy_envelope.payload.schema_version == (
+        "openadapt.production-terminal-verification/v2"
+    )
+    legacy_payload_fields = legacy_envelope.payload.model_dump(mode="json")
+    assert "acknowledged_permit_count" not in legacy_payload_fields
+    assert "pending_permit_count" not in legacy_payload_fields
+    assert (
+        hashlib.sha256(legacy_envelope.payload.canonical_bytes()).hexdigest()
+        == golden["payload_canonical_sha256"]
+    )
+    assert legacy_envelope.signature == golden["signature"]
+    assert (
+        verify_production_terminal_verification_v2_signature(legacy_envelope)
+        == golden["terminal_verification_artifact_sha256"]
+    )
+    legacy_callback = HostedTerminalEventV1.model_validate(golden["callback"])
+    assert legacy_callback.schema_version == "openadapt.hosted-runner-terminal/v1"
+    with pytest.raises(ValidationError):
+        ProductionTerminalVerificationEnvelope.model_validate_json(legacy_raw)
+    with pytest.raises(ValidationError):
+        HostedTerminalEvent.model_validate(golden["callback"])
+
+
+def test_flow_v1_34_payload_rejects_successor_only_nested_fields() -> None:
+    current = _payload()
+    legacy_raw = current.model_dump(mode="json")
+    legacy_raw["schema_version"] = "openadapt.production-terminal-verification/v2"
+    legacy_raw.pop("acknowledged_permit_count")
+    legacy_raw.pop("pending_permit_count")
+    old_effect = current.evidence_manifests.effect.records[0]
+    terminal_effect = ProductionTerminalEffectState(
+        result_index=old_effect.result_index,
+        effect_contract_hash=old_effect.effect_contract_hash,
+        attempt_state="delivered",
+        observed_effect="present",
+        effect_verified=True,
+        verification_performed=True,
+        verifier_identity=old_effect.verifier_identity,
+        verification_tier=old_effect.verification_tier,
+        final_verdict="confirmed",
+        resolved_delivery_uncertainty=False,
+        absence_basis="none",
+        reconciliation_completed=False,
+        reconciliation_actions=0,
+    )
+    effect = build_evidence_manifest(
+        ProductionEffectEvidenceManifest,
+        effect_contract_sha256=current.effect_contract_sha256,
+        workflow_contract_sha256=current.workflow_contract_sha256,
+        required=1,
+        confirmed=1,
+        records=(terminal_effect,),
+    )
+    legacy_raw["evidence_manifests"]["effect"] = effect.model_dump(mode="json")
+
+    with pytest.raises(ValidationError, match="effect evidence has unexpected"):
+        ProductionTerminalVerificationPayloadV2.model_validate(legacy_raw)
+
+    clean = current.model_dump(mode="json")
+    clean["schema_version"] = "openadapt.production-terminal-verification/v2"
+    clean.pop("acknowledged_permit_count")
+    clean.pop("pending_permit_count")
+    clean["execution_outcome"]["managed_result_loss_evidence_sha256"] = None
+    with pytest.raises(ValidationError, match="execution outcome has unexpected"):
+        ProductionTerminalVerificationPayloadV2.model_validate(clean)
+
+
+def test_terminal_event_versions_reject_the_other_proof_family() -> None:
+    current = json.loads(
+        Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json").read_text(
+            encoding="utf-8"
+        )
+    )["vectors"][0]["callback"]
+    current_as_v1 = dict(current) | {
+        "schema_version": "openadapt.hosted-runner-terminal/v1"
+    }
+    with pytest.raises(ValidationError, match="terminal verification artifact"):
+        HostedTerminalEventV1.model_validate(current_as_v1)
+
+    legacy = json.loads(
+        Path("tests/fixtures/flow_v1_34_0_terminal_verified.json").read_text(
+            encoding="utf-8"
+        )
+    )["callback"]
+    legacy_as_v2 = dict(legacy) | {
+        "schema_version": "openadapt.hosted-runner-terminal/v2"
+    }
+    with pytest.raises(ValidationError, match="terminal verification artifact"):
+        HostedTerminalEvent.model_validate(legacy_as_v2)
 
 
 def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:

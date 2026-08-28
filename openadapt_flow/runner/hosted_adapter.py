@@ -57,6 +57,11 @@ from openadapt_flow.runner.commands import build_run_argv
 from openadapt_flow.runner.config import RunnerConfig, load_runner_config
 from openadapt_flow.runner.dispatch_envelope import write_managed_dispatch_envelope
 from openadapt_flow.runner.evidence import failure_events, refusal_events, report_events
+from openadapt_flow.runner.flow_release_receipt import (
+    FlowReleaseVerificationReceiptArtifactBytes,
+    HostedFlowReleaseIdentity,
+    assert_hosted_flow_release,
+)
 from openadapt_flow.runner.inputs import resolve_admitted_params
 from openadapt_flow.runner.product_release import (
     ProductReleaseAdmissionArtifact,
@@ -87,12 +92,15 @@ from openadapt_flow.terminal_verification_v2 import (
     ProductionDeliveryResultLossClosureArtifact,
     ProductionTerminalVerificationContext,
     ProductionTerminalVerificationEnvelope,
+    ProductionTerminalVerificationEnvelopeV2,
     ProductionTerminalVerificationExpected,
     build_production_terminal_verification,
     evidence_runner_signer_sha256,
     prepare_production_terminal_evidence,
     verify_production_delivery_result_loss_closure_binding,
     verify_production_terminal_verification_from_report,
+    verify_production_terminal_verification_v2_signature,
+    verify_production_terminal_verification_v3_signature,
 )
 from openadapt_flow.transaction import (
     DuplicateActuation,
@@ -180,10 +188,7 @@ class RegisterCapabilities(_Closed):
         return self
 
 
-class RegisterRequest(_Closed):
-    schema_version: Literal["openadapt.hosted-runner-registration/v1"] = (
-        "openadapt.hosted-runner-registration/v1"
-    )
+class _RegisterRequestCommon(_Closed):
     name: str = Field(min_length=1, max_length=80)
     platform: Literal["windows", "macos", "linux"]
     agent_version: str = Field(min_length=1, max_length=40)
@@ -195,7 +200,7 @@ class RegisterRequest(_Closed):
     ]
 
     @model_validator(mode="after")
-    def _exact_local_targets(self) -> "RegisterRequest":
+    def _exact_local_targets(self) -> "_RegisterRequestCommon":
         if set(self.local_runtime_release) != {"flow", "desktop", "capture"} or any(
             key != item.target for key, item in self.local_runtime_release.items()
         ):
@@ -205,8 +210,40 @@ class RegisterRequest(_Closed):
         return self
 
 
-class RegisterResponse(_Closed):
-    schema_version: Literal["openadapt.hosted-runner-registration-result/v1"]
+class RegisterRequestV1(_RegisterRequestCommon):
+    """Frozen Flow 1.34.0 registration shape."""
+
+    schema_version: Literal["openadapt.hosted-runner-registration/v1"] = (
+        "openadapt.hosted-runner-registration/v1"
+    )
+
+
+class RegisterRequestV2(_RegisterRequestCommon):
+    schema_version: Literal["openadapt.hosted-runner-registration/v2"] = (
+        "openadapt.hosted-runner-registration/v2"
+    )
+    local_flow_release: HostedFlowReleaseIdentity
+
+
+RegisterRequest = RegisterRequestV2
+RegisterRequestWire = Union[RegisterRequestV1, RegisterRequestV2]
+
+
+def parse_register_request(
+    value: RegisterRequestWire | Mapping[str, object],
+) -> RegisterRequestWire:
+    if isinstance(value, (RegisterRequestV1, RegisterRequestV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted registration is invalid")
+    if value.get("schema_version") == "openadapt.hosted-runner-registration/v1":
+        return RegisterRequestV1.model_validate(value)
+    if value.get("schema_version") == "openadapt.hosted-runner-registration/v2":
+        return RegisterRequestV2.model_validate(value)
+    raise ValueError("hosted registration schema is unsupported")
+
+
+class _RegisterResponseCommon(_Closed):
     runner_id: str = Field(pattern=_UUID)
     tenant_id: str = Field(pattern=_UUID)
     runner_session_id: str = Field(pattern=_UUID)
@@ -214,9 +251,35 @@ class RegisterResponse(_Closed):
     token_expires_at: str
 
     @model_validator(mode="after")
-    def _canonical_expiry(self) -> "RegisterResponse":
+    def _canonical_expiry(self) -> "_RegisterResponseCommon":
         _utc_seconds(self.token_expires_at, label="runner token expiry")
         return self
+
+
+class RegisterResponseV1(_RegisterResponseCommon):
+    schema_version: Literal["openadapt.hosted-runner-registration-result/v1"]
+
+
+class RegisterResponseV2(_RegisterResponseCommon):
+    schema_version: Literal["openadapt.hosted-runner-registration-result/v2"]
+
+
+RegisterResponse = RegisterResponseV2
+RegisterResponseWire = Union[RegisterResponseV1, RegisterResponseV2]
+
+
+def parse_register_response(
+    value: RegisterResponseWire | Mapping[str, object],
+) -> RegisterResponseWire:
+    if isinstance(value, (RegisterResponseV1, RegisterResponseV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted registration response is invalid")
+    if value.get("schema_version") == "openadapt.hosted-runner-registration-result/v1":
+        return RegisterResponseV1.model_validate(value)
+    if value.get("schema_version") == "openadapt.hosted-runner-registration-result/v2":
+        return RegisterResponseV2.model_validate(value)
+    raise ValueError("hosted registration response schema is unsupported")
 
 
 class PollRequest(_Closed):
@@ -251,8 +314,7 @@ class AdmissionArtifactBytes(_Closed):
         return self
 
 
-class HostedDispatch(_Closed):
-    schema_version: Literal["openadapt.hosted-runner/v1"]
+class _HostedDispatchCommon(_Closed):
     dispatch_id: str = Field(pattern=_UUID)
     tenant_id: str = Field(pattern=_UUID)
     runner_id: str = Field(pattern=_UUID)
@@ -261,20 +323,16 @@ class HostedDispatch(_Closed):
     run_id: str = Field(pattern=_UUID)
     workflow_id: str = Field(pattern=_UUID)
     workflow_version_id: str = Field(pattern=_UUID)
-    execution_authority_id: str = Field(pattern=_UUID)
-    execution_authority_sha256: str = Field(pattern=_HEX64)
-    execution_authority_signer_sha256: str = Field(pattern=_HEX64)
     idempotency_key: str = Field(pattern=_IDEMPOTENCY)
     lease_token: str = Field(pattern=_LEASE_TOKEN, repr=False)
     lease_expires_at: str
-    product_release_admission: AdmissionArtifactBytes
     workflow_admission: AdmissionArtifactBytes
     managed_delivery_authority_url: str = Field(min_length=1, max_length=2048)
     delivery_authority_token: str = Field(pattern=_HEX64, repr=False)
     payload: RunnerDispatchPayload
 
     @model_validator(mode="after")
-    def _exact_run_binding(self) -> "HostedDispatch":
+    def _exact_run_binding(self) -> "_HostedDispatchCommon":
         _utc_seconds(self.lease_expires_at, label="hosted lease expiry")
         if (
             self.payload.run_id != self.run_id
@@ -286,16 +344,54 @@ class HostedDispatch(_Closed):
         return self
 
 
-class HostedRecoveryBinding(_Closed):
+class HostedDispatchV1(_HostedDispatchCommon):
+    """Frozen Flow 1.34.0 dispatch shape."""
+
+    schema_version: Literal["openadapt.hosted-runner/v1"]
+    product_release_admission: AdmissionArtifactBytes
+
+
+class HostedDispatchV2(_HostedDispatchCommon):
+    """Current dispatch with explicit delivery-authority identity."""
+
+    schema_version: Literal["openadapt.hosted-runner/v2"] = "openadapt.hosted-runner/v2"
+    flow_release_verification_receipt: FlowReleaseVerificationReceiptArtifactBytes
+    product_release_admission: AdmissionArtifactBytes
+    execution_authority_id: str = Field(pattern=_UUID)
+    execution_authority_sha256: str = Field(pattern=_HEX64)
+    execution_authority_signer_sha256: str = Field(pattern=_HEX64)
+
+
+# Keep the established Python API name on the current wire type. Callers that
+# negotiate explicitly can use the versioned names.
+HostedDispatch = HostedDispatchV2
+HostedDispatchWire = Union[HostedDispatchV1, HostedDispatchV2]
+
+
+def parse_hosted_dispatch(
+    value: HostedDispatchWire | Mapping[str, object],
+) -> HostedDispatchWire:
+    """Read both published dispatch versions without guessing a wire shape."""
+
+    if isinstance(value, (HostedDispatchV1, HostedDispatchV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted dispatch is invalid")
+    schema = value.get("schema_version")
+    if schema == "openadapt.hosted-runner/v1":
+        return HostedDispatchV1.model_validate(value)
+    if schema == "openadapt.hosted-runner/v2":
+        return HostedDispatchV2.model_validate(value)
+    raise ValueError("hosted dispatch schema is unsupported")
+
+
+class _HostedRecoveryBindingCommon(_Closed):
     """Callback state without params or the delivery-authority credential.
 
     This projection remains credential-bearing because it retains the lease
     token required for the exact terminal callback.
     """
 
-    schema_version: Literal["openadapt.hosted-runner-recovery/v1"] = (
-        "openadapt.hosted-runner-recovery/v1"
-    )
     dispatch_id: str = Field(pattern=_UUID)
     runner_session_id: str = Field(pattern=_UUID)
     dispatch_session_id: str = Field(pattern=_UUID)
@@ -303,10 +399,29 @@ class HostedRecoveryBinding(_Closed):
     workflow_id: str = Field(pattern=_UUID)
     idempotency_key: str = Field(pattern=_IDEMPOTENCY)
     lease_token: str = Field(pattern=_LEASE_TOKEN, repr=False)
-    product_release_admission_sha256: str = Field(pattern=_HEX64)
     workflow_admission_sha256: str = Field(pattern=_HEX64)
     bundle_content_digest: str = Field(pattern=_HEX64)
     authorization_id: str = Field(min_length=1, max_length=128)
+
+
+class HostedRecoveryBindingV1(_HostedRecoveryBindingCommon):
+    schema_version: Literal["openadapt.hosted-runner-recovery/v1"] = (
+        "openadapt.hosted-runner-recovery/v1"
+    )
+    product_release_admission_sha256: str = Field(pattern=_HEX64)
+
+
+class HostedRecoveryBindingV2(_HostedRecoveryBindingCommon):
+    schema_version: Literal["openadapt.hosted-runner-recovery/v2"] = (
+        "openadapt.hosted-runner-recovery/v2"
+    )
+    flow_release_verification_receipt_object_sha256: str = Field(
+        pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+
+
+HostedRecoveryBinding = HostedRecoveryBindingV2
+HostedRecoveryBindingWire = Union[HostedRecoveryBindingV1, HostedRecoveryBindingV2]
 
 
 class ManagedChildStartEvidence(_Closed):
@@ -500,7 +615,9 @@ class ManagedResultLossSnapshot(_Closed):
         return cls.model_validate(payload)
 
 
-class HostedTerminalEvent(_Closed):
+class HostedTerminalEventV1(_Closed):
+    """Frozen Flow 1.34.0 callback event."""
+
     schema_version: Literal["openadapt.hosted-runner-terminal/v1"] = (
         "openadapt.hosted-runner-terminal/v1"
     )
@@ -526,7 +643,74 @@ class HostedTerminalEvent(_Closed):
     )
 
     @model_validator(mode="after")
-    def _terminal_outcome_requires_exact_proof(self) -> "HostedTerminalEvent":
+    def _verified_requires_exact_v2_proof(self) -> "HostedTerminalEventV1":
+        has_proof = self.terminal_verification_artifact_bytes_base64 is not None
+        if has_proof != (self.terminal_verification_artifact_sha256 is not None):
+            raise ValueError("terminal verification binding is incomplete")
+        if self.outcome == "VERIFIED" and not has_proof:
+            raise ValueError("VERIFIED requires exact terminal verification")
+        if self.outcome != "VERIFIED" and has_proof:
+            raise ValueError("non-VERIFIED callback cannot carry a success proof")
+        if has_proof:
+            assert self.terminal_verification_artifact_bytes_base64 is not None
+            assert self.terminal_verification_artifact_sha256 is not None
+            try:
+                raw = b64decode(
+                    self.terminal_verification_artifact_bytes_base64,
+                    validate=True,
+                )
+                proof = ProductionTerminalVerificationEnvelopeV2.model_validate_json(
+                    raw
+                )
+                verified_sha256 = verify_production_terminal_verification_v2_signature(
+                    proof
+                )
+            except (ValueError, TypeError) as exc:
+                raise ValueError("terminal verification artifact is invalid") from exc
+            if (
+                len(raw) > _MAX_ARTIFACT_BYTES
+                or b64encode(raw).decode("ascii")
+                != self.terminal_verification_artifact_bytes_base64
+                or canonical_json(proof) != raw
+                or verified_sha256 != self.terminal_verification_artifact_sha256
+            ):
+                raise ValueError("terminal verification artifact binding is invalid")
+            if (
+                proof.payload.run_id != self.run_id
+                or proof.payload.run_report_sha256 != self.report_sha256
+                or proof.payload.run_report_object_sha256 != self.report_sha256
+            ):
+                raise ValueError("terminal verification names a different run report")
+        return self
+
+
+class HostedTerminalEventV2(_Closed):
+    schema_version: Literal["openadapt.hosted-runner-terminal/v2"] = (
+        "openadapt.hosted-runner-terminal/v2"
+    )
+    run_id: str = Field(pattern=_UUID)
+    outcome: Literal[
+        "VERIFIED",
+        "HALTED_BEFORE_EFFECT",
+        "RECONCILIATION_REQUIRED",
+        "FAILED_PLATFORM",
+        "CANCELED",
+        "REJECTED_POLICY",
+        "COMPLETED_UNVERIFIED",
+        "ROLLED_BACK",
+    ]
+    report_sha256: str = Field(pattern=_HEX64)
+    started: bool
+    uncertain_delivery: bool
+    terminal_verification_artifact_bytes_base64: str | None = Field(
+        default=None, max_length=2_796_204
+    )
+    terminal_verification_artifact_sha256: str | None = Field(
+        default=None, pattern=_HEX64
+    )
+
+    @model_validator(mode="after")
+    def _terminal_outcome_requires_exact_proof(self) -> "HostedTerminalEventV2":
         has_proof = self.terminal_verification_artifact_bytes_base64 is not None
         if has_proof != (self.terminal_verification_artifact_sha256 is not None):
             raise ValueError("terminal verification binding is incomplete")
@@ -549,7 +733,7 @@ class HostedTerminalEvent(_Closed):
             }
             and has_proof
         ):
-            raise ValueError("terminal callback outcome cannot carry a v2 proof")
+            raise ValueError("terminal callback outcome cannot carry a v3 proof")
         if has_proof:
             assert self.terminal_verification_artifact_bytes_base64 is not None
             assert self.terminal_verification_artifact_sha256 is not None
@@ -559,6 +743,9 @@ class HostedTerminalEvent(_Closed):
                     validate=True,
                 )
                 proof = ProductionTerminalVerificationEnvelope.model_validate_json(raw)
+                verified_sha256 = verify_production_terminal_verification_v3_signature(
+                    proof
+                )
             except (ValueError, TypeError) as exc:
                 raise ValueError("terminal verification artifact is invalid") from exc
             if (
@@ -566,7 +753,7 @@ class HostedTerminalEvent(_Closed):
                 or b64encode(raw).decode("ascii")
                 != self.terminal_verification_artifact_bytes_base64
                 or canonical_json(proof) != raw
-                or proof.artifact_sha256() != self.terminal_verification_artifact_sha256
+                or verified_sha256 != self.terminal_verification_artifact_sha256
             ):
                 raise ValueError("terminal verification artifact binding is invalid")
             if (
@@ -583,6 +770,28 @@ class HostedTerminalEvent(_Closed):
         if self.uncertain_delivery != expected_uncertainty:
             raise ValueError("terminal uncertainty conflicts with its signed proof")
         return self
+
+
+# Keep the established Python API name on the current wire type.
+HostedTerminalEvent = HostedTerminalEventV2
+HostedTerminalEventWire = Union[HostedTerminalEventV1, HostedTerminalEventV2]
+
+
+def parse_hosted_terminal_event(
+    value: HostedTerminalEventWire | Mapping[str, object],
+) -> HostedTerminalEventWire:
+    """Read both terminal event versions through their exact validators."""
+
+    if isinstance(value, (HostedTerminalEventV1, HostedTerminalEventV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted terminal event is invalid")
+    schema = value.get("schema_version")
+    if schema == "openadapt.hosted-runner-terminal/v1":
+        return HostedTerminalEventV1.model_validate(value)
+    if schema == "openadapt.hosted-runner-terminal/v2":
+        return HostedTerminalEventV2.model_validate(value)
+    raise ValueError("hosted terminal event schema is unsupported")
 
 
 class HostedRunResult(_Closed):
@@ -607,13 +816,13 @@ class HostedRunResult(_Closed):
             }
             and self.terminal_verification is None
         ):
-            raise ValueError("closed terminal outcome requires a signed v2 proof")
+            raise ValueError("closed terminal outcome requires a signed v3 proof")
         if self.terminal_verification is not None and self.outcome not in {
             TransactionOutcome.VERIFIED,
             TransactionOutcome.HALTED_BEFORE_EFFECT,
             TransactionOutcome.RECONCILIATION_REQUIRED,
         }:
-            raise ValueError("terminal outcome cannot carry a signed v2 proof")
+            raise ValueError("terminal outcome cannot carry a signed v3 proof")
         expected_uncertainty = bool(
             self.terminal_verification is not None
             and self.terminal_verification.payload.pending_permit_count == 1
@@ -648,28 +857,37 @@ class HostedDispatchRefusal(_Closed):
     report_sha256: str = Field(default="0" * 64, pattern=_HEX64)
 
 
-class CallbackRequest(_Closed):
-    schema_version: Literal["openadapt.hosted-runner-callback/v1"] = (
-        "openadapt.hosted-runner-callback/v1"
-    )
+class _CallbackRequestCommon(_Closed):
     dispatch_id: str = Field(pattern=_UUID)
     runner_session_id: str = Field(pattern=_UUID)
     idempotency_key: str = Field(pattern=_IDEMPOTENCY)
     lease_token: str = Field(pattern=_LEASE_TOKEN, repr=False)
-    product_release_admission_sha256: str = Field(pattern=_HEX64)
     workflow_admission_sha256: str = Field(pattern=_HEX64)
     events: tuple[dict[str, Any], ...] = Field(min_length=1, max_length=10_001)
 
     @model_validator(mode="after")
-    def _atomic_terminal_batch(self) -> "CallbackRequest":
+    def _atomic_terminal_batch(self) -> "_CallbackRequestCommon":
+        callback_schema: object = getattr(self, "schema_version", None)
+        if not isinstance(callback_schema, str):
+            raise ValueError("callback schema is unsupported")
+        expected_terminal_schema = {
+            "openadapt.hosted-runner-callback/v1": (
+                "openadapt.hosted-runner-terminal/v1"
+            ),
+            "openadapt.hosted-runner-callback/v2": (
+                "openadapt.hosted-runner-terminal/v2"
+            ),
+        }.get(callback_schema)
+        if expected_terminal_schema is None:
+            raise ValueError("callback schema is unsupported")
         terminal_indices = tuple(
             index
             for index, event in enumerate(self.events)
-            if event.get("schema_version") == "openadapt.hosted-runner-terminal/v1"
+            if event.get("schema_version") == expected_terminal_schema
         )
         if terminal_indices != (len(self.events) - 1,):
             raise ValueError("callback must end in exactly one terminal event")
-        terminal = HostedTerminalEvent.model_validate(self.events[-1])
+        terminal = parse_hosted_terminal_event(self.events[-1])
         summaries = tuple(
             event for event in self.events[:-1] if event.get("kind") == "run_summary"
         )
@@ -689,8 +907,41 @@ class CallbackRequest(_Closed):
         return self
 
 
-class CallbackResponse(_Closed):
-    schema_version: Literal["openadapt.hosted-runner-callback-result/v1"]
+class CallbackRequestV1(_CallbackRequestCommon):
+    schema_version: Literal["openadapt.hosted-runner-callback/v1"] = (
+        "openadapt.hosted-runner-callback/v1"
+    )
+    product_release_admission_sha256: str = Field(pattern=_HEX64)
+
+
+class CallbackRequestV2(_CallbackRequestCommon):
+    schema_version: Literal["openadapt.hosted-runner-callback/v2"] = (
+        "openadapt.hosted-runner-callback/v2"
+    )
+    flow_release_verification_receipt_object_sha256: str = Field(
+        pattern=r"^sha256:[a-f0-9]{64}$"
+    )
+
+
+CallbackRequest = CallbackRequestV2
+CallbackRequestWire = Union[CallbackRequestV1, CallbackRequestV2]
+
+
+def parse_callback_request(
+    value: CallbackRequestWire | Mapping[str, object],
+) -> CallbackRequestWire:
+    if isinstance(value, (CallbackRequestV1, CallbackRequestV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted callback is invalid")
+    if value.get("schema_version") == "openadapt.hosted-runner-callback/v1":
+        return CallbackRequestV1.model_validate(value)
+    if value.get("schema_version") == "openadapt.hosted-runner-callback/v2":
+        return CallbackRequestV2.model_validate(value)
+    raise ValueError("hosted callback schema is unsupported")
+
+
+class _CallbackResponseCommon(_Closed):
     status: Literal["accepted", "duplicate"]
     run_id: str = Field(pattern=_UUID)
     outcome: TransactionOutcome
@@ -698,12 +949,38 @@ class CallbackResponse(_Closed):
     accepted_events: int = Field(ge=0, le=10_001)
 
 
+class CallbackResponseV1(_CallbackResponseCommon):
+    schema_version: Literal["openadapt.hosted-runner-callback-result/v1"]
+
+
+class CallbackResponseV2(_CallbackResponseCommon):
+    schema_version: Literal["openadapt.hosted-runner-callback-result/v2"]
+
+
+CallbackResponse = CallbackResponseV2
+CallbackResponseWire = Union[CallbackResponseV1, CallbackResponseV2]
+
+
+def parse_callback_response(
+    value: CallbackResponseWire | Mapping[str, object],
+) -> CallbackResponseWire:
+    if isinstance(value, (CallbackResponseV1, CallbackResponseV2)):
+        return value
+    if not isinstance(value, Mapping):
+        raise ValueError("hosted callback response is invalid")
+    if value.get("schema_version") == "openadapt.hosted-runner-callback-result/v1":
+        return CallbackResponseV1.model_validate_json(json.dumps(dict(value)))
+    if value.get("schema_version") == "openadapt.hosted-runner-callback-result/v2":
+        return CallbackResponseV2.model_validate_json(json.dumps(dict(value)))
+    raise ValueError("hosted callback response schema is unsupported")
+
+
 class HostedRunnerTransport(Protocol):
     """Desktop-owned HTTP surface. Credentials stay in its transport state."""
 
-    def register(self, request: RegisterRequest) -> RegisterResponse: ...
+    def register(self, request: RegisterRequest) -> RegisterResponseWire: ...
 
-    def poll(self, request: PollRequest) -> HostedDispatch | None: ...
+    def poll(self, request: PollRequest) -> HostedDispatchWire | None: ...
 
     def close_result_loss(
         self,
@@ -712,7 +989,9 @@ class HostedRunnerTransport(Protocol):
         request: ProductionDeliveryResultLossClosureRequest,
     ) -> ProductionDeliveryResultLossClosureResult: ...
 
-    def callback(self, run_id: str, request: CallbackRequest) -> CallbackResponse: ...
+    def callback(
+        self, run_id: str, request: CallbackRequest
+    ) -> CallbackResponseWire: ...
 
 
 @dataclass(frozen=True)
@@ -788,6 +1067,9 @@ class HostedRunnerAdapter:
         self._release_state_path = self.ledger_path.with_suffix(
             self.ledger_path.suffix + ".product-release.json"
         )
+        self._flow_release_state_path = self.ledger_path.with_suffix(
+            self.ledger_path.suffix + ".flow-release.json"
+        )
 
     @staticmethod
     def _protected_runner_origin(config: RunnerConfig) -> str:
@@ -841,6 +1123,19 @@ class HostedRunnerAdapter:
             raise ValueError(
                 "hosted registration requires exact flow, desktop, and capture releases"
             )
+        local_flow_release = config.local_flow_release
+        if local_flow_release is None:
+            raise ValueError(
+                "hosted registration requires the exact verified Flow release"
+            )
+        installed_flow = next(item for item in releases if item.target == "flow")
+        if (
+            installed_flow.release_version != local_flow_release.version
+            or engine_version != local_flow_release.version
+        ):
+            raise ValueError(
+                "local Flow runtime version differs from its verification receipt"
+            )
         if not isinstance(capabilities, RegisterCapabilities):
             if not isinstance(capabilities, Mapping) or set(capabilities) != {
                 "backends",
@@ -873,6 +1168,7 @@ class HostedRunnerAdapter:
                 item.target: LocalRuntimeReleaseBinding(**item.__dict__)
                 for item in releases
             },
+            local_flow_release=local_flow_release,
         )
 
     @staticmethod
@@ -1065,6 +1361,23 @@ class HostedRunnerAdapter:
                 item.release_artifact_sha256,
             ):
                 raise ValueError(f"local {target} release is not exactly admitted")
+        if isinstance(dispatch, HostedDispatchV2):
+            local_flow_release = config.local_flow_release
+            if local_flow_release is None:
+                raise ValueError("hosted runner has no verified Flow release identity")
+            flow_receipt = assert_hosted_flow_release(
+                local_flow_release,
+                dispatch.flow_release_verification_receipt,
+            )
+            admitted_flow = admitted["flow"]
+            if (
+                admitted_flow.release_id != flow_receipt.version
+                or f"sha256:{admitted_flow.release_artifact_sha256}"
+                != flow_receipt.release_sha256
+            ):
+                raise ValueError(
+                    "signed product admission and Flow receipt name different releases"
+                )
         self._accept_newest_product_sequence(
             payload, dispatch.product_release_admission.artifact_sha256
         )
@@ -1891,7 +2204,7 @@ class HostedRunnerAdapter:
             ProductionDeliveryResultLossClosureArtifact | None
         ) = None,
     ) -> tuple[ProductionTerminalVerificationEnvelope, str]:
-        """Build, retain, reread, and verify one exact terminal-v2 proof."""
+        """Build, retain, reread, and verify one exact terminal-v3 proof."""
 
         store = CheckpointStore(run_dir)
         manifest = store.read_manifest()
@@ -2381,7 +2694,7 @@ class HostedRunnerAdapter:
 
     @staticmethod
     def _refusal(
-        dispatch: HostedDispatch | None, code: str, detail: str
+        dispatch: HostedDispatchWire | None, code: str, detail: str
     ) -> HostedDispatchRefusal:
         events: tuple[dict[str, Any], ...] = ()
         if dispatch is not None:
@@ -2415,8 +2728,8 @@ class HostedRunnerAdapter:
             workflow_id=dispatch.workflow_id,
             idempotency_key=dispatch.idempotency_key,
             lease_token=dispatch.lease_token,
-            product_release_admission_sha256=(
-                dispatch.product_release_admission.artifact_sha256
+            flow_release_verification_receipt_object_sha256=(
+                dispatch.flow_release_verification_receipt.artifact_sha256
             ),
             workflow_admission_sha256=dispatch.workflow_admission.artifact_sha256,
             bundle_content_digest=dispatch.payload.bundle.content_digest,
@@ -2445,7 +2758,7 @@ class HostedRunnerAdapter:
 
     def recover_uncertain_run(
         self,
-        dispatch: HostedDispatch | Mapping[str, object],
+        dispatch: HostedDispatchWire | Mapping[str, object],
         *,
         runner_config: Path,
         run_dir: Path,
@@ -2458,7 +2771,10 @@ class HostedRunnerAdapter:
         marker, and unresolved terminal permit.
         """
 
-        parsed = HostedDispatch.model_validate(dispatch)
+        parsed_wire = parse_hosted_dispatch(dispatch)
+        if isinstance(parsed_wire, HostedDispatchV1):
+            raise ValueError("hosted recovery requires dispatch schema v2")
+        parsed = parsed_wire
         run_dir = Path(run_dir)
         run_stat = run_dir.lstat()
         if (
@@ -2564,17 +2880,23 @@ class HostedRunnerAdapter:
 
     def execute(
         self,
-        dispatch: HostedDispatch | Mapping[str, object],
+        dispatch: HostedDispatchWire | Mapping[str, object],
         *,
         runner_config: Path,
         run_dir: Path,
         authority: DeliveryAuthority,
         closure_authority: HostedRunnerTransport | None = None,
     ) -> Union[HostedRunResult, HostedDispatchRefusal]:
-        parsed: HostedDispatch | None = None
+        parsed: HostedDispatchWire | None = None
         try:
-            parsed = HostedDispatch.model_validate(dispatch)
+            parsed = parse_hosted_dispatch(dispatch)
             assert parsed is not None
+            if isinstance(parsed, HostedDispatchV1):
+                return self._refusal(
+                    parsed,
+                    "hosted_protocol_upgrade_required",
+                    "dispatch schema v2 is required for managed execution",
+                )
             expiry = _utc_seconds(parsed.lease_expires_at, label="hosted lease expiry")
             if datetime.now(timezone.utc) >= expiry:
                 raise ValueError("hosted lease expired before execution")
@@ -3002,19 +3324,23 @@ class HostedRunnerAdapter:
 
     def callback_request(
         self,
-        dispatch: HostedDispatch | HostedRecoveryBinding | Mapping[str, object],
+        dispatch: (
+            HostedDispatchWire | HostedRecoveryBindingWire | Mapping[str, object]
+        ),
         result: HostedRunResult | HostedDispatchRefusal,
-    ) -> CallbackRequest:
-        if isinstance(dispatch, HostedDispatch):
-            binding: HostedDispatch | HostedRecoveryBinding = dispatch
-        elif isinstance(dispatch, HostedRecoveryBinding):
+    ) -> CallbackRequestWire:
+        if isinstance(dispatch, (HostedDispatchV1, HostedDispatchV2)):
+            binding: HostedDispatchWire | HostedRecoveryBindingWire = dispatch
+        elif isinstance(dispatch, (HostedRecoveryBindingV1, HostedRecoveryBindingV2)):
             binding = dispatch
         else:
             schema = dispatch.get("schema_version")
             if schema == "openadapt.hosted-runner-recovery/v1":
-                binding = HostedRecoveryBinding.model_validate(dispatch)
+                binding = HostedRecoveryBindingV1.model_validate(dispatch)
+            elif schema == "openadapt.hosted-runner-recovery/v2":
+                binding = HostedRecoveryBindingV2.model_validate(dispatch)
             else:
-                binding = HostedDispatch.model_validate(dispatch)
+                binding = parse_hosted_dispatch(dispatch)
         if result.dispatch_id != binding.dispatch_id or result.run_id != binding.run_id:
             raise ValueError("hosted result does not bind the callback lease")
         events = list(result.evidence_batch)
@@ -3027,7 +3353,12 @@ class HostedRunnerAdapter:
                 if hashlib.sha256(proof_bytes).hexdigest() != proof_digest:
                     raise ValueError("terminal proof digest differs from exact bytes")
                 proof_base64 = b64encode(proof_bytes).decode("ascii")
-        terminal = HostedTerminalEvent(
+        terminal_type = (
+            HostedTerminalEventV1
+            if isinstance(binding, (HostedDispatchV1, HostedRecoveryBindingV1))
+            else HostedTerminalEventV2
+        )
+        terminal = terminal_type(
             run_id=binding.run_id,
             outcome=(
                 result.outcome.value
@@ -3041,20 +3372,35 @@ class HostedRunnerAdapter:
             terminal_verification_artifact_sha256=proof_digest,
         )
         events.append(terminal.model_dump(mode="json"))
-        return CallbackRequest(
+        workflow_admission_sha256 = (
+            binding.workflow_admission.artifact_sha256
+            if isinstance(binding, (HostedDispatchV1, HostedDispatchV2))
+            else binding.workflow_admission_sha256
+        )
+        if isinstance(binding, (HostedDispatchV1, HostedRecoveryBindingV1)):
+            return CallbackRequestV1(
+                dispatch_id=binding.dispatch_id,
+                runner_session_id=binding.runner_session_id,
+                idempotency_key=binding.idempotency_key,
+                lease_token=binding.lease_token,
+                workflow_admission_sha256=workflow_admission_sha256,
+                events=tuple(events),
+                product_release_admission_sha256=(
+                    binding.product_release_admission.artifact_sha256
+                    if isinstance(binding, HostedDispatchV1)
+                    else binding.product_release_admission_sha256
+                ),
+            )
+        return CallbackRequestV2(
             dispatch_id=binding.dispatch_id,
             runner_session_id=binding.runner_session_id,
             idempotency_key=binding.idempotency_key,
             lease_token=binding.lease_token,
-            product_release_admission_sha256=(
-                binding.product_release_admission.artifact_sha256
-                if isinstance(binding, HostedDispatch)
-                else binding.product_release_admission_sha256
-            ),
-            workflow_admission_sha256=(
-                binding.workflow_admission.artifact_sha256
-                if isinstance(binding, HostedDispatch)
-                else binding.workflow_admission_sha256
-            ),
+            workflow_admission_sha256=workflow_admission_sha256,
             events=tuple(events),
+            flow_release_verification_receipt_object_sha256=(
+                binding.flow_release_verification_receipt.artifact_sha256
+                if isinstance(binding, HostedDispatchV2)
+                else binding.flow_release_verification_receipt_object_sha256
+            ),
         )

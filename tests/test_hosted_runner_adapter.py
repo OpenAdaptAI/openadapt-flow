@@ -18,19 +18,44 @@ from pydantic import ValidationError
 import openadapt_flow.runner.hosted_adapter as hosted
 from openadapt_flow.__main__ import _replay_params
 from openadapt_flow.ir import ParamKind, ParamSpec, Workflow
+from openadapt_flow.runner.config import LocalRuntimeRelease
+from openadapt_flow.runner.flow_release_receipt import (
+    FlowReleaseVerificationReceiptArtifactBytes,
+    HostedFlowReleaseIdentity,
+)
 from openadapt_flow.runner.hosted_adapter import (
     RUNNER_RENEWAL_HEADER,
     AdmissionArtifactBytes,
     CallbackRequest,
+    CallbackRequestV1,
+    CallbackRequestV2,
+    CallbackResponseV1,
+    CallbackResponseV2,
     DeliveryAuthority,
     HostedDispatch,
+    HostedDispatchV1,
+    HostedDispatchV2,
+    HostedRecoveryBindingV1,
+    HostedRecoveryBindingV2,
     HostedRunnerAdapter,
     HostedRunResult,
     HostedTerminalEvent,
+    HostedTerminalEventV2,
+    LocalRuntimeReleaseBinding,
     ManagedExecution,
     PollRequest,
     RegisterCapabilities,
     RegisterRequest,
+    RegisterRequestV1,
+    RegisterRequestV2,
+    RegisterResponseV1,
+    RegisterResponseV2,
+    parse_callback_request,
+    parse_callback_response,
+    parse_hosted_dispatch,
+    parse_hosted_terminal_event,
+    parse_register_request,
+    parse_register_response,
     registration_renewal_headers,
 )
 from openadapt_flow.runner.inputs import resolve_admitted_params
@@ -197,13 +222,22 @@ def _hosted_dispatch(workflow) -> HostedDispatch:
         artifact_bytes_base64=b64encode(artifact_raw).decode("ascii"),
         artifact_sha256=hashlib.sha256(artifact_raw).hexdigest(),
     )
+    flow_receipt_raw = (
+        Path(__file__).parent
+        / "fixtures"
+        / "remote-safe-synthetic-flow-release-verification.json"
+    ).read_bytes()
+    flow_receipt = FlowReleaseVerificationReceiptArtifactBytes(
+        artifact_bytes_base64=b64encode(flow_receipt_raw).decode("ascii"),
+        artifact_sha256="sha256:" + hashlib.sha256(flow_receipt_raw).hexdigest(),
+    )
     authority_key = Ed25519PrivateKey.from_private_bytes(bytes(range(32, 64)))
     authority_public_key = authority_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
     return HostedDispatch(
-        schema_version="openadapt.hosted-runner/v1",
+        schema_version="openadapt.hosted-runner/v2",
         dispatch_id="11111111-1111-4111-8111-111111111111",
         dispatch_session_id="12111111-1111-4111-8111-111111111111",
         tenant_id="22222222-2222-4222-8222-222222222222",
@@ -220,6 +254,7 @@ def _hosted_dispatch(workflow) -> HostedDispatch:
         idempotency_key="hosted-dispatch-0001",
         lease_token="oal_" + "a" * 64,
         lease_expires_at="2099-01-01T00:00:00Z",
+        flow_release_verification_receipt=flow_receipt,
         product_release_admission=artifact,
         workflow_admission=artifact,
         managed_delivery_authority_url=(
@@ -227,6 +262,319 @@ def _hosted_dispatch(workflow) -> HostedDispatch:
         ),
         delivery_authority_token="b" * 64,
         payload=payload,
+    )
+
+
+def _local_flow_release() -> HostedFlowReleaseIdentity:
+    raw = (
+        Path(__file__).parent
+        / "fixtures"
+        / "remote-safe-synthetic-flow-release-verification.json"
+    ).read_bytes()
+    artifact = FlowReleaseVerificationReceiptArtifactBytes(
+        artifact_bytes_base64=b64encode(raw).decode("ascii"),
+        artifact_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+    )
+    return artifact.identity(now=datetime(2026, 8, 28, tzinfo=timezone.utc))
+
+
+def _registration_fields() -> dict[str, object]:
+    releases = {
+        target: LocalRuntimeReleaseBinding(
+            target=target,
+            admission_id=f"00000000-0000-4000-8000-{index:012d}",
+            admission_sha256=f"{index:x}" * 64,
+            release_version="1.35.0" if target == "flow" else "1.0.0",
+            release_artifact_sha256=f"{index + 3:x}" * 64,
+        )
+        for index, target in enumerate(("flow", "desktop", "capture"), start=1)
+    }
+    return {
+        "name": "runner",
+        "platform": "linux",
+        "agent_version": "1.0.0",
+        "engine_version": "1.35.0",
+        "mode": "service",
+        "capabilities": RegisterCapabilities(
+            backends=("linux",),
+            attended=False,
+            effects_substrates=("linux",),
+        ),
+        "local_runtime_release": releases,
+    }
+
+
+def test_hosted_registration_v1_34_and_v2_shapes_are_disjoint() -> None:
+    common = _registration_fields()
+    legacy_raw = {
+        "schema_version": "openadapt.hosted-runner-registration/v1",
+        **common,
+    }
+    current_raw = {
+        "schema_version": "openadapt.hosted-runner-registration/v2",
+        **common,
+        "local_flow_release": _local_flow_release(),
+    }
+
+    legacy = parse_register_request(legacy_raw)
+    current = parse_register_request(current_raw)
+
+    assert isinstance(legacy, RegisterRequestV1)
+    assert isinstance(current, RegisterRequestV2)
+    assert set(legacy.model_dump(mode="json")) == {
+        "schema_version",
+        "name",
+        "platform",
+        "agent_version",
+        "engine_version",
+        "mode",
+        "capabilities",
+        "local_runtime_release",
+    }
+    assert set(current.model_dump(mode="json")) == {
+        *legacy.model_dump(mode="json"),
+        "local_flow_release",
+    }
+    with pytest.raises(ValidationError):
+        RegisterRequestV1.model_validate(current_raw)
+    with pytest.raises(ValidationError):
+        RegisterRequestV2.model_validate(legacy_raw)
+
+
+@pytest.mark.parametrize("version", ("v1", "v2"))
+def test_hosted_response_versions_parse_exact_wire_shapes(version: str) -> None:
+    registration_raw = {
+        "schema_version": f"openadapt.hosted-runner-registration-result/{version}",
+        "runner_id": "11111111-1111-4111-8111-111111111111",
+        "tenant_id": "22222222-2222-4222-8222-222222222222",
+        "runner_session_id": "33333333-3333-4333-8333-333333333333",
+        "runner_token": "oar_" + "a" * 64,
+        "token_expires_at": "2099-01-01T00:00:00Z",
+    }
+    callback_raw = {
+        "schema_version": f"openadapt.hosted-runner-callback-result/{version}",
+        "status": "accepted",
+        "run_id": "44444444-4444-4444-8444-444444444444",
+        "outcome": "VERIFIED",
+        "dispatch_state": "closed",
+        "accepted_events": 2,
+    }
+
+    registration = parse_register_response(registration_raw)
+    callback = parse_callback_response(callback_raw)
+
+    expected_registration_type = (
+        RegisterResponseV1 if version == "v1" else RegisterResponseV2
+    )
+    expected_callback_type = (
+        CallbackResponseV1 if version == "v1" else CallbackResponseV2
+    )
+    assert isinstance(registration, expected_registration_type)
+    assert isinstance(callback, expected_callback_type)
+    assert set(registration.model_dump(mode="json")) == set(registration_raw)
+    assert set(callback.model_dump(mode="json")) == set(callback_raw)
+
+
+@pytest.mark.parametrize(
+    "parser",
+    (
+        parse_register_request,
+        parse_register_response,
+        parse_hosted_dispatch,
+        parse_hosted_terminal_event,
+        parse_callback_request,
+        parse_callback_response,
+    ),
+)
+@pytest.mark.parametrize(
+    "raw",
+    ({}, {"schema_version": "openadapt.unsupported/v99"}),
+)
+def test_hosted_version_parsers_refuse_missing_or_unknown_schema(parser, raw) -> None:
+    with pytest.raises(ValueError, match="unsupported"):
+        parser(raw)
+
+
+def test_hosted_dispatch_v1_34_shape_parses_and_builds_v1_callback(
+    tmp_path, sealed
+) -> None:
+    workflow, _ = sealed
+    current = _hosted_dispatch(workflow)
+    legacy_raw = current.model_dump(mode="python")
+    legacy_raw["schema_version"] = "openadapt.hosted-runner/v1"
+    for field in (
+        "flow_release_verification_receipt",
+        "execution_authority_id",
+        "execution_authority_sha256",
+        "execution_authority_signer_sha256",
+    ):
+        legacy_raw.pop(field)
+
+    legacy = parse_hosted_dispatch(legacy_raw)
+
+    assert isinstance(legacy, HostedDispatchV1)
+    assert HostedDispatchV1.model_fields["schema_version"].is_required()
+    assert set(legacy.model_dump(mode="json")) == {
+        "schema_version",
+        "dispatch_id",
+        "tenant_id",
+        "runner_id",
+        "runner_session_id",
+        "dispatch_session_id",
+        "run_id",
+        "workflow_id",
+        "workflow_version_id",
+        "idempotency_key",
+        "lease_token",
+        "lease_expires_at",
+        "product_release_admission",
+        "workflow_admission",
+        "managed_delivery_authority_url",
+        "delivery_authority_token",
+        "payload",
+    }
+    with pytest.raises(ValidationError):
+        HostedDispatchV2.model_validate(legacy_raw)
+    with pytest.raises(ValidationError):
+        HostedDispatchV1.model_validate(current.model_dump(mode="python"))
+
+    runner_calls = 0
+
+    def runner(*_args, **_kwargs):
+        nonlocal runner_calls
+        runner_calls += 1
+        raise AssertionError("legacy dispatch must not reach the managed runner")
+
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite", runner=runner)
+    run_dir = tmp_path / "run"
+    refusal = adapter.execute(
+        legacy,
+        runner_config=tmp_path / "runner.toml",
+        run_dir=run_dir,
+        authority=DeliveryAuthority(
+            legacy.managed_delivery_authority_url,
+            legacy.delivery_authority_token,
+        ),
+    )
+    callback = adapter.callback_request(legacy, refusal)
+
+    assert refusal.code == "hosted_protocol_upgrade_required"
+    assert runner_calls == 0
+    assert not run_dir.exists()
+    assert (
+        adapter._ledger.lookup(f"{legacy.tenant_id}:{legacy.idempotency_key}") is None
+    )
+    assert isinstance(callback, CallbackRequestV1)
+    assert set(callback.model_dump(mode="json")) == {
+        "schema_version",
+        "dispatch_id",
+        "runner_session_id",
+        "idempotency_key",
+        "lease_token",
+        "product_release_admission_sha256",
+        "workflow_admission_sha256",
+        "events",
+    }
+    assert callback.events[-1]["schema_version"] == (
+        "openadapt.hosted-runner-terminal/v1"
+    )
+    assert parse_callback_request(callback.model_dump(mode="python")) == callback
+
+    recovery = HostedRecoveryBindingV1(
+        dispatch_id=legacy.dispatch_id,
+        runner_session_id=legacy.runner_session_id,
+        dispatch_session_id=legacy.dispatch_session_id,
+        run_id=legacy.run_id,
+        workflow_id=legacy.workflow_id,
+        idempotency_key=legacy.idempotency_key,
+        lease_token=legacy.lease_token,
+        product_release_admission_sha256=(
+            legacy.product_release_admission.artifact_sha256
+        ),
+        workflow_admission_sha256=legacy.workflow_admission.artifact_sha256,
+        bundle_content_digest=legacy.payload.bundle.content_digest,
+        authorization_id=legacy.payload.authorization.authorization_id,
+    )
+    recovery_callback = adapter.callback_request(
+        recovery.model_dump(mode="python"), refusal
+    )
+    assert isinstance(recovery_callback, CallbackRequestV1)
+    assert set(recovery.model_dump(mode="json")) == {
+        "schema_version",
+        "dispatch_id",
+        "runner_session_id",
+        "dispatch_session_id",
+        "run_id",
+        "workflow_id",
+        "idempotency_key",
+        "lease_token",
+        "product_release_admission_sha256",
+        "workflow_admission_sha256",
+        "bundle_content_digest",
+        "authorization_id",
+    }
+
+
+def test_hosted_dispatch_v2_recovery_and_callback_bind_prefixed_flow_digest(
+    tmp_path, sealed
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    binding = adapter.recovery_binding(dispatch)
+    refusal = adapter._refusal(dispatch, "hosted_admission_refused", "refused")
+    callback = adapter.callback_request(binding.model_dump(mode="python"), refusal)
+
+    dispatch_fields = set(dispatch.model_dump(mode="json"))
+    assert dispatch_fields == {
+        "schema_version",
+        "dispatch_id",
+        "tenant_id",
+        "runner_id",
+        "runner_session_id",
+        "dispatch_session_id",
+        "run_id",
+        "workflow_id",
+        "workflow_version_id",
+        "idempotency_key",
+        "lease_token",
+        "lease_expires_at",
+        "flow_release_verification_receipt",
+        "product_release_admission",
+        "workflow_admission",
+        "execution_authority_id",
+        "execution_authority_sha256",
+        "execution_authority_signer_sha256",
+        "managed_delivery_authority_url",
+        "delivery_authority_token",
+        "payload",
+    }
+    assert not dispatch.execution_authority_sha256.startswith("sha256:")
+    assert not dispatch.execution_authority_signer_sha256.startswith("sha256:")
+    assert isinstance(binding, HostedRecoveryBindingV2)
+    assert set(binding.model_dump(mode="json")) == {
+        "schema_version",
+        "dispatch_id",
+        "runner_session_id",
+        "dispatch_session_id",
+        "run_id",
+        "workflow_id",
+        "idempotency_key",
+        "lease_token",
+        "flow_release_verification_receipt_object_sha256",
+        "workflow_admission_sha256",
+        "bundle_content_digest",
+        "authorization_id",
+    }
+    assert isinstance(callback, CallbackRequestV2)
+    assert callback.flow_release_verification_receipt_object_sha256 == (
+        dispatch.flow_release_verification_receipt.artifact_sha256
+    )
+    assert callback.flow_release_verification_receipt_object_sha256.startswith(
+        "sha256:"
+    )
+    assert callback.events[-1]["schema_version"] == (
+        "openadapt.hosted-runner-terminal/v2"
     )
 
 
@@ -269,6 +617,55 @@ def test_registration_refuses_without_protected_runner_origin(
                 attended=False,
                 effects_substrates=("linux",),
             ),
+        )
+
+
+def test_registration_v2_binds_engine_and_installed_flow_versions(
+    monkeypatch, tmp_path, config
+) -> None:
+    fields = _registration_fields()
+    release_bindings = fields["local_runtime_release"]
+    capabilities = fields["capabilities"]
+    assert isinstance(release_bindings, dict)
+    assert isinstance(capabilities, RegisterCapabilities)
+    local_config = replace(
+        config,
+        host="https://cloud.example",
+        local_runtime_release=tuple(
+            LocalRuntimeRelease(**item.model_dump(mode="python"))
+            for item in release_bindings.values()
+        ),
+        local_flow_release=_local_flow_release(),
+    )
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    monkeypatch.setattr(
+        hosted, "load_runner_config", lambda *_args, **_kwargs: local_config
+    )
+
+    request = adapter.registration_request(
+        runner_config=tmp_path / "runner.toml",
+        name="runner",
+        platform="linux",
+        agent_version="1.0.0",
+        engine_version="1.35.0",
+        mode="service",
+        capabilities=capabilities,
+    )
+
+    assert isinstance(request, RegisterRequestV2)
+    assert request.schema_version == "openadapt.hosted-runner-registration/v2"
+    assert request.local_flow_release == _local_flow_release()
+    assert request.local_runtime_release["flow"].release_version == "1.35.0"
+
+    with pytest.raises(ValueError, match="differs from its verification receipt"):
+        adapter.registration_request(
+            runner_config=tmp_path / "runner.toml",
+            name="runner",
+            platform="linux",
+            agent_version="1.0.0",
+            engine_version="1.35.1",
+            mode="service",
+            capabilities=capabilities,
         )
 
 
@@ -1115,7 +1512,7 @@ def test_expected_result_loss_returns_one_signed_reconciliation_without_retry(
             [
                 event
                 for event in callback.events
-                if event.get("schema_version") == "openadapt.hosted-runner-terminal/v1"
+                if event.get("schema_version") == "openadapt.hosted-runner-terminal/v2"
             ]
         )
         == 1
@@ -1973,7 +2370,8 @@ def test_parsed_refusal_callback_contains_closed_terminal(tmp_path, sealed) -> N
     callback = adapter.callback_request(dispatch, refusal)
 
     terminal = callback.events[-1]
-    assert terminal["schema_version"] == "openadapt.hosted-runner-terminal/v1"
+    assert callback.schema_version == "openadapt.hosted-runner-callback/v2"
+    assert terminal["schema_version"] == "openadapt.hosted-runner-terminal/v2"
     assert terminal["outcome"] == "REJECTED_POLICY"
     assert terminal["started"] is False
     assert terminal["uncertain_delivery"] is False
@@ -2018,13 +2416,16 @@ def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) 
     )
     decoded = json.loads(raw)
     assert decoded["payload"]["schema_version"] == (
-        "openadapt.production-terminal-verification/v2"
+        "openadapt.production-terminal-verification/v3"
     )
     assert "params" not in decoded["payload"]
     assert "report" not in decoded["payload"]
     assert callback.runner_session_id == dispatch.runner_session_id
     assert callback.workflow_admission_sha256 == (
         dispatch.workflow_admission.artifact_sha256
+    )
+    assert callback.flow_release_verification_receipt_object_sha256 == (
+        dispatch.flow_release_verification_receipt.artifact_sha256
     )
 
 
@@ -2096,6 +2497,25 @@ def test_safe_halt_callback_requires_signed_terminal_proof() -> None:
             report_sha256="b" * 64,
             started=True,
             uncertain_delivery=False,
+        )
+
+
+def test_terminal_v2_callback_rejects_a_canonical_fake_signature() -> None:
+    proof = sign_production_terminal_verification(_payload(), _private_key())
+    fake = proof.model_copy(
+        update={"signature": urlsafe_b64encode(bytes(64)).decode("ascii").rstrip("=")}
+    )
+    raw = hosted.canonical_json(fake)
+
+    with pytest.raises(ValueError, match="terminal verification artifact is invalid"):
+        HostedTerminalEventV2(
+            run_id=fake.payload.run_id,
+            outcome="VERIFIED",
+            report_sha256=fake.payload.run_report_sha256,
+            started=True,
+            uncertain_delivery=False,
+            terminal_verification_artifact_bytes_base64=b64encode(raw).decode("ascii"),
+            terminal_verification_artifact_sha256=fake.artifact_sha256(),
         )
 
 
@@ -2183,7 +2603,7 @@ def test_callback_rejects_confirmed_summary_for_reconciliation() -> None:
             runner_session_id="22222222-2222-4222-8222-222222222222",
             idempotency_key="callback-test-key",
             lease_token="oal_" + "a" * 64,
-            product_release_admission_sha256="b" * 64,
+            flow_release_verification_receipt_object_sha256="sha256:" + "b" * 64,
             workflow_admission_sha256="c" * 64,
             events=(summary, terminal.model_dump(mode="json")),
         )

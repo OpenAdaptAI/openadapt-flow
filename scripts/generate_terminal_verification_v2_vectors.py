@@ -12,6 +12,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 
 from openadapt_flow.qualification_admission_v2 import canonical_json
+from openadapt_flow.runner.hosted_adapter import HostedTerminalEvent
 from openadapt_flow.terminal_verification_v2 import (
     RESULT_LOSS_CLOSURE_PAYLOAD_DOMAIN,
     RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
@@ -34,7 +35,7 @@ from tests.test_terminal_verification_v2 import (
 DEFAULT_OUTPUT = Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json")
 
 
-def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
+def _vector(name: str) -> dict[str, object]:
     payload = {
         "verified-complete": _payload,
         "halted-before-effect-zero-permit": _halted_payload,
@@ -50,16 +51,17 @@ def _vector(name: str, *, uncertain_delivery: bool) -> dict[str, object]:
     envelope = sign_production_terminal_verification(payload, _private_key())
     raw = canonical_json(envelope)
     effect_records = payload.evidence_manifests.effect.records
+    callback = HostedTerminalEvent(
+        run_id=payload.run_id,
+        outcome=payload.run_receipt.transaction_outcome,
+        report_sha256=payload.run_report_sha256,
+        started=True,
+        uncertain_delivery=payload.pending_permit_count == 1,
+        terminal_verification_artifact_bytes_base64=b64encode(raw).decode("ascii"),
+        terminal_verification_artifact_sha256=envelope.artifact_sha256(),
+    )
     return {
-        "callback": {
-            "artifact_bytes_source": "envelope_canonical_base64",
-            "outcome": payload.run_receipt.transaction_outcome,
-            "report_sha256": payload.run_report_sha256,
-            "run_id": payload.run_id,
-            "schema_version": "openadapt.hosted-runner-terminal/v1",
-            "started": True,
-            "uncertain_delivery": uncertain_delivery,
-        },
+        "callback": callback.model_dump(mode="json"),
         "effect_state": (
             effect_records[0].model_dump(mode="json") if effect_records else None
         ),
@@ -144,30 +146,12 @@ def build_fixture() -> dict[str, object]:
             _result_loss_closure_vector(managed_acknowledged)
         ),
         "vectors": [
-            _vector(
-                "verified-complete",
-                uncertain_delivery=False,
-            ),
-            _vector(
-                "halted-before-effect-zero-permit",
-                uncertain_delivery=False,
-            ),
-            _vector(
-                "reconciliation-required-pending-permit",
-                uncertain_delivery=True,
-            ),
-            _vector(
-                "reconciliation-required-acknowledged-inconclusive",
-                uncertain_delivery=False,
-            ),
-            _vector(
-                "reconciliation-required-managed-result-loss",
-                uncertain_delivery=True,
-            ),
-            _vector(
-                "reconciliation-required-managed-result-loss-acknowledged",
-                uncertain_delivery=False,
-            ),
+            _vector("verified-complete"),
+            _vector("halted-before-effect-zero-permit"),
+            _vector("reconciliation-required-pending-permit"),
+            _vector("reconciliation-required-acknowledged-inconclusive"),
+            _vector("reconciliation-required-managed-result-loss"),
+            _vector("reconciliation-required-managed-result-loss-acknowledged"),
         ],
     }
 

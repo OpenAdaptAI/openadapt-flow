@@ -27,6 +27,7 @@ from openadapt_flow.ir import (
 from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.receipt import RunReceipt
 from openadapt_flow.runner.hosted_adapter import (
+    HostedTerminalEvent,
     ManagedChildStartEvidence,
     ProductionDeliveryResultLossClosureRequest,
     ProductionDeliveryResultLossClosureResult,
@@ -1877,11 +1878,18 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
             if envelope.payload.managed_result_loss is not None
             else None
         ) == vector["managed_result_loss"]
-        callback = vector["callback"]
-        assert callback["run_id"] == payload.run_id
-        assert callback["outcome"] == payload.run_receipt.transaction_outcome
-        assert callback["report_sha256"] == payload.run_report_sha256
-        assert callback["artifact_bytes_source"] == "envelope_canonical_base64"
+        callback = HostedTerminalEvent.model_validate(vector["callback"])
+        assert callback.run_id == payload.run_id
+        assert callback.outcome == payload.run_receipt.transaction_outcome
+        assert callback.report_sha256 == payload.run_report_sha256
+        assert callback.uncertain_delivery == (payload.pending_permit_count == 1)
+        assert (
+            callback.terminal_verification_artifact_bytes_base64
+            == (vector["envelope_canonical_base64"])
+        )
+        assert callback.terminal_verification_artifact_sha256 == (
+            envelope.artifact_sha256()
+        )
 
 
 def test_managed_result_loss_closure_cross_language_vector_is_exact() -> None:

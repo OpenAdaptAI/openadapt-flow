@@ -105,13 +105,15 @@ This adapter detects such a session and:
 A window-scoped session that declares a coordinate space this adapter does
 not understand is refused loudly rather than converted with guessed scaling.
 
-Frame selection has two contracts. A sealed native v2 window capture names the
+Frame selection has two contracts. Every sealed v2 window capture names the
 exact before frame by source ordinal and keeps the first retained frame after
-the action as its after frame. The adapter decodes both exact timestamps and
-refuses a missing binding. Legacy and remote-display captures keep the existing
-``get_frame_at`` behavior: sample the action time and ``T + settle_s``, clamped
-to the next event. A missing click before frame is fatal. A missing legacy after
-frame leaves that step without a visual postcondition.
+the action as its after frame. This includes v2 RDP and Citrix captures, without
+promoting their local client-window geometry into native identity. The adapter
+decodes both exact ordinal bindings and refuses a missing frame. Legacy captures
+keep the existing ``get_frame_at`` behavior: sample the action time and
+``T + settle_s``, clamped to the next event. A missing click before frame is
+fatal. A missing legacy after frame leaves that step without a visual
+postcondition.
 
 Scroll deltas: pynput reports wheel *notches* with positive ``dy`` = scroll up,
 while the flow recording stores *pixels* with positive ``dy`` = view down
@@ -417,8 +419,14 @@ def _exact_native_frames(
         raise ValueError("native action has no ordinal-later retained after frame")
     try:
         return (
-            session.get_exact_frame(bound.timestamp),
-            session.get_exact_frame(after.timestamp),
+            session.get_exact_frame(
+                bound.timestamp,
+                source_ordinal=int(bound.source_ordinal),
+            ),
+            session.get_exact_frame(
+                after.timestamp,
+                source_ordinal=int(after.source_ordinal),
+            ),
         )
     except LookupError as exc:
         raise ValueError(

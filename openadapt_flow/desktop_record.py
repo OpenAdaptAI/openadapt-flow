@@ -52,10 +52,11 @@ from typing import Any, Callable, ContextManager, Optional, Protocol
 # Platforms where openadapt-capture's window-scoped capture is implemented
 # (openadapt_capture.window_capture.resolve_window / capture_window). Kept in
 # lock-step with that module: recording ONE window in its own pixel space needs
-# a per-window capture primitive (macOS CGWindowListCreateImage / Windows
-# Win32 + region grab). Elsewhere we refuse UP FRONT rather than start a
-# full-screen capture that silently ignores the requested --window scope.
-WINDOW_CAPTURE_PLATFORMS = ("darwin", "win32")
+# a per-window capture primitive (macOS CGWindowListCreateImage, Windows
+# Win32, or Linux X11/XComposite). Elsewhere we refuse UP FRONT rather than
+# start a full-screen capture that silently ignores the requested --window
+# scope.
+WINDOW_CAPTURE_PLATFORMS = ("darwin", "win32", "linux")
 
 
 class _CaptureRecorder(Protocol):

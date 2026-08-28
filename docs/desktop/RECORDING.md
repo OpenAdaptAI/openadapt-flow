@@ -185,12 +185,13 @@ with `--rdp-readiness-text`, set `backend.rdp_readiness_text` in deployment
 config, or pass the flag directly. If it is absent, `run` refuses before any
 action; ordinary record/replay remains available.
 
-Window-scoped capture is implemented on **macOS and Windows** hosts
-(`CGWindowListCreateImage` / Win32 region grab); on any other host `--window`
-is refused up front rather than silently falling back to full-screen (which
-would record coordinates in the wrong pixel space). `--window` applies only to
-the desktop backends — `--backend web` records the Playwright page and refuses
-it.
+Window-scoped capture works on **macOS, Windows, and Linux X11** hosts. Linux
+uses the EWMH client identity and an XComposite named-window pixmap, so another
+window can't replace the captured pixels through root occlusion. Native
+Wayland and XWayland-only sessions stop before recording because Capture can't
+yet bind one portal window, its pixels, and event-time coordinates. `--window`
+applies only to the desktop backends. `--backend web` records the Playwright
+page and refuses it.
 
 **PHI note:** a window title or readiness marker can contain a patient name.
 These values remain local execution metadata: plaintext in `meta.json` and in an

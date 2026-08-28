@@ -154,7 +154,7 @@ def _reject_unbound_record_target_flags(args: argparse.Namespace, backend: str) 
         "web": set(),
         "windows": set(),
         "macos": {"macos_app", "macos_window_title"},
-        "linux": set(),
+        "linux": {"linux_app", "linux_window_title"},
         "rdp": {"rdp_window", "rdp_window_title", "rdp_readiness_text"},
         "citrix": {"rdp_window", "rdp_window_title", "rdp_readiness_text"},
     }
@@ -167,15 +167,10 @@ def _reject_unbound_record_target_flags(args: argparse.Namespace, backend: str) 
                 "Scope the local recording with --window/--window-title, then "
                 "pass --agent-url to replay or run"
             )
-        elif backend == "linux" and attr in {
-            "linux_app",
-            "linux_window_title",
-            "linux_allow_physical_input",
-        }:
+        elif backend == "linux" and attr == "linux_allow_physical_input":
             reason = (
-                "the current Capture component has no Linux window-scoping "
-                "primitive. Record the local Linux desktop without this flag, "
-                "then pass it to replay or run"
+                "this flag permits replay-time physical input. It doesn't "
+                "change which window Capture records, so pass it to replay or run"
             )
         elif backend == "rdp" and attr == "rdp_host":
             reason = (
@@ -221,13 +216,6 @@ def _resolve_record_capture_window(
 
     owner = getattr(args, "window", None)
     title = getattr(args, "window_title", None)
-    if backend == "linux" and (owner is not None or title is not None):
-        raise SystemExit(
-            "record --backend linux: --window/--window-title cannot be applied "
-            "because the current Capture component has no Linux "
-            "window-scoping primitive. Record the local Linux desktop without "
-            "these flags. Nothing was recorded."
-        )
     if backend == "macos":
         owner = _merge_record_window_selector(
             owner,
@@ -241,6 +229,21 @@ def _resolve_record_capture_window(
             getattr(args, "macos_window_title", None),
             generic_flag="--window-title",
             target_flag="--macos-window-title",
+            backend=backend,
+        )
+    elif backend == "linux":
+        owner = _merge_record_window_selector(
+            owner,
+            getattr(args, "linux_app", None),
+            generic_flag="--window",
+            target_flag="--linux-app",
+            backend=backend,
+        )
+        title = _merge_record_window_selector(
+            title,
+            getattr(args, "linux_window_title", None),
+            generic_flag="--window-title",
+            target_flag="--linux-window-title",
             backend=backend,
         )
     elif backend in ("rdp", "citrix"):
@@ -4671,8 +4674,8 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         metavar="APP",
         help=(
             "Exact AT-SPI application name for --backend linux (e.g. gedit). "
-            "Replay/run only: the current Capture path records the local Linux "
-            "desktop and refuses this flag. Overrides backend.linux_app."
+            "During record this scopes Capture to the matching local X11 "
+            "window; during replay/run it overrides backend.linux_app."
         ),
     )
     p.add_argument(
@@ -4681,9 +4684,8 @@ def _add_backend_flags(p: argparse.ArgumentParser) -> None:
         metavar="TITLE",
         help=(
             "Exact top-level window title for --backend linux. Zero or "
-            "multiple matches are refused. Replay/run only: the current "
-            "Capture path records the local Linux desktop and refuses this "
-            "flag. Overrides backend.linux_window_title."
+            "multiple matches are refused. During record this scopes Capture; "
+            "during replay/run it overrides backend.linux_window_title."
         ),
     )
     p.add_argument(

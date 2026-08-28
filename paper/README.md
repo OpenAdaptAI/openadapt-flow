@@ -14,7 +14,7 @@ file named `main.pdf`. Name the profile and the output path, never just
 | Paper | Source | Built to |
 |---|---|---|
 | "Compile Once, Govern Every Repair" — the SYSTEMS paper about the engine: compilation, deterministic replay, governed repair. | `paper/main.tex` | `paper/build/main.pdf` |
-| "A Green Screen Is Not a Saved Record" — its workshop condensation. | `paper/workshop/main.tex` | `paper/workshop/build/main.pdf` |
+| "A Green Screen Is Not a Saved Record" — a workshop condensation of the above. **Superseded; do not submit it.** Last touched 2026-07-27, and it is not anonymous. "Measuring the Checkers" took the venue it was aimed at. | `paper/workshop/main.tex` | `paper/workshop/build/main.pdf` |
 
 **`openadapt-attest-bench` `paper/` (private) holds the other four**, the
 MEASUREMENT lineage: "Measuring the Checkers" in a workshop and an arXiv
@@ -27,9 +27,14 @@ Actions in Computer-Use Agents". That tree is canonical for all four; its
 (private) is a superseded frozen copy**, not a source. Its files carry a
 `SUPERSEDED-` prefix. Do not build or upload from it.
 
-The systems paper and the measurement papers cite each other (the
-measurement lineage uses this engine as its instrument) and must not be
-merged: different claims, different audiences.
+The systems paper and the measurement papers must not be merged: different
+claims, different audiences. The measurement lineage uses this engine as its
+instrument and cites it. This tree does not cite the measurement lineage back;
+`references.bib` holds none of it. Say "cites" in one direction only until
+that changes.
+
+`PAPERS.md` in the workspace root carries the portfolio view: who reads each
+paper, where it is published, and whether it may go out yet.
 
 Everything mechanically checkable is done: `python paper/check_artifacts.py`
 passes, `make -C paper` builds both PDFs with zero LaTeX warnings, and

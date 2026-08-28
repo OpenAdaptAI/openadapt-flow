@@ -195,7 +195,8 @@ a persisted write; only an independent before/after snapshot of the application'
 state can refute a silent wrong action. In the end-to-end fault study this
 reduced silent acceptance from 54 of 90 runs to 9 of 90 under a single
 out-of-band record oracle, and to 0 of 90 only once the read path covered every
-mutable surface the action could touch.}
+mutable surface the action could touch. Conditioned on the 72 runs in which a
+wrong effect actually occurred, that is 75.0\%, then 12.5\%, then zero.}
 \label{fig:oracle}
 \end{figure}
 

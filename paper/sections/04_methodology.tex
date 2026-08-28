@@ -46,8 +46,12 @@ gap rests on exactly one class, rather than on a sampled workload distribution.
 Second, the taxonomy is an adversarial transactional-fault lineage
 \cite{gray1981transaction} chosen to differentiate oracles; it is not weighted
 to any measured EMR or lending incident distribution, so a figure such as the
-screen arm's 60\% is fault coverage under this taxonomy, never an expected
-production frequency.
+screen arm's 75.0\% is fault coverage under this taxonomy, never an expected
+production frequency. We report that rate conditional on a wrong effect having
+occurred (54 of the 72 such runs), not per run (54 of 90), because the per-run
+figure is diluted by the correct-effect controls and understates the quantity of
+interest: given that something went wrong, how often does the oracle fail to
+see it.
 
 \paragraph{OpenEMR comparison.}
 The task logs into the shared public OpenEMR demonstration site, searches a

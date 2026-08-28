@@ -245,6 +245,31 @@ def main() -> None:
         "effect-e2e complete-read-path slip classes",
     )
     e2e_screen_slip_classes = len(e2e["screen"]["silent_wrong_scenarios"])
+    # The headline PERCENTAGE is conditional on a wrong effect having occurred
+    # (n_wrong_effect), not on all runs. The per-run rate is diluted by the
+    # correct-effect controls and understates the quantity of interest, so the
+    # paper reports the conditional rate and this binds it to the artifact's own
+    # `undetected_wrong_rate` field.
+    e2e_wrong_n = e2e["screen"]["n_wrong_effect"]
+    require_equal(e2e_wrong_n, 72, "effect-e2e runs with a real wrong effect")
+    require_equal(
+        e2e["screen"]["n_correct_effect"], 18, "effect-e2e correct-effect controls"
+    )
+    for arm, expected_rate in (
+        ("screen", 0.75),
+        ("effect_rest", 0.125),
+        ("effect_full", 0.0),
+    ):
+        require_equal(
+            e2e[arm]["n_wrong_effect"], e2e_wrong_n, f"effect-e2e {arm} wrong-effect n"
+        )
+        require_equal(
+            e2e[arm]["undetected_wrong_rate"],
+            expected_rate,
+            f"effect-e2e {arm} undetected-wrong rate",
+        )
+    e2e_screen_pct = f"{e2e['screen']['undetected_wrong_rate'] * 100:.1f}"
+    e2e_rest_pct = f"{e2e['effect_rest']['undetected_wrong_rate'] * 100:.1f}"
     require_equal(len(effect_e2e["scenarios"]), 10, "effect-e2e scenario count")
     for arm in ("screen", "effect_rest", "effect_full"):
         require_equal(
@@ -535,6 +560,7 @@ def main() -> None:
     results_tex = load_text("paper/sections/05_results.tex")
     reproducibility_tex = load_text("paper/sections/07_reproducibility.tex")
     paper_readme = load_text("paper/README.md")
+    governance_tex = load_text("paper/sections/03_governance.tex")
 
     number_words = {
         0: "zero",
@@ -626,6 +652,41 @@ def main() -> None:
         f"The residual {e2e_rest} of 90 is the honest mechanism",
         "results e2e residual honesty",
     )
+    # The conditional headline percentage. Bind it everywhere it appears so the
+    # paper can never quietly revert to the diluted per-run figure, and so the
+    # denominator (72 runs in which a wrong effect actually occurred) always
+    # travels with the percentage.
+    for label, text in (
+        ("abstract", main_tex),
+        ("introduction", intro_tex),
+        ("results", results_tex),
+        ("methodology", methodology_tex),
+        ("governance", governance_tex),
+        ("workshop", load_text("paper/workshop/main.tex")),
+    ):
+        normalized = " ".join(text.split())
+        if f"{e2e_screen_pct}\\%" not in normalized:
+            raise AssertionError(
+                f"{label} does not report the conditional screen miss rate "
+                f"{e2e_screen_pct}%"
+            )
+        if str(e2e_wrong_n) not in normalized:
+            raise AssertionError(
+                f"{label} reports a conditional rate without its denominator "
+                f"({e2e_wrong_n} runs with a real wrong effect)"
+            )
+    for label, text in (
+        ("abstract", main_tex),
+        ("introduction", intro_tex),
+        ("results", results_tex),
+        ("workshop", load_text("paper/workshop/main.tex")),
+    ):
+        if f"{e2e_rest_pct}\\%" not in " ".join(text.split()):
+            raise AssertionError(
+                f"{label} does not report the conditional out-of-band miss rate "
+                f"{e2e_rest_pct}%"
+            )
+
     # Bind the coverage-matrix sentence in both the report and the workshop to
     # the artifact's own slip sets, so "six of the ten" cannot drift.
     for label, text in (
@@ -644,7 +705,6 @@ def main() -> None:
     # The fig:oracle caption in Governance is the exact place the retired
     # circular 50/0 framing survived a previous reconciliation. Bind all three
     # rungs of the caption positively, so it cannot silently regress again.
-    governance_tex = load_text("paper/sections/03_governance.tex")
     require_contains(
         governance_tex,
         (

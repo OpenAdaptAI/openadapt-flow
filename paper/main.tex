@@ -71,7 +71,9 @@ with the observation backend and vision stack stubbed so the study isolates
 verification rather than perception, and judged by an independent
 system-of-record ground truth, screen-only verification silently accepted 54 of
 90 injected-fault runs; an out-of-band effect check cut that to 9 of 90 and a
-complete system-of-record read path to 0 of 90, the residual nine being one
+complete system-of-record read path to 0 of 90. Conditioned on a wrong effect
+having actually occurred---72 of those 90 runs---the screen missed 75.0\% of
+them and a single out-of-band oracle 12.5\%. The residual nine are one
 collateral-write class outside the out-of-band oracle's read coverage. The
 finding replicates on a second, non-healthcare lending domain with the same
 three-arm ladder: 24 of 36 silent wrong effects under screen-only verification,

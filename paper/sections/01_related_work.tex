@@ -37,7 +37,15 @@ irreversible action, or an unhandled zero-result branch, is emitted as an
 uncertainty and the workflow is left uncertified until the operator answers a
 concrete grounded question---the interactive-disambiguation posture of SUGILITE
 and DiLogics \cite{li2017sugilite,pu2023dilogics} rather than the
-maximum-likelihood completion. Runtime target repair supplies the other half of
+maximum-likelihood completion. Our questions are deliberately closed and
+multiple-choice for the reason Barnaby et al.\ make precise: asking a user to
+choose among characterized behaviours is a better disambiguation query than
+asking them to label another example \cite{barnaby2026choose}. We differ in
+where the residual uncertainty goes. Their queries are synthesized to separate
+candidate programs and the interaction ends when one survives; ours are raised
+only for consequential divergences, and an \emph{unanswered} question does not
+resolve to a best guess---it leaves the workflow uncertified, so the safe
+default is to keep replaying the demonstration exactly as recorded. Runtime target repair supplies the other half of
 the generate-and-check loop familiar from counterexample-guided inductive
 synthesis and syntax-guided synthesis \cite{solarlezama2006sketching,alur2013sygus},
 and qualification campaigns supply the counterexamples: a repair candidate is

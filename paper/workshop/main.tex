@@ -71,7 +71,9 @@ against an on-disk system of record
 and judging every run by an independent ground truth, screen-only verification
 silently accepted a wrong persisted effect on 54 of 90 runs; an out-of-band
 effect check cut that to 9 of 90, and a complete system-of-record read path to 0
-of 90. The residual nine are a single collateral-write class outside the
+of 90. Conditioned on a wrong effect having actually occurred---72 of the 90
+runs, the rest being correct-effect controls---the screen missed 75.0\% and a
+single out-of-band oracle 12.5\%. The residual nine are a single collateral-write class outside the
 out-of-band oracle's read coverage, so effect verification is only as strong as
 what it reads. The same gap replicates on a second, non-healthcare lending
 domain. A companion adversarial study shows the dual failure at the
@@ -278,8 +280,9 @@ as though it did.
 \paragraph{Finding.} Under screen-only verification, silent wrong effects are the
 common case, not a corner case. Screen-only verification silently accepted a
 wrong persisted effect on 54
-of 90 runs. An out-of-band effect check that reads the record back cut that to 9
-of 90, and a complete system-of-record read path to 0 of 90
+of 90 runs, which is 75.0\% of the 72 runs in which a wrong effect actually
+occurred. An out-of-band effect check that reads the record back cut that to 9
+of 90 (12.5\% of those runs), and a complete system-of-record read path to 0 of 90
 (Figure~\ref{fig:silentbar}). The residual 9 of 90 are one collateral-write class
 outside the out-of-band oracle's read coverage, the honest limit of an
 out-of-band oracle: it catches exactly what its read path can read. False aborts

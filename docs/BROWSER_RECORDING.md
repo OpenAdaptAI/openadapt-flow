@@ -307,36 +307,64 @@ secret field. Treat all other URL data as sensitive recording data.
   Flow detaches from the external browser. Flow promotes the temporary output
   only after detach succeeds and every guard remains clear.
 
-## Why the Capture Chrome extension is not this path
+## Add the Capture structural observer
 
-The `openadapt-capture` repository contains a custom Chrome extension
-prototype. It proved useful DOM event capture, but its current direct
-WebSocket and replay design does not implement the supported contract above.
-It does not yet bind messages to an authenticated recording session, one tab,
-one document, and an ordered acknowledged event stream. It also does not
-provide the compiler's exact before/after frame binding and source-time secret
-redaction. Its direct DOM replay can dispatch actions without the governed
-runtime's identity, policy, fresh-frame, and effect checks.
+The supported Capture Chrome extension can add passive DOM structure to a
+Flow launch or attach recording. Playwright still records every action and
+frame. It also owns compilation, replay, and verification. The extension has
+no action, compiler, or replay command.
 
-The prototype should remain available for development. It can become a
-supported acquisition transport after it does all of the following:
+Use the ZIP and SPDX SBOM from the same admitted Capture release as the
+installed `openadapt-capture` wheel. First provision those exact files:
 
-1. Use the shared Flow event and evidence schema. Do not create a second
-   compiler or replay format.
-2. Redact secret values before they cross the extension boundary.
-3. Bind and authenticate the browser profile, tab, document, run, session, and
-   monotonically increasing event sequence. A reconnect must acknowledge or
-   safely resume events instead of dropping them.
-4. Retain exact frame-to-event evidence and bind each event to its current
-   viewport coordinate system.
-5. Send recordings to the existing compiler. Do not perform direct replay.
-6. Pass the same three-trial record, compile, secret, ambiguity-refusal, and
-   browser-lifecycle tests as the Playwright attach mode.
+```bash
+capture browser-observer-provision \
+  --extension-zip openadapt-capture-browser-observer-1.3.0.zip \
+  --sbom openadapt-capture-browser-observer-1.3.0.spdx.json \
+  --version 1.3.0 \
+  --source-commit "$CAPTURE_SOURCE_COMMIT" \
+  --zip-sha256 "$OBSERVER_ZIP_SHA256" \
+  --sbom-sha256 "$OBSERVER_SBOM_SHA256" \
+  --install-root "$OBSERVER_INSTALL_ROOT" \
+  --native-host-manifest-path "$CHROME_NATIVE_HOST_MANIFEST"
+```
 
-Until that contract exists, the extension is a prototype component. This label
-does not apply to `openadapt-capture` as a whole. Capture is the canonical
-native recorder; the browser recorder stays Playwright-native because browser
-DOM identity and source-time secret handling are load-bearing.
+The command prints the digest-addressed extension path and the inventory
+SHA-256. Keep that output. For a launch recording, pass the extension path to
+Flow:
+
+```bash
+openadapt-flow record --backend web \
+  --url https://your.app \
+  --browser-observer \
+  --browser-observer-installation "$OBSERVER_EXTENSION_PATH" \
+  --browser-observer-version 1.3.0 \
+  --browser-observer-source-commit "$CAPTURE_SOURCE_COMMIT" \
+  --browser-observer-inventory-sha256 "$OBSERVER_INVENTORY_SHA256" \
+  --browser-observer-zip-sha256 "$OBSERVER_ZIP_SHA256" \
+  --browser-observer-sbom-sha256 "$OBSERVER_SBOM_SHA256" \
+  --out recordings/browser-observer-session
+```
+
+Chrome shows the extension icon after the browser opens. Click it on the tab
+that Flow records. Chrome then requests access to that origin. Add each SSO
+origin with a separate `--browser-observer-origin https://login.example`
+argument. An attach recording uses the same release arguments, but the
+dedicated Chrome profile must already contain the provisioned extension and
+native-host manifest.
+
+The extension keeps source-redacted candidates inside bounded session storage.
+Flow claims one candidate with the exact DOM event clock, tab, document,
+navigation epoch, viewport epoch, action sequence, and retained frame digest.
+Only the claimed observation crosses the native bridge. It contains geometry,
+a positional DOM path, and a session-salted identity digest for a safe field.
+It contains no key, input value, raw URL, selector, HTML, DOM text, or
+accessible name.
+
+Password, payment, declared-secret, and autocomplete-sensitive fields withhold
+their identity. A disconnect resumes only from the exact acknowledged
+sequence. A gap, stale document, stale viewport, full queue, invalid release,
+or reconnect timeout leaves the observer-backed recording incomplete.
 
 ## Current boundary
 

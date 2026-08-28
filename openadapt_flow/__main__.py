@@ -1060,6 +1060,58 @@ def _cmd_record(args: argparse.Namespace) -> int:
         record_interactive,
     )
 
+    browser_observer_config = None
+    if getattr(args, "browser_observer", False):
+        required = {
+            "--browser-observer-version": getattr(args, "browser_observer_version", None),
+            "--browser-observer-source-commit": getattr(
+                args, "browser_observer_source_commit", None
+            ),
+            "--browser-observer-inventory-sha256": getattr(
+                args, "browser_observer_inventory_sha256", None
+            ),
+            "--browser-observer-zip-sha256": getattr(
+                args, "browser_observer_zip_sha256", None
+            ),
+            "--browser-observer-sbom-sha256": getattr(
+                args, "browser_observer_sbom_sha256", None
+            ),
+        }
+        missing = [name for name, value in required.items() if not value]
+        if missing:
+            raise SystemExit(
+                "record: --browser-observer requires " + ", ".join(missing)
+            )
+        from openadapt_flow.browser_observer import (
+            BrowserObserverConfig,
+            BrowserObserverRelease,
+        )
+
+        parsed_url = urlsplit(args.url)
+        declared_origin = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        observer_origins = tuple(
+            dict.fromkeys(
+                [declared_origin, *(getattr(args, "browser_observer_origin", None) or [])]
+            )
+        )
+        try:
+            observer_release = BrowserObserverRelease(
+                version=str(required["--browser-observer-version"]),
+                source_commit=str(required["--browser-observer-source-commit"]),
+                inventory_sha256=str(
+                    required["--browser-observer-inventory-sha256"]
+                ),
+                zip_sha256=str(required["--browser-observer-zip-sha256"]),
+                sbom_sha256=str(required["--browser-observer-sbom-sha256"]),
+            )
+        except ValueError as exc:
+            raise SystemExit(f"record: invalid browser observer release: {exc}") from exc
+        browser_observer_config = BrowserObserverConfig(
+            allowed_origins=observer_origins,
+            secret_field_names=tuple(args.secret or ()),
+            release=observer_release,
+        )
+
     try:
         out = record_interactive(
             args.url,
@@ -1070,6 +1122,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
             headless=args.headless,
             cdp_endpoint=getattr(args, "browser_cdp_endpoint", None),
             browser_page_url=getattr(args, "browser_page_url", None),
+            browser_observer_config=browser_observer_config,
+            browser_observer_extension_path=getattr(
+                args, "browser_observer_installation", None
+            ),
             surface="web",
         )
     except BrowserAttachError as exc:
@@ -4968,6 +5024,54 @@ def build_parser() -> argparse.ArgumentParser:
             "--url origin."
         ),
     )
+    p.add_argument(
+        "--browser-observer",
+        action="store_true",
+        help=(
+            "Require the admitted Capture Chrome structural observer for each "
+            "target action. Playwright remains the recorder and replay owner."
+        ),
+    )
+    p.add_argument(
+        "--browser-observer-installation",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Verified digest-addressed observer installation. Required for a "
+            "Flow-launched browser; an attached browser already has it installed."
+        ),
+    )
+    p.add_argument(
+        "--browser-observer-origin",
+        action="append",
+        default=[],
+        metavar="ORIGIN",
+        help="Additional exact HTTP(S) origin for an SSO or bound child tab. Repeatable.",
+    )
+    for option, destination, label in (
+        ("--browser-observer-version", "browser_observer_version", "stable Capture version"),
+        (
+            "--browser-observer-source-commit",
+            "browser_observer_source_commit",
+            "40-character Capture source commit",
+        ),
+        (
+            "--browser-observer-inventory-sha256",
+            "browser_observer_inventory_sha256",
+            "extension inventory SHA-256",
+        ),
+        (
+            "--browser-observer-zip-sha256",
+            "browser_observer_zip_sha256",
+            "extension ZIP SHA-256",
+        ),
+        (
+            "--browser-observer-sbom-sha256",
+            "browser_observer_sbom_sha256",
+            "extension SPDX SBOM SHA-256",
+        ),
+    ):
+        p.add_argument(option, dest=destination, default=None, metavar="VALUE", help=label)
     p.add_argument("--out", required=True, help="Recording output directory")
     p.add_argument(
         "--secret",

@@ -151,7 +151,7 @@ service-mlx = [
 # Floor 1.2.0 retains window-scoped/UIA evidence and preserves keyboard
 # shortcuts as first-class typed actions. The `test` job installs this extra
 # so Flow validates against the released producer contract in headless CI.
-capture = ["openadapt-capture>=1.2.0"]
+capture = ["openadapt-capture>=1.3.0"]
 # Canonical action-vocabulary interop (openadapt_flow.interop.types). Boundary
 # only (emit / benchmark round-trip); never on the replay hot path. The shim
 # imports openadapt-types lazily, so the core stays importable without it.

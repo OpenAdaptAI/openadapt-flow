@@ -69,17 +69,20 @@ See ``ir.Step.secret`` and ``docs`` for the full contract and its boundary.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import errno
 import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1857,6 +1860,8 @@ _INIT_JS = r"""
     const rowIdentity = structuredIdentityEvidence(e.clientX, e.clientY, target);
     pointerDown = {
       x: Math.round(e.clientX + fs.dx), y: Math.round(e.clientY + fs.dy),
+      observer_time_origin_ms: Number(performance.timeOrigin),
+      observer_event_monotonic_ms: Number(e.timeStamp),
       sid: rowIdentity.sid,
       sid_withheld: rowIdentity.withheld,
       structural: frameStructural(
@@ -1879,6 +1884,9 @@ _INIT_JS = r"""
     setTimeout(() => { suppressClick = false; }, 0);
     const dragEvent = {
       kind: 'drag', x: start.x, y: start.y, end_x: endX, end_y: endY,
+      __oaflow_observer_time_origin_ms: start.observer_time_origin_ms,
+      __oaflow_observer_event_monotonic_ms: start.observer_event_monotonic_ms,
+      __oaflow_observer_event_discriminator: 'pointerdown',
       sid: start.sid, structural: start.structural,
       end_structural: frameStructural(
         fs, structuralTarget(e.clientX, e.clientY, deepEventTarget(e))
@@ -1903,6 +1911,9 @@ _INIT_JS = r"""
       // replay delivers exactly the two demonstrated clicks.
       kind: e.detail === 2 ? 'double_click' : 'click',
       x: Math.round(e.clientX + fs.dx), y: Math.round(e.clientY + fs.dy),
+      __oaflow_observer_time_origin_ms: Number(performance.timeOrigin),
+      __oaflow_observer_event_monotonic_ms: Number(e.timeStamp),
+      __oaflow_observer_event_discriminator: 'click',
       sid: rowIdentity.sid,
       structural: frameStructural(
         fs, structuralTarget(e.clientX, e.clientY, target)
@@ -1921,6 +1932,9 @@ _INIT_JS = r"""
     const pointerEvent = {
       kind: 'right_click',
       x: Math.round(e.clientX + fs.dx), y: Math.round(e.clientY + fs.dy),
+      __oaflow_observer_time_origin_ms: Number(performance.timeOrigin),
+      __oaflow_observer_event_monotonic_ms: Number(e.timeStamp),
+      __oaflow_observer_event_discriminator: 'contextmenu',
       sid: rowIdentity.sid,
       structural: frameStructural(
         fs, structuralTarget(e.clientX, e.clientY, target)
@@ -2046,6 +2060,9 @@ _INIT_JS = r"""
     const field = secret ? secretBinding.state.field : identityTextOrNull(rawField);
     const o = {
       kind: 'input',
+      __oaflow_observer_time_origin_ms: Number(performance.timeOrigin),
+      __oaflow_observer_event_monotonic_ms: Number(e.timeStamp),
+      __oaflow_observer_event_discriminator: 'input',
       field: field,
       label: fieldLabel(el),
       secret: secret,
@@ -2141,6 +2158,8 @@ class InteractiveRecorder:
         ] = None,
         stop_when: Optional[Callable[[], bool]] = None,
         surface: str = "web",
+        browser_observer_config: Optional[Any] = None,
+        browser_observer_extension_path: Path | str | None = None,
     ) -> None:
         self._url = url
         self._surface = surface
@@ -2149,6 +2168,36 @@ class InteractiveRecorder:
         self._param_fields = set(param_fields)
         self._identifier_fields = set(identifier_fields)
         self._headless = headless
+        self._browser_observer = None
+        self._browser_observer_extension_path: Optional[Path] = None
+        self._browser_observer_profile_dir: Optional[Path] = None
+        if browser_observer_config is not None:
+            from openadapt_flow.browser_observer import (
+                BrowserObserverConsumer,
+                validate_browser_observer_installation,
+            )
+
+            self._browser_observer = BrowserObserverConsumer(browser_observer_config)
+            if browser_observer_extension_path is not None:
+                self._browser_observer_extension_path = (
+                    validate_browser_observer_installation(
+                        browser_observer_extension_path,
+                        release=browser_observer_config.release,
+                    )
+                )
+            elif not cdp_endpoint:
+                raise BrowserAttachError(
+                    "a launch recording with the browser observer requires its "
+                    "verified extension installation"
+                )
+            if headless:
+                raise BrowserAttachError(
+                    "the browser observer requires a headed Chromium session"
+                )
+        elif browser_observer_extension_path is not None:
+            raise BrowserAttachError(
+                "browser_observer_extension_path requires browser_observer_config"
+            )
         if browser_page_url and not cdp_endpoint:
             raise BrowserAttachError("browser_page_url requires a browser CDP endpoint")
         if cdp_endpoint and headless:
@@ -2248,14 +2297,38 @@ class InteractiveRecorder:
 
             self._pw = sync_playwright().start()
             if self._owns_browser:
-                self._browser = self._pw.chromium.launch(headless=self._headless)
-                self.page = self._browser.new_page(
-                    viewport={
-                        "width": self._viewport[0],
-                        "height": self._viewport[1],
-                    },
-                    device_scale_factor=1,
-                )
+                if self._browser_observer_extension_path is not None:
+                    self._browser_observer_profile_dir = Path(
+                        tempfile.mkdtemp(prefix="openadapt-flow-observer-profile-")
+                    )
+                    extension = str(self._browser_observer_extension_path)
+                    self._context = self._pw.chromium.launch_persistent_context(
+                        str(self._browser_observer_profile_dir),
+                        headless=False,
+                        viewport={
+                            "width": self._viewport[0],
+                            "height": self._viewport[1],
+                        },
+                        device_scale_factor=1,
+                        args=[
+                            f"--disable-extensions-except={extension}",
+                            f"--load-extension={extension}",
+                        ],
+                    )
+                    self.page = (
+                        self._context.pages[0]
+                        if self._context.pages
+                        else self._context.new_page()
+                    )
+                else:
+                    self._browser = self._pw.chromium.launch(headless=self._headless)
+                    self.page = self._browser.new_page(
+                        viewport={
+                            "width": self._viewport[0],
+                            "height": self._viewport[1],
+                        },
+                        device_scale_factor=1,
+                    )
             else:
                 try:
                     self._browser = self._pw.chromium.connect_over_cdp(
@@ -2371,6 +2444,8 @@ class InteractiveRecorder:
                 self._last_structural = self._structural_state()
             else:
                 self._rebaseline_attached_viewport()
+            if self._browser_observer is not None:
+                self._browser_observer.start()
         except Exception as exc:
             self.abort(reason=exc)
             raise
@@ -2650,6 +2725,15 @@ class InteractiveRecorder:
                 meta["viewport"] = list(self._initial_attached_viewport)
                 meta["viewport_mode"] = "per-event"
                 meta["viewport_history"] = list(self._viewport_history)
+            if self._browser_observer is not None:
+                try:
+                    meta["browser_structural_observer"] = (
+                        self._browser_observer.metadata()
+                    )
+                except Exception as exc:
+                    raise BrowserAttachError(
+                        "the browser observer evidence set is incomplete"
+                    ) from exc
             meta_path.write_text(json.dumps(meta, indent=2))
             if self._listener_error is not None:
                 raise self._listener_error
@@ -2996,6 +3080,50 @@ class InteractiveRecorder:
         raw_doc_id = event.pop("__oaflow_doc", None)
         doc_holds_secret = event.pop("__oaflow_doc_holds_secret", None) is True
         kind = event.get("kind")
+        observer_time_origin = event.pop(
+            "__oaflow_observer_time_origin_ms",
+            None,
+        )
+        observer_event_time = event.pop(
+            "__oaflow_observer_event_monotonic_ms",
+            None,
+        )
+        observer_discriminator = event.pop(
+            "__oaflow_observer_event_discriminator",
+            None,
+        )
+        observer_kinds = {
+            "click": "click",
+            "double_click": "click",
+            "right_click": "contextmenu",
+            "drag": "pointerdown",
+            "input": "input",
+        }
+        if kind in observer_kinds and self._browser_observer is not None:
+            try:
+                origin_ms = float(observer_time_origin)
+                event_ms = float(observer_event_time)
+            except (TypeError, ValueError):
+                origin_ms = event_ms = float("nan")
+            if (
+                not math.isfinite(origin_ms)
+                or not math.isfinite(event_ms)
+                or origin_ms < 0
+                or event_ms < 0
+                or observer_discriminator != observer_kinds[kind]
+                or abs(origin_ms + event_ms - time.time() * 1000) > 60_000
+            ):
+                self._listener_error = BrowserAttachError(
+                    "a browser action lacked an exact document clock; "
+                    "recording stopped before accepting the event"
+                )
+                self.done = True
+                return
+            event["_oaflow_observer_clock"] = {
+                "document_time_origin_ms": origin_ms,
+                "event_monotonic_ms": event_ms,
+                "event_discriminator": observer_discriminator,
+            }
         if kind == "privacy_refusal":
             self._listener_error = BrowserAttachError(
                 "a shadow input did not have a declared secret host boundary; "
@@ -3345,8 +3473,17 @@ class InteractiveRecorder:
         self._cleanup_secret_markers()
         privacy_cdp, self._privacy_cdp = self._privacy_cdp, None
         browser, self._browser = self._browser, None
+        context, self._context = self._context, None
+        browser_observer, self._browser_observer = self._browser_observer, None
+        observer_profile, self._browser_observer_profile_dir = (
+            self._browser_observer_profile_dir,
+            None,
+        )
         playwright, self._pw = self._pw, None
         try:
+            if browser_observer is not None:
+                with contextlib.suppress(Exception):
+                    browser_observer.close()
             if privacy_cdp is not None:
                 try:
                     privacy_cdp.detach()
@@ -3354,6 +3491,8 @@ class InteractiveRecorder:
                     pass
             if self._owns_browser and browser is not None:
                 browser.close()
+            elif self._owns_browser and context is not None:
+                context.close()
         finally:
             try:
                 if playwright is not None:
@@ -3369,6 +3508,8 @@ class InteractiveRecorder:
                 self._context_page_latches.clear()
                 self._context_page_baselines.clear()
                 self._context = None
+                if observer_profile is not None:
+                    shutil.rmtree(observer_profile, ignore_errors=True)
 
     def _drain_event_queue(self) -> bool:
         """Process all events already delivered by the page binding."""
@@ -3400,6 +3541,7 @@ class InteractiveRecorder:
                         "change; recording stopped because no exact pre-action "
                         "frame exists in the new coordinate space"
                     )
+            self._associate_browser_observer_event(event)
             self._process(event)
             # A binding callback can arrive while Playwright captures this
             # action's after-frame. Revalidate it against the action in flight
@@ -3421,6 +3563,54 @@ class InteractiveRecorder:
         if self._listener_error is not None:
             raise self._listener_error
         return bool(batch) or rebased
+
+    def _associate_browser_observer_event(self, event: dict[str, Any]) -> None:
+        """Bind passive structure to the exact current retained before-frame."""
+
+        if self._browser_observer is None:
+            event.pop("_oaflow_observer_clock", None)
+            return
+        kind = event.get("kind")
+        if kind not in {"click", "double_click", "right_click", "drag", "input"}:
+            event.pop("_oaflow_observer_clock", None)
+            return
+        if kind == "input" and self._pending_type is not None:
+            same_input = (
+                self._pending_type.get("field") == event.get("field")
+                and self._pending_type.get("input_session")
+                == event.get("_oaflow_input_session")
+            )
+            if same_input:
+                event.pop("_oaflow_observer_clock", None)
+                return
+        if kind == "input":
+            self._flush_click()
+            self._flush_scroll()
+            if self._pending_type is not None:
+                self._flush_type()
+        else:
+            if kind != "double_click":
+                self._flush_click()
+            self._flush_type()
+            self._flush_scroll()
+        if self._last_frame_observation is None or self.recorder is None:
+            raise BrowserAttachError(
+                "the browser observer action lacks an exact retained before-frame"
+            )
+        try:
+            binding = self._browser_observer.snapshot_binding()
+            evidence = self._browser_observer.associate(
+                event,
+                binding=binding,
+                frame=self._last_frame_observation,
+                action_sequence=self.recorder.event_count,
+            )
+        except Exception as exc:
+            raise BrowserAttachError(
+                "the browser observer could not bind the action-time structure"
+            ) from exc
+        event["browser_structural_observation"] = evidence
+        event.pop("_oaflow_observer_clock", None)
 
     @staticmethod
     def _validate_event_batch(batch: list[dict[str, Any]]) -> None:
@@ -3518,6 +3708,7 @@ class InteractiveRecorder:
             # this click's evidence.
             assert self.recorder is not None
             ev["_oaflow_after_frame"] = self.recorder._wait_settled()
+            ev["_oaflow_after_observation"] = self.backend.last_frame_observation
             ev["_oaflow_structural_after"] = self._structural_state()
             self._pending_click = ev
             self._pending_click_pumps = max(
@@ -3580,6 +3771,9 @@ class InteractiveRecorder:
                 "secret": bool(ev.get("secret")),
                 "value": "",
                 "rect": ev.get("rect"),
+                "browser_structural_observation": ev.get(
+                    "browser_structural_observation"
+                ),
             }
         pt = self._pending_type
         pt["secret"] = pt["secret"] or bool(ev.get("secret"))
@@ -3617,6 +3811,10 @@ class InteractiveRecorder:
         # parameter-proposal pass names a proposed parameter from it, gated
         # behind operator confirmation (compiler.annotate.FieldLabelAnnotator).
         label_evidence: dict[str, Any] = {}
+        if pt.get("browser_structural_observation") is not None:
+            label_evidence["browser_structural_observation"] = pt[
+                "browser_structural_observation"
+            ]
         if pt.get("label"):
             label_evidence["field_label"] = pt["label"]
         if pt["secret"]:
@@ -3714,6 +3912,10 @@ class InteractiveRecorder:
                 event["drag_end_structural"] = ev["end_structural"]
         if ev.get("structural"):
             event["structural"] = ev["structural"]
+        if ev.get("browser_structural_observation") is not None:
+            event["browser_structural_observation"] = ev[
+                "browser_structural_observation"
+            ]
         # Marked identifier field rect (--identifier FIELD), captured in-page
         # at click time: the compiler crops these pixels
         # (anchor.identifier_crop) to arm the pixel identity tier.
@@ -3721,6 +3923,7 @@ class InteractiveRecorder:
         if idr:
             event["identifier_region"] = [int(v) for v in idr]
         after_png = ev.pop("_oaflow_after_frame", None)
+        after_observation = ev.pop("_oaflow_after_observation", None)
         structural_after = ev.pop("_oaflow_structural_after", None)
         self.recorder.record_observed(
             event,
@@ -3731,7 +3934,11 @@ class InteractiveRecorder:
             structural_after=structural_after,
         )
         if after_png is not None:
-            self._set_last(after_png, structural_after)
+            self._set_last(
+                after_png,
+                structural_after,
+                observation=after_observation,
+            )
         else:
             self._advance()
 

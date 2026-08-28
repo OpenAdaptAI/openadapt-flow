@@ -1,7 +1,7 @@
 # CHANGELOG
 
 > **Note on the v1.0.0 - v1.33.0 range.** Those entries were absent from this
-> file until 2026-08-27 and were reconstructed on that date. On 2026-07-14 this
+> file until 2026-08-28 and were reconstructed on that date. On 2026-07-14 this
 > repository moved from python-semantic-release 9.15.2 to 10.6.1. Version 10
 > changed the default changelog mode from `init` to `update`, and `update` mode
 > writes nothing unless the file carries the version-list insertion flag (the
@@ -15,8 +15,7 @@
 
 <!-- version list -->
 
-## v1.34.0 (2026-08-27)
-
+## v1.34.0 (2026-08-28)
 
 ### Bug Fixes
 
@@ -30,6 +29,9 @@
 - **macos**: Match known Chrome AX title suffixes
   ([#416](https://github.com/OpenAdaptAI/openadapt-flow/pull/416),
   [`4505bda`](https://github.com/OpenAdaptAI/openadapt-flow/commit/4505bdaefb773da150bf28f32b49b713b934d978))
+
+- **release**: Restore changelog generation and backfill the v1.x gap
+  ([`e5552d5`](https://github.com/OpenAdaptAI/openadapt-flow/commit/e5552d5e6b56c94295dab5b676f1abe570bc53aa))
 
 - **runtime**: Persist resume egress posture before execution
   ([#408](https://github.com/OpenAdaptAI/openadapt-flow/pull/408),
@@ -127,6 +129,13 @@
 - Complete hosted runner target state
   ([`035e88e`](https://github.com/OpenAdaptAI/openadapt-flow/commit/035e88eada0147673d9836a557cf3b758dca296a))
 
+- **release-health**: Detect published versions that have no changelog entry
+  ([`0eb81cb`](https://github.com/OpenAdaptAI/openadapt-flow/commit/0eb81cb0b87687bf3de6d21f8a30b12837d67551))
+
+- **sanitize**: Materialize an approved derivative from its archive
+  ([#418](https://github.com/OpenAdaptAI/openadapt-flow/pull/418),
+  [`80b33d0`](https://github.com/OpenAdaptAI/openadapt-flow/commit/80b33d0759a5b2dcc65fdc3ebe7039d096551da6))
+
 ### Testing
 
 - Exercise the product release admission gate instead of stubbing it
@@ -138,6 +147,10 @@
 
 - Preserve boolean parameter digest
   ([`035e88e`](https://github.com/OpenAdaptAI/openadapt-flow/commit/035e88eada0147673d9836a557cf3b758dca296a))
+
+- **sanitize**: Pin the approval an approved archive cannot carry
+  ([#418](https://github.com/OpenAdaptAI/openadapt-flow/pull/418),
+  [`80b33d0`](https://github.com/OpenAdaptAI/openadapt-flow/commit/80b33d0759a5b2dcc65fdc3ebe7039d096551da6))
 
 ## v1.33.0 (2026-08-25)
 

@@ -94,14 +94,38 @@ openadapt-flow certify bundle --policy clinical-write
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
-Six substrates sit behind the same `Backend` protocol and the same runtime,
-chosen with `--backend web | windows | macos | linux | rdp | citrix` on
-`record`, `replay`, and `run`. A compiled bundle is bound to the surface it was
-recorded on. Browser has the most evidence behind it today; Windows, macOS,
-Linux, and RDP carry counted 3/3 acceptance runs; Citrix is still waiting on a
-counted ICA/HDX run. The matrix, with the evidence under each cell, is in
-[docs/PRODUCT_STATUS.md](docs/PRODUCT_STATUS.md), and the per-substrate install
-commands are in [docs/SURFACES.md](docs/SURFACES.md).
+A native Windows app works the same way. Capture records the local window;
+an in-guest agent drives it at replay:
+
+```bash
+openadapt-flow record --backend windows --window "Target App" --out rec
+openadapt-flow compile rec --out bundle --name my-task
+openadapt-flow replay bundle --agent-url http://localhost:5001
+```
+
+Citrix and VDI have no DOM and no accessibility tree, so Flow drives one exact
+Workspace window through its pixels and won't send input until the readiness
+text is on screen:
+
+```bash
+openadapt-flow record --backend citrix --window "Citrix Viewer" \
+  --rdp-window "Citrix Viewer" --rdp-window-title "Ward A" \
+  --rdp-readiness-text "Appointments" --out rec
+openadapt-flow compile rec --out bundle --name my-task
+openadapt-flow replay bundle --rdp-window "Citrix Viewer" \
+  --rdp-window-title "Ward A" --rdp-readiness-text "Appointments"
+```
+
+That path is qualified against a no-DOM stand-in, 3 healthy runs and 3 drift
+halts, and the retained artifact records `ica_hdx_accepted=false`, so a live
+ICA/HDX session is something you qualify in your own deployment rather than
+inherit from ours.
+
+macOS, Linux, and network RDP follow the same three commands with their own
+targeting flags: [docs/SURFACES.md](docs/SURFACES.md) has all six, and
+[docs/PRODUCT_STATUS.md](docs/PRODUCT_STATUS.md) has the evidence under each.
+A compiled bundle is bound to the surface it was recorded on, so `--backend` is
+optional on `replay`.
 
 Compiling a bundle is not the same as clearing it to run. `lint` reports what a
 bundle failed to cover and grades each gap. `certify` enforces a policy and
@@ -134,9 +158,9 @@ Structure never skips the identity gate. Rung-by-rung detail:
   vendor gave you no other door.
 - **You'll run it twice.** Recording, compiling, certifying, and writing an
   effect contract costs more than doing it by hand or pointing an agent at it.
-- **You want Citrix today.** The pixel-window backend passes a no-DOM stand-in
-  and 3 drift safe-halts, but the retained record says `ica_hdx_accepted=false`.
-  Live ICA/HDX acceptance is still bound to your exact deployment.
+- **You want a Citrix number you can quote.** The pixel path runs, but its
+  counted evidence is a stand-in, not a live ICA/HDX session. Yours is a
+  qualification exercise, not a lookup.
 - **You want the halt behaviour without doing the work.** Effect verification
   only fires against effects you declared. `scaffold-verifier` drafts a contract
   from a recording's write-shaped steps, and the draft needs a human to edit it.

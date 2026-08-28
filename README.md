@@ -272,9 +272,14 @@ The demo GIF is generated from real run artifacts by
 
 ## License
 
-Package code is [MIT](LICENSE). A Git checkout or a GitHub source archive also
-contains an isolated openIMIS reference environment whose adapted configuration
-files are `AGPL-3.0-only`; the MIT license does not relicense them. Provenance
-and the upstream license are in the repository-only
+OpenAdapt-authored package code is licensed under the [MIT License](LICENSE).
+
+A Git checkout or GitHub-generated source archive also contains an isolated
+openIMIS reference environment with adapted configuration files under
+`AGPL-3.0-only`. The MIT license does not relicense those files. Their exact
+provenance, file-local scope, and complete upstream license are recorded in the
+repository-only
 [third-party notice](https://github.com/OpenAdaptAI/openadapt-flow/blob/main/THIRD_PARTY_NOTICES.md).
-Published wheels and source distributions exclude the openIMIS surface.
+
+Published PyPI wheels and source distributions exclude the openIMIS benchmark
+surface and stay within the declared MIT package boundary.

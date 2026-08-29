@@ -38,10 +38,13 @@ from openadapt_flow.terminal_verification_v2 import (
     RESULT_LOSS_CLOSURE_REQUEST_DOMAIN,
     SIGNATURE_DOMAIN,
     SIGNATURE_DOMAIN_V3,
+    DeliveryAuthoritySigner,
     ProductionAuthorizationEvidenceManifest,
     ProductionDeliveryPermit,
+    ProductionDeliveryPermitArtifact,
     ProductionDeliveryPermitChain,
     ProductionDeliveryPermitPayload,
+    ProductionDeliveryReceiptArtifact,
     ProductionDeliveryReceiptPayload,
     ProductionDeliveryResultLossClosureArtifact,
     ProductionDeliveryResultLossClosurePayload,
@@ -77,6 +80,7 @@ from openadapt_flow.terminal_verification_v2 import (
     verify_production_delivery_result_loss_closure_binding,
     verify_production_terminal_verification,
     verify_production_terminal_verification_v2_signature,
+    verify_production_terminal_verification_v3_signature,
 )
 from tests.test_run_receipt import _report as _production_report
 
@@ -1832,6 +1836,49 @@ def test_delivery_cross_language_vector_is_exact() -> None:
     assert rebuilt == chain
 
 
+def test_delivery_consumer_vector_omits_only_private_signing_material() -> None:
+    producer_path = Path("tests/fixtures/terminal_verification_v2_delivery_vector.json")
+    consumer_path = Path(
+        "tests/fixtures/terminal_verification_v2_delivery_consumer_vector.json"
+    )
+    producer = json.loads(producer_path.read_text(encoding="utf-8"))
+    consumer_raw = consumer_path.read_bytes()
+    consumer = json.loads(consumer_raw)
+
+    assert hashlib.sha256(consumer_raw).hexdigest() == (
+        "f2e32472ad562b5b67d95d3d9cafaf08b4a2adb9fb5ff3cda2813307beb61c96"
+    )
+    assert "private_key_base64" not in consumer
+    assert consumer == {
+        key: value for key, value in producer.items() if key != "private_key_base64"
+    }
+
+    signer = DeliveryAuthoritySigner(
+        key_id=consumer["key_id"],
+        public_key=consumer["public_key_base64"],
+    )
+    permit = ProductionDeliveryPermitArtifact(
+        payload=consumer["permit_payload"],
+        payload_sha256=consumer["permit_payload_sha256"],
+        signer=signer,
+        signature=consumer["permit_signature"],
+    )
+    receipt = ProductionDeliveryReceiptArtifact(
+        payload=consumer["receipt_payload"],
+        payload_sha256=consumer["receipt_payload_sha256"],
+        signer=signer,
+        signature=consumer["receipt_signature"],
+    )
+    assert permit.artifact_sha256() == consumer["permit_artifact_sha256"]
+    assert receipt.artifact_sha256() == consumer["delivery_receipt_artifact_sha256"]
+    entry = ProductionDeliveryPermit.build(permit, receipt)
+    assert entry.permit_artifact_sha256 == consumer["permit_artifact_sha256"]
+    assert (
+        ProductionDeliveryPermitChain.build((entry,)).permit_chain_sha256
+        == consumer["permit_chain_sha256"]
+    )
+
+
 def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
     fixture = json.loads(
         Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json").read_text(
@@ -1895,6 +1942,40 @@ def test_non_success_terminal_cross_language_vectors_are_exact() -> None:
         assert callback.terminal_verification_artifact_sha256 == (
             envelope.artifact_sha256()
         )
+
+
+def test_terminal_consumer_vectors_omit_only_private_signing_material() -> None:
+    producer_path = Path(
+        "tests/fixtures/terminal_verification_v2_terminal_vectors.json"
+    )
+    consumer_path = Path(
+        "tests/fixtures/terminal_verification_v2_terminal_consumer_vectors.json"
+    )
+    producer = json.loads(producer_path.read_text(encoding="utf-8"))
+    consumer_raw = consumer_path.read_bytes()
+    consumer = json.loads(consumer_raw)
+
+    assert hashlib.sha256(consumer_raw).hexdigest() == (
+        "8b84b80705de47e511fcadf1b2d6d15a95615dbbabb247f2eb1ab1d542fc903a"
+    )
+    assert "private_key_base64" not in consumer
+    assert consumer == {
+        key: value for key, value in producer.items() if key != "private_key_base64"
+    }
+    assert b64decode(consumer["signature_domain_base64"], validate=True) == (
+        SIGNATURE_DOMAIN_V3
+    )
+    assert len(b64decode(consumer["public_key_base64"], validate=True)) == 32
+
+    for vector in consumer["vectors"]:
+        raw = b64decode(vector["envelope_canonical_base64"], validate=True)
+        envelope = ProductionTerminalVerificationEnvelope.model_validate_json(raw)
+        assert canonical_json(envelope) == raw
+        assert (
+            verify_production_terminal_verification_v3_signature(envelope)
+            == (vector["terminal_verification_artifact_sha256"])
+        )
+        assert envelope.signature == vector["signature"]
 
 
 def test_flow_v1_34_terminal_verified_golden_is_exact() -> None:

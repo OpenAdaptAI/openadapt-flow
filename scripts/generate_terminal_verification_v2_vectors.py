@@ -35,6 +35,21 @@ from tests.test_terminal_verification_v2 import (
 )
 
 DEFAULT_OUTPUT = Path("tests/fixtures/terminal_verification_v2_terminal_vectors.json")
+DEFAULT_CONSUMER_OUTPUT = Path(
+    "tests/fixtures/terminal_verification_v2_terminal_consumer_vectors.json"
+)
+DELIVERY_INPUT = Path("tests/fixtures/terminal_verification_v2_delivery_vector.json")
+DEFAULT_DELIVERY_CONSUMER_OUTPUT = Path(
+    "tests/fixtures/terminal_verification_v2_delivery_consumer_vector.json"
+)
+
+
+def consumer_fixture(fixture: dict[str, object]) -> dict[str, object]:
+    """Remove producer-only signing material from a cross-language fixture."""
+
+    if "private_key_base64" not in fixture:
+        raise ValueError("producer fixture has no private signing key")
+    return {key: value for key, value in fixture.items() if key != "private_key_base64"}
 
 
 def _vector(name: str) -> dict[str, object]:
@@ -161,9 +176,28 @@ def build_fixture() -> dict[str, object]:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument("--consumer-output", type=Path, default=DEFAULT_CONSUMER_OUTPUT)
+    parser.add_argument("--delivery-input", type=Path, default=DELIVERY_INPUT)
+    parser.add_argument(
+        "--delivery-consumer-output",
+        type=Path,
+        default=DEFAULT_DELIVERY_CONSUMER_OUTPUT,
+    )
     args = parser.parse_args()
+    fixture = build_fixture()
     args.output.write_text(
-        json.dumps(build_fixture(), indent=2, sort_keys=True) + "\n",
+        json.dumps(fixture, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    args.consumer_output.write_text(
+        json.dumps(consumer_fixture(fixture), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    delivery_fixture = json.loads(args.delivery_input.read_text(encoding="utf-8"))
+    if not isinstance(delivery_fixture, dict):
+        raise ValueError("delivery producer fixture is not an object")
+    args.delivery_consumer_output.write_text(
+        json.dumps(consumer_fixture(delivery_fixture), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 

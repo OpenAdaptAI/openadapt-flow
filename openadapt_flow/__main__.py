@@ -5360,8 +5360,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="NAME=PRED[,PRED]",
         help=(
-            "Explicit DAG predecessors for NAME. Omit to run children in "
-            "--child order."
+            "Explicit DAG predecessors for NAME. Omit to run children in --child order."
         ),
     )
     p.add_argument(

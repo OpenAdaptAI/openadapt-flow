@@ -98,15 +98,9 @@ child. Sequence edges follow `--after`, or the order you passed `--child`.
 Handoff edges name the effect-bound parameters they copy. They don't name
 window titles. The parent ends at `End of declared steps`.
 
-```mermaid
-flowchart TD
-  n0(["intake<br/><small>web</small>"])
-  n1(["posting<br/><small>linux</small>"])
-  n2{{"End of declared steps"}}
-  n0 --> n1
-  n1 --> n2
-  n0 -->|patient_id| n1
-```
+![HTML visualizer of a two-child composition: intake (web) hands patient_id to posting (linux), then End of declared steps](showcase-compose/program-graph.png)
+
+Open the same page offline: [showcase-compose/program-graph.html](showcase-compose/program-graph.html).
 
 One backend per child. The graph doesn't switch backends inside a node, and it
 doesn't merge two recordings into one ProgramGraph. Handoffs are verified

@@ -86,6 +86,19 @@ surface if known). Kind is `admitted_capability`. Edges follow the DAG or list
 order. Handoff edges are labelled with the effect-bound param names. The
 terminal title is **End of declared steps**. It is never Success.
 
+This is the graph `visualize --format mermaid` emits for a two-child process
+with a `patient_id` handoff:
+
+```mermaid
+flowchart TD
+  intake["intake<br/>adm 11111111<br/>digest e6ca1c0e<br/>web"]
+  posting["posting<br/>adm 77777777<br/>digest c4d6653e<br/>linux"]
+  end_declared_steps["End of declared steps"]
+  intake --> posting
+  posting --> end_declared_steps
+  intake -.->|patient_id| posting
+```
+
 The HTML is self-contained. The JSON schema is
 `schemas/process-contract-graph-v0.json`. Two capabilities do not get merged
 into one `ProgramGraph`.

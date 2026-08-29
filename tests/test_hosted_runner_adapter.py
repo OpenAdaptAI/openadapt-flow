@@ -2258,6 +2258,54 @@ def test_untrusted_runner_manifest_refuses_before_managed_runner(
     assert calls == 0
 
 
+def test_missing_evidence_runner_key_refuses_before_managed_runner(
+    monkeypatch, tmp_path, config, sealed
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    calls = 0
+
+    def runner(*_args):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("managed runner must not start")
+
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite", runner=runner)
+    local_config = replace(
+        config,
+        host="https://cloud.example",
+        evidence_runner_private_key=None,
+    )
+    monkeypatch.setattr(
+        hosted, "load_runner_config", lambda *_args, **_kwargs: local_config
+    )
+    monkeypatch.setattr(adapter, "_verify_product_release", lambda *_: None)
+    authority = DeliveryAuthority(
+        dispatch.managed_delivery_authority_url,
+        dispatch.delivery_authority_token,
+    )
+
+    result = adapter.execute(
+        dispatch,
+        runner_config=tmp_path / "runner.toml",
+        run_dir=tmp_path / "run",
+        authority=authority,
+    )
+
+    assert result.outcome == "REJECTED_POLICY"
+    assert result.code == "hosted_admission_refused"
+    assert result.detail == "prestart_ValueError"
+    assert result.started is False
+    assert result.uncertain_delivery is False
+    assert calls == 0
+    assert (
+        adapter._ledger.lookup(f"{dispatch.tenant_id}:{dispatch.idempotency_key}")
+        is None
+    )
+    with pytest.raises(ValueError, match="cannot close a proofless"):
+        adapter.callback_request(dispatch, result)
+
+
 @pytest.mark.parametrize(
     "runner_host",
     [

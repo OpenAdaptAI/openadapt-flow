@@ -10,10 +10,11 @@ admission=None`` bind is not this path.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping, Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 from openadapt_flow.admitted_composition import (
     ProcessContract,
@@ -51,7 +52,7 @@ class AdmittedCapability:
 
 
 class AdmittedChildExecutor(Protocol):
-    """Bound child runner. CLI supplies the governed ``run`` path."""
+    """Bound child runner: ExecuteClient on Cloud, governed ``run`` locally."""
 
     def __call__(
         self,
@@ -117,6 +118,163 @@ def execute(
         run_dir=run_dir,
         child=child,
     )
+
+
+_EXECUTE_OUTCOMES = {
+    "verified": "VERIFIED",
+    "halted_before_effect": "HALTED",
+    "reconciliation_required": "HALTED",
+    "rejected_policy": "HALTED",
+    "failed_platform": "FAILED",
+    "rolled_back_verified": "ROLLED_BACK",
+}
+
+
+def _attr(value: object, name: str, default: object = None) -> object:
+    if value is None:
+        return default
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _enum_value(value: object) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").lower()
+
+
+def child_run_via_execute_client(
+    client: Any,
+    *,
+    environment_id: str,
+    actor_id: str,
+    authorization_reference: str | None = None,
+    minimum_effect_strength: str = "independent_system_of_record",
+) -> AdmittedChildExecutor:
+    """Bind process ``execute()`` to Cloud Execute (``POST /v1/executions``).
+
+    Local CLI uses governed ``openadapt-flow run`` instead. This path does not
+    poll forever: one ``get_execution`` after accept. A non-terminal state
+    HALTs. Receipts do not carry effect-bound param values, so a successor
+    handoff still HALTs unless those facts arrive some other confirmed way.
+    """
+
+    def child_run(
+        capability: AdmittedCapability,
+        admission: QualificationAdmissionEnvelope,
+        inputs: Mapping[str, str],
+        *,
+        workflow: Workflow,
+        bundle_dir: Path,
+        run_dir: Path,
+        child: str,
+    ) -> ChildRunResult:
+        del workflow, bundle_dir
+        if capability is None or admission is None:
+            raise ProcessContractError(
+                "process execute requires a real AdmittedCapability and "
+                "QualificationAdmissionEnvelope; compose's None bind is not "
+                "this path"
+            )
+        try:
+            from openadapt_types.execute import (
+                EffectStrengthV1,
+                ExecuteAuthorizationContextV1,
+                ExecuteLifecycleStateV1,
+                ExecuteRequestV1,
+            )
+        except ImportError as exc:
+            raise ProcessContractError(
+                "process Cloud Execute requires openadapt-types "
+                "(install openadapt-flow[interop])"
+            ) from exc
+
+        request = ExecuteRequestV1(
+            qualification_id=capability.admission_id,
+            workflow_version=capability.workflow_version_id,
+            workflow_digest=f"sha256:{capability.bundle_content_digest}",
+            environment_id=environment_id,
+            parameters=dict(inputs),
+            idempotency_key=f"process-{child}-{capability.admission_id}",
+            authorization_context=ExecuteAuthorizationContextV1(
+                actor_id=actor_id,
+                authorization_reference=authorization_reference or f"process-{child}",
+            ),
+            minimum_effect_strength=EffectStrengthV1(minimum_effect_strength),
+        )
+        try:
+            accepted = client.create_execution(request)
+            execution_id = str(_attr(accepted, "execution_id") or "")
+            status = client.get_execution(execution_id)
+        except Exception as exc:
+            return ChildRunResult(
+                child=child,
+                outcome="FAILED",
+                bound_params={str(k): str(v) for k, v in inputs.items()},
+                effect_facts={},
+                success=False,
+                halt_class=type(exc).__name__,
+                report_path=None,
+            )
+
+        state_value = _enum_value(_attr(status, "state"))
+        payload: dict[str, Any] = {
+            "execution_id": execution_id,
+            "state": state_value,
+            "admission_id": capability.admission_id,
+            "workflow_version_id": capability.workflow_version_id,
+            "bundle_content_digest": capability.bundle_content_digest,
+        }
+        report_path = run_dir / "execute-status.json"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        if state_value != ExecuteLifecycleStateV1.TERMINAL.value:
+            payload["reason"] = "Execute did not reach TERMINAL"
+            report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return ChildRunResult(
+                child=child,
+                outcome="HALTED",
+                bound_params={str(k): str(v) for k, v in inputs.items()},
+                effect_facts={},
+                success=False,
+                halt_class="execute_not_terminal",
+                report_path=str(report_path),
+            )
+
+        try:
+            receipt = client.get_receipt(execution_id)
+        except Exception as exc:
+            payload["reason"] = str(type(exc).__name__)
+            report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            return ChildRunResult(
+                child=child,
+                outcome="FAILED",
+                bound_params={str(k): str(v) for k, v in inputs.items()},
+                effect_facts={},
+                success=False,
+                halt_class=type(exc).__name__,
+                report_path=str(report_path),
+            )
+
+        outcome_value = _enum_value(_attr(receipt, "outcome"))
+        outcome = _EXECUTE_OUTCOMES.get(outcome_value, "HALTED")
+        contracts = _attr(receipt, "contracts")
+        model_used = bool(_attr(contracts, "model_used", False))
+        payload["outcome"] = outcome_value
+        payload["model_used"] = model_used
+        report_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return ChildRunResult(
+            child=child,
+            outcome=outcome,
+            bound_params={str(k): str(v) for k, v in inputs.items()},
+            effect_facts={},
+            model_calls=1 if model_used else 0,
+            success=outcome == "VERIFIED",
+            report_path=str(report_path),
+        )
+
+    child_run.execute_via = "execute_client"  # type: ignore[attr-defined]
+    return child_run
 
 
 def _handoffs_into(contract: ProcessContract, child_name: str) -> list[HandoffBinding]:
@@ -450,8 +608,6 @@ def execute_process_contract(
 def _write_parent_report(
     run_dir: Path, report: ProcessReport, contract: ProcessContract
 ) -> None:
-    import json
-
     children_payload = []
     for item in report.children:
         spec = contract.child(item.child)

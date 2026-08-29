@@ -11,12 +11,15 @@ import pytest
 from openadapt_flow.admitted_composition import (
     ProcessContract,
     author_process_contract,
+    resolve_pointer,
 )
 from openadapt_flow.compiler.compose_authoring import author_composition
 from openadapt_flow.composition import HandoffBinding
+from openadapt_flow.ir import Workflow
 from openadapt_flow.qualification_admission import QualificationAdmissionEnvelope
 from openadapt_flow.runtime.admitted_composition import (
     AdmittedCapability,
+    child_run_via_execute_client,
     execute,
     execute_process_contract,
 )
@@ -405,3 +408,150 @@ def test_pointing_runtime_at_compose_recordings_fails_admission(
         now=NOW,
     )
     assert report.outcome == "VERIFIED"
+
+
+def test_digest_mismatch_halts_before_execute(tmp_path: Path) -> None:
+    contract, parent = _author_two(tmp_path)
+    bundle = resolve_pointer(parent, contract.child("intake").bundle)
+    workflow = Workflow.load(bundle)
+    workflow.name = "tampered-intake"
+    workflow.save(bundle)
+
+    def child_run(
+        capability, admission, inputs, *, workflow, bundle_dir, run_dir, child
+    ):
+        raise AssertionError("Execute must not run on a digest mismatch")
+
+    report = execute_process_contract(
+        contract,
+        parent_dir=parent,
+        run_dir=tmp_path / "run",
+        child_run=child_run,
+        trusted_signers=_trust(),
+        now=NOW,
+    )
+    assert report.outcome == "HALTED"
+    assert report.halted_at == "intake"
+    assert "digest" in report.reason
+    assert report.children == []
+
+
+def _fake_execute_client(*, outcome: str = "verified", model_used: bool = False):
+    pytest.importorskip("openadapt_types")
+    from openadapt_types.execute import (
+        EffectStrengthV1,
+        ExecuteAcceptedV1,
+        ExecuteEvidenceContractV1,
+        ExecuteEvidenceReceiptV1,
+        ExecuteLifecycleStateV1,
+        ExecuteStatusV1,
+        ExecuteTerminalOutcomeV1,
+    )
+
+    terminal = ExecuteTerminalOutcomeV1(outcome)
+    passed = terminal is ExecuteTerminalOutcomeV1.VERIFIED
+
+    class FakeExecuteClient:
+        def __init__(self) -> None:
+            self.requests: list[object] = []
+
+        def create_execution(self, request: object) -> object:
+            self.requests.append(request)
+            return ExecuteAcceptedV1(execution_id="exec_intake01")
+
+        def get_execution(self, execution_id: str) -> object:
+            return ExecuteStatusV1(
+                execution_id=execution_id,
+                state=ExecuteLifecycleStateV1.TERMINAL,
+                terminal_outcome=terminal,
+                evidence_receipt_id="receipt_intake01",
+                updated_at="2026-01-15T12:00:00Z",
+            )
+
+        def get_receipt(self, execution_id: str) -> object:
+            digest = "sha256:" + "ab" * 32
+            return ExecuteEvidenceReceiptV1(
+                receipt_id="receipt_intake01",
+                execution_id=execution_id,
+                workflow_digest=digest,
+                outcome=terminal,
+                contracts=ExecuteEvidenceContractV1(
+                    authorization_passed=passed,
+                    identity_passed=passed,
+                    postcondition_passed=passed,
+                    effect_passed=passed,
+                    minimum_effect_strength=(
+                        EffectStrengthV1.INDEPENDENT_SYSTEM_OF_RECORD
+                    ),
+                    observed_effect_strength=(
+                        EffectStrengthV1.INDEPENDENT_SYSTEM_OF_RECORD
+                        if passed
+                        else None
+                    ),
+                    model_used=model_used,
+                    external_network_used=False,
+                ),
+                delivery_uncertain=False,
+                evidence_digest=digest,
+                issued_at="2026-01-15T12:00:01Z",
+            )
+
+    return FakeExecuteClient()
+
+
+def test_process_children_hit_execute_client_with_real_admission(
+    tmp_path: Path,
+) -> None:
+    contract, parent = _author_two(tmp_path)
+    client = _fake_execute_client()
+    child_run = child_run_via_execute_client(
+        client,
+        environment_id="environment_12345678",
+        actor_id="caller_agent_12345678",
+    )
+    report = execute_process_contract(
+        contract,
+        parent_dir=parent,
+        run_dir=tmp_path / "run",
+        child_run=child_run,
+        trusted_signers=_trust(),
+        now=NOW,
+        inputs={"note": "triage"},
+    )
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.qualification_id == INTAKE_ADMISSION
+    assert request.workflow_version == contract.child("intake").workflow_version_id
+    assert request.workflow_digest.startswith("sha256:")
+    assert report.children[0].outcome == "VERIFIED"
+    assert report.halted_at == "posting"
+    assert "missing handoff evidence" in report.reason
+
+
+def test_execute_client_model_call_forbids_parent_verified(
+    tmp_path: Path,
+) -> None:
+    intake, intake_env, posting, posting_env = _two_admitted(tmp_path)
+    out = tmp_path / "process"
+    contract = author_process_contract(
+        [
+            ("intake", intake_env, intake),
+            ("posting", posting_env, posting),
+        ],
+        out=out,
+    )
+    client = _fake_execute_client(model_used=True)
+    report = execute_process_contract(
+        contract,
+        parent_dir=out,
+        run_dir=tmp_path / "run",
+        child_run=child_run_via_execute_client(
+            client,
+            environment_id="environment_12345678",
+            actor_id="caller_agent_12345678",
+        ),
+        trusted_signers=_trust(),
+        now=NOW,
+    )
+    assert report.model_calls >= 1
+    assert report.outcome != "VERIFIED"

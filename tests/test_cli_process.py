@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 from openadapt_flow.__main__ import build_parser, main
 from openadapt_flow.admitted_composition import is_process_contract_artifact
+from openadapt_flow.cli_process import bind_process_child_run
 from tests.test_admitted_composition_authoring import _two_admitted
 
 
@@ -99,3 +102,23 @@ def test_replay_refuses_process(tmp_path: Path) -> None:
     assert rc == 0
     with pytest.raises(SystemExit, match="replay refuses a process contract"):
         main(["replay", str(out), "--url", "http://example.invalid"])
+
+
+def test_process_run_defaults_to_governed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENADAPT_EXECUTE_URL", raising=False)
+    monkeypatch.delenv("OPENADAPT_EXECUTE_TOKEN", raising=False)
+    run_child = MagicMock(return_value=0)
+    bound = bind_process_child_run(argparse.Namespace(), run_child)
+    assert getattr(bound, "execute_via") == "governed_run"
+
+
+def test_process_run_binds_execute_client_when_cloud_creds_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("openadapt_types")
+    monkeypatch.setenv("OPENADAPT_EXECUTE_URL", "https://app.openadapt.ai/api")
+    monkeypatch.setenv("OPENADAPT_EXECUTE_TOKEN", "partner-token")
+    monkeypatch.setenv("OPENADAPT_EXECUTE_ENVIRONMENT_ID", "environment_12345678")
+    run_child = MagicMock(return_value=0)
+    bound = bind_process_child_run(argparse.Namespace(), run_child)
+    assert getattr(bound, "execute_via") == "execute_client"

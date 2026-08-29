@@ -5699,6 +5699,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--managed-dispatch-file", default=None, help=argparse.SUPPRESS)
     p.add_argument(
+        "--qualification-trust",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Qualification signer trust registry for a process-contract parent. "
+            "Also OPENADAPT_QUALIFICATION_TRUST or qualification-trust.json "
+            "beside process-contract.json"
+        ),
+    )
+    p.add_argument(
+        "--execute-url",
+        default=None,
+        metavar="URL",
+        help=(
+            "HTTPS Execute v1 base URL for process children "
+            "(OPENADAPT_EXECUTE_URL). Local process run uses governed run "
+            "unless this and a bearer token are set"
+        ),
+    )
+    p.add_argument(
+        "--execute-token",
+        default=None,
+        metavar="TOKEN",
+        help=argparse.SUPPRESS,
+    )
+    p.add_argument(
+        "--execute-environment-id",
+        default=None,
+        metavar="ID",
+        help=(
+            "Execute environment_id for process children "
+            "(OPENADAPT_EXECUTE_ENVIRONMENT_ID)"
+        ),
+    )
+    p.add_argument(
         "--qualification-authority-file",
         default=None,
         metavar="PATH",

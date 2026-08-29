@@ -28,7 +28,7 @@ from openadapt_flow.admitted_composition import (
 PROCESS_GRAPH_SPEC_VERSION: Literal["openadapt.process-contract-graph/v0"] = (
     "openadapt.process-contract-graph/v0"
 )
-END_OF_DECLARED_STEPS = "End of declared steps"
+END_OF_DECLARED_STEPS: Literal["End of declared steps"] = "End of declared steps"
 TERMINAL_ID = "end_declared_steps"
 
 

@@ -63,8 +63,11 @@ openadapt-flow run process --config deploy.yaml
 ```
 
 `run` verifies each child's envelope against the live run (signature, validity
-window, revocation, every digest in the payload) and then calls Execute. That's
-governed `run`, not raw `replay`.
+window, revocation, every digest in the payload) and then calls Execute. Cloud
+uses `openadapt_types.execute_client.ExecuteClient` (`POST /v1/executions`) when
+`OPENADAPT_EXECUTE_URL` and `OPENADAPT_EXECUTE_TOKEN` are set. Locally that is
+the governed `openadapt-flow run` path with the real admission objects. Raw
+`replay` is not the public primitive.
 
 `openadapt-flow replay process` refuses. Replay of a process parent is not a
 supported path.

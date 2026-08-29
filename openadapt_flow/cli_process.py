@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import os
 from datetime import datetime, timezone
@@ -23,12 +24,14 @@ from openadapt_flow.qualification_admission import (
 )
 from openadapt_flow.runtime.admitted_composition import (
     AdmittedCapability,
+    AdmittedChildExecutor,
+    child_run_via_execute_client,
     execute_process_contract,
 )
 from openadapt_flow.runtime.composition import ChildRunResult
 
 
-def _load_trust(parent: Path, args: object) -> dict:
+def _load_trust(parent: Path, args: argparse.Namespace) -> dict:
     explicit = getattr(args, "qualification_trust", None)
     env = os.environ.get("OPENADAPT_QUALIFICATION_TRUST")
     sibling = parent / "qualification-trust.json"
@@ -54,7 +57,7 @@ def _load_trust(parent: Path, args: object) -> dict:
         ) from exc
 
 
-def cmd_process(args: object) -> int:
+def cmd_process(args: argparse.Namespace) -> int:
     children_raw = list(getattr(args, "child", None) or [])
     admissions_raw = list(getattr(args, "admission", None) or [])
     if len(children_raw) < 2:
@@ -117,7 +120,7 @@ def cmd_process(args: object) -> int:
     return 0
 
 
-def cmd_certify_process(args: object) -> int:
+def cmd_certify_process(args: argparse.Namespace) -> int:
     from openadapt_flow.policy import evaluate_policy, load_policy
 
     parent = Path(args.bundle)
@@ -175,7 +178,9 @@ def cmd_certify_process(args: object) -> int:
     return 2
 
 
-def _governed_child_run(parent_args: object, run_child):
+def _governed_child_run(
+    parent_args: argparse.Namespace, run_child
+) -> AdmittedChildExecutor:
     """Bind process execute() to governed run (not raw replay)."""
 
     def child_run(
@@ -244,10 +249,54 @@ def _governed_child_run(parent_args: object, run_child):
             report_path=str(report_path) if report_path.is_file() else None,
         )
 
+    child_run.execute_via = "governed_run"  # type: ignore[attr-defined]
     return child_run
 
 
-def cmd_run_process(args: object, *, run_child) -> int:
+def _execute_env(args: argparse.Namespace, name: str) -> str:
+    attr = name.lower()
+    explicit = getattr(args, attr, None)
+    if explicit:
+        return str(explicit)
+    return os.environ.get(f"OPENADAPT_{name}", "") or ""
+
+
+def bind_process_child_run(
+    args: argparse.Namespace, run_child
+) -> AdmittedChildExecutor:
+    """Cloud ExecuteClient when provisioned; otherwise governed local run."""
+
+    execute_url = _execute_env(args, "EXECUTE_URL")
+    execute_token = _execute_env(args, "EXECUTE_TOKEN")
+    if execute_url or execute_token:
+        if not execute_url or not execute_token:
+            raise SystemExit(
+                "process Cloud Execute needs both OPENADAPT_EXECUTE_URL "
+                "(or --execute-url) and OPENADAPT_EXECUTE_TOKEN"
+            )
+        environment_id = _execute_env(args, "EXECUTE_ENVIRONMENT_ID")
+        if not environment_id:
+            raise SystemExit(
+                "process Cloud Execute needs OPENADAPT_EXECUTE_ENVIRONMENT_ID "
+                "(or --execute-environment-id)"
+            )
+        try:
+            from openadapt_types.execute_client import ExecuteClient
+        except ImportError as exc:
+            raise SystemExit(
+                "process Cloud Execute requires openadapt-types "
+                "(install openadapt-flow[interop])"
+            ) from exc
+        actor_id = _execute_env(args, "EXECUTE_ACTOR_ID") or "process-parent"
+        return child_run_via_execute_client(
+            ExecuteClient(execute_url, execute_token),
+            environment_id=environment_id,
+            actor_id=actor_id,
+        )
+    return _governed_child_run(args, run_child)
+
+
+def cmd_run_process(args: argparse.Namespace, *, run_child) -> int:
     parent = Path(args.bundle)
     contract = ProcessContract.load(parent)
     run_dir = (
@@ -267,7 +316,7 @@ def cmd_run_process(args: object, *, run_child) -> int:
         parent_dir=parent,
         run_dir=run_dir,
         inputs={str(k): str(v) for k, v in inputs.items()},
-        child_run=_governed_child_run(args, run_child),
+        child_run=bind_process_child_run(args, run_child),
         trusted_signers=_load_trust(parent, args),
         revoked_admission_ids=revoked,
         now=datetime.now(timezone.utc),

@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Literal, Optional, Sequence
 
 from openadapt_flow.compiler.effect_mining import (
     SOR_AFTER_KEY,
@@ -73,7 +73,7 @@ API_WRITE_KEY = "api_write"
 _BODY_SKIP_FIELDS = SURROGATE_ID_FIELDS | frozenset({"source"})
 
 #: The only ``ApiBinding.kind`` this module will propose or admit.
-_REST_KIND = "rest"
+_REST_KIND: Literal["rest"] = "rest"
 
 #: Kinds the IR permits but this MVP will not synthesize.
 _REFUSED_KINDS = frozenset({"fhir", "mcp", "tool"})

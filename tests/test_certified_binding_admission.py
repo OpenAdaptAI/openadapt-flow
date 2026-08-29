@@ -14,6 +14,9 @@ No model calls. Live-local tests use the in-process MockMed fault server.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 from openadapt_flow.compiler.binding_admission import (
     API_WRITE_KEY,
     AdmissionFixture,
@@ -22,6 +25,7 @@ from openadapt_flow.compiler.binding_admission import (
     certify_workflow_rest_bindings,
     propose_rest_binding,
 )
+from openadapt_flow.compiler.compile import compile_recording
 from openadapt_flow.compiler.effect_mining import SOR_AFTER_KEY, SOR_BEFORE_KEY
 from openadapt_flow.ir import (
     ActionKind,
@@ -344,3 +348,89 @@ def test_admit_requires_actuated_then_confirmed():
         assert db.snapshot()["records"] == []
     finally:
         stop()
+
+
+# -- compile_recording wiring -----------------------------------------------
+
+
+def _write_recording(tmp_path: Path, *, sor_after: list[dict]) -> Path:
+    rec = tmp_path / "recording"
+    (rec / "frames").mkdir(parents=True)
+    events = [
+        {"i": 0, "kind": "type", "text": NOTE, "param": "note", "t": 1.0},
+        {
+            "i": 1,
+            "kind": "key",
+            "key": "Enter",
+            "t": 2.0,
+            SOR_BEFORE_KEY: [],
+            SOR_AFTER_KEY: sor_after,
+        },
+    ]
+    (rec / "events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in events) + "\n"
+    )
+    (rec / "meta.json").write_text(
+        json.dumps(
+            {
+                "id": "rec-certified-001",
+                "created_at": "2026-08-28T00:00:00+00:00",
+                "viewport": [1280, 800],
+                "params": {"note": NOTE},
+            }
+        )
+    )
+    return rec
+
+
+def test_compile_admits_rest_binding_on_held_out_fixture(tmp_path):
+    url, db, stop = _fault_server()
+    try:
+        rec = _write_recording(tmp_path, sor_after=[_demo_record()])
+        workflow = compile_recording(
+            rec,
+            tmp_path / "bundle",
+            name="certified-demo",
+            risk_overrides={"step_001": "irreversible"},
+            admit_api_bindings=True,
+            admission_fixture_url=url,
+            skill_library_root=tmp_path / "skills",
+        )
+        save = workflow.steps[1]
+        assert save.api_binding is not None
+        assert save.api_binding.kind == "rest"
+        assert save.api_binding.method == "POST"
+        assert save.api_binding.url_template == "/api/encounter"
+        assert save.api_binding.on_unavailable == "gui"
+        assert save.effects
+        assert workflow.steps[0].api_binding is None
+        skill = SkillLibrary(tmp_path / "skills").get("certified-demo")
+        active = skill.active()
+        assert active is not None
+        assert "certified REST" in active.provenance.note
+        assert db.snapshot()["records"]
+    finally:
+        stop()
+
+
+def test_compile_default_off_leaves_gui_ladder(tmp_path):
+    rec = _write_recording(tmp_path, sor_after=[_demo_record()])
+    workflow = compile_recording(
+        rec,
+        tmp_path / "bundle",
+        name="certified-demo",
+        risk_overrides={"step_001": "irreversible"},
+    )
+    assert all(step.api_binding is None for step in workflow.steps)
+
+
+def test_compile_missing_fixture_url_leaves_gui_ladder(tmp_path):
+    rec = _write_recording(tmp_path, sor_after=[_demo_record()])
+    workflow = compile_recording(
+        rec,
+        tmp_path / "bundle",
+        name="certified-demo",
+        risk_overrides={"step_001": "irreversible"},
+        admit_api_bindings=True,
+    )
+    assert all(step.api_binding is None for step in workflow.steps)

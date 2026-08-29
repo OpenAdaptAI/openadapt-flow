@@ -10,8 +10,18 @@ from openadapt_flow.compiler.annotate import (
     apply_annotations,
     slugify_label,
 )
+from openadapt_flow.compiler.binding_admission import (
+    AdmissionDecision,
+    AdmissionFixture,
+    RestWriteProposal,
+    admit_rest_binding,
+    certify_step_rest_binding,
+    certify_workflow_rest_bindings,
+    propose_rest_binding,
+)
 from openadapt_flow.compiler.codegen import render_workflow_py
 from openadapt_flow.compiler.compile import compile_recording, lint_param_leakage
+from openadapt_flow.compiler.compose_authoring import author_composition
 from openadapt_flow.compiler.effect_mining import (
     StepEffectMining,
     mine_step_effects,
@@ -47,6 +57,13 @@ __all__ = [
     "render_workflow_py",
     "mine_step_effects",
     "StepEffectMining",
+    "propose_rest_binding",
+    "admit_rest_binding",
+    "certify_step_rest_binding",
+    "certify_workflow_rest_bindings",
+    "AdmissionFixture",
+    "AdmissionDecision",
+    "RestWriteProposal",
     # Multi-trace induction (RFC §3 [4]+[5]): one demo is the single-trace
     # bootstrap; multiple demos induce a parameterized program or refuse.
     "induce_program",
@@ -61,6 +78,7 @@ __all__ = [
     "resolve_column_map",
     "body_param_names",
     "LoopAuthoringError",
+    "author_composition",
     "InductionResult",
     "HeldOutValidation",
     "Proposer",

@@ -104,13 +104,28 @@ Start with a local browser rehearsal:
 ```bash
 openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
+openadapt-flow qualify propose bundle --recording rec --out proposal.json
+openadapt-flow qualify accept bundle --proposal proposal.json
 openadapt-flow lint bundle --strict
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
 
+Demo once, get a checked program. `qualify propose` fills the production-shaped
+pins from the recording: application identity, environment fingerprint,
+identity-gate fields, and the effect oracle from the write the demo actually
+observed. `qualify accept` confirms every pin in one command. If a pin isn't
+there, Flow HALTs. It will not guess.
+
+`--policy-pack community` is the local/MockMed pack. `cloud` and `regulated`
+bind the stricter shipped policy. They do not skip a pin. On MockMed, add
+`--admit-local` to mint a signed local admission. That test key cannot enter a
+production trust map. The pin list and the failure matrix (`--break-it`, plus
+identity-swap or extra-field when the demo has parameters) are in
+[`docs/QUALIFICATION_PROJECT.md`](docs/QUALIFICATION_PROJECT.md).
+
 `replay` is the permissive rehearsal path. It stays available while a bundle has
-certification gaps. For governed execution, complete the deployment's identity,
-effect, idempotency, and postcondition contracts, then use the gated path:
+certification gaps. For governed execution, complete the remaining idempotency
+and postcondition contracts, then use the gated path:
 
 ```bash
 openadapt-flow certify bundle --config deploy.yaml

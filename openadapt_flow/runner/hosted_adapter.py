@@ -845,6 +845,13 @@ class HostedRunResult(_Closed):
 
 
 class HostedDispatchRefusal(_Closed):
+    """Local pre-actuation refusal that must not close a v2 Cloud lease.
+
+    The v2 callback accepts only signed governed outcomes. A refusal has no
+    terminal proof, so the caller must retain it locally and let Cloud move the
+    started lease to reconciliation instead of sending a proofless terminal.
+    """
+
     kind: Literal["refusal"] = "refusal"
     dispatch_id: str | None = None
     run_id: str | None = None
@@ -880,14 +887,29 @@ class _CallbackRequestCommon(_Closed):
         }.get(callback_schema)
         if expected_terminal_schema is None:
             raise ValueError("callback schema is unsupported")
+        supported_terminal_schemas = {
+            "openadapt.hosted-runner-terminal/v1",
+            "openadapt.hosted-runner-terminal/v2",
+        }
         terminal_indices = tuple(
             index
             for index, event in enumerate(self.events)
-            if event.get("schema_version") == expected_terminal_schema
+            if event.get("schema_version") in supported_terminal_schemas
         )
         if terminal_indices != (len(self.events) - 1,):
             raise ValueError("callback must end in exactly one terminal event")
+        if self.events[-1].get("schema_version") != expected_terminal_schema:
+            raise ValueError("callback terminal schema does not match its version")
         terminal = parse_hosted_terminal_event(self.events[-1])
+        if callback_schema == "openadapt.hosted-runner-callback/v2" and (
+            terminal.outcome
+            not in {
+                "VERIFIED",
+                "HALTED_BEFORE_EFFECT",
+                "RECONCILIATION_REQUIRED",
+            }
+        ):
+            raise ValueError("callback v2 requires a signed governed terminal proof")
         summaries = tuple(
             event for event in self.events[:-1] if event.get("kind") == "run_summary"
         )
@@ -3329,6 +3351,8 @@ class HostedRunnerAdapter:
         ),
         result: HostedRunResult | HostedDispatchRefusal,
     ) -> CallbackRequestWire:
+        """Build one closing callback, or refuse a proofless v2 closure."""
+
         if isinstance(dispatch, (HostedDispatchV1, HostedDispatchV2)):
             binding: HostedDispatchWire | HostedRecoveryBindingWire = dispatch
         elif isinstance(dispatch, (HostedRecoveryBindingV1, HostedRecoveryBindingV2)):
@@ -3343,6 +3367,12 @@ class HostedRunnerAdapter:
                 binding = parse_hosted_dispatch(dispatch)
         if result.dispatch_id != binding.dispatch_id or result.run_id != binding.run_id:
             raise ValueError("hosted result does not bind the callback lease")
+        if isinstance(
+            binding, (HostedDispatchV2, HostedRecoveryBindingV2)
+        ) and isinstance(result, HostedDispatchRefusal):
+            raise ValueError(
+                "callback v2 cannot close a proofless pre-actuation refusal"
+            )
         events = list(result.evidence_batch)
         proof_base64 = None
         proof_digest = None

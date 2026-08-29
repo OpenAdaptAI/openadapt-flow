@@ -515,7 +515,7 @@ def test_hosted_dispatch_v1_34_shape_parses_and_builds_v1_callback(
     }
 
 
-def test_hosted_dispatch_v2_recovery_and_callback_bind_prefixed_flow_digest(
+def test_hosted_dispatch_v2_recovery_binds_flow_digest_and_refusal_is_non_closing(
     tmp_path, sealed
 ) -> None:
     workflow, _ = sealed
@@ -523,7 +523,6 @@ def test_hosted_dispatch_v2_recovery_and_callback_bind_prefixed_flow_digest(
     adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
     binding = adapter.recovery_binding(dispatch)
     refusal = adapter._refusal(dispatch, "hosted_admission_refused", "refused")
-    callback = adapter.callback_request(binding.model_dump(mode="python"), refusal)
 
     dispatch_fields = set(dispatch.model_dump(mode="json"))
     assert dispatch_fields == {
@@ -566,16 +565,12 @@ def test_hosted_dispatch_v2_recovery_and_callback_bind_prefixed_flow_digest(
         "bundle_content_digest",
         "authorization_id",
     }
-    assert isinstance(callback, CallbackRequestV2)
-    assert callback.flow_release_verification_receipt_object_sha256 == (
+    assert binding.flow_release_verification_receipt_object_sha256 == (
         dispatch.flow_release_verification_receipt.artifact_sha256
     )
-    assert callback.flow_release_verification_receipt_object_sha256.startswith(
-        "sha256:"
-    )
-    assert callback.events[-1]["schema_version"] == (
-        "openadapt.hosted-runner-terminal/v2"
-    )
+    assert binding.flow_release_verification_receipt_object_sha256.startswith("sha256:")
+    with pytest.raises(ValueError, match="cannot close a proofless"):
+        adapter.callback_request(binding.model_dump(mode="python"), refusal)
 
 
 def test_hosted_dispatch_accepts_lowercase_v8_run_id(sealed) -> None:
@@ -2207,6 +2202,12 @@ def test_params_reference_digest_mismatch_refuses_before_managed_runner(
     assert result.started is False
     assert result.uncertain_delivery is False
     assert calls == 0
+    assert (
+        adapter._ledger.lookup(f"{dispatch.tenant_id}:{dispatch.idempotency_key}")
+        is None
+    )
+    with pytest.raises(ValueError, match="cannot close a proofless"):
+        adapter.callback_request(dispatch, result)
 
 
 @pytest.mark.parametrize("manifest_kind", ["missing", "malformed", "public", "symlink"])
@@ -2361,23 +2362,59 @@ def test_protected_profile_mutation_refuses_before_managed_runner(
     assert calls == 0
 
 
-def test_parsed_refusal_callback_contains_closed_terminal(tmp_path, sealed) -> None:
+def test_v2_refusal_cannot_form_a_closing_callback(tmp_path, sealed) -> None:
     workflow, _ = sealed
     dispatch = _hosted_dispatch(workflow)
     adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
     refusal = adapter._refusal(dispatch, "hosted_admission_refused", "refused")
 
-    callback = adapter.callback_request(dispatch, refusal)
-
-    terminal = callback.events[-1]
-    assert callback.schema_version == "openadapt.hosted-runner-callback/v2"
-    assert terminal["schema_version"] == "openadapt.hosted-runner-terminal/v2"
-    assert terminal["outcome"] == "REJECTED_POLICY"
-    assert terminal["started"] is False
-    assert terminal["uncertain_delivery"] is False
+    with pytest.raises(ValueError, match="cannot close a proofless"):
+        adapter.callback_request(dispatch, refusal)
+    with pytest.raises(ValueError, match="cannot close a proofless"):
+        adapter.callback_request(adapter.recovery_binding(dispatch), refusal)
 
 
-def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) -> None:
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "FAILED_PLATFORM",
+        "CANCELED",
+        "REJECTED_POLICY",
+        "COMPLETED_UNVERIFIED",
+        "ROLLED_BACK",
+    ],
+)
+def test_callback_v2_rejects_every_proofless_non_governed_terminal(
+    tmp_path, sealed, outcome
+) -> None:
+    workflow, _ = sealed
+    dispatch = _hosted_dispatch(workflow)
+    adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
+    refusal = adapter._refusal(dispatch, "hosted_admission_refused", "refused")
+    terminal = HostedTerminalEventV2(
+        run_id=dispatch.run_id,
+        outcome=outcome,
+        report_sha256=refusal.report_sha256,
+        started=False,
+        uncertain_delivery=False,
+    )
+    with pytest.raises(ValidationError, match="requires a signed governed terminal"):
+        CallbackRequestV2(
+            dispatch_id=dispatch.dispatch_id,
+            runner_session_id=dispatch.runner_session_id,
+            idempotency_key=dispatch.idempotency_key,
+            lease_token=dispatch.lease_token,
+            flow_release_verification_receipt_object_sha256=(
+                dispatch.flow_release_verification_receipt.artifact_sha256
+            ),
+            workflow_admission_sha256=dispatch.workflow_admission.artifact_sha256,
+            events=refusal.evidence_batch + (terminal.model_dump(mode="json"),),
+        )
+
+
+def test_recovery_callback_retains_v2_envelope_and_rejects_embedded_v1_terminal(
+    tmp_path, sealed
+) -> None:
     workflow, _ = sealed
     dispatch = _hosted_dispatch(workflow)
     adapter = HostedRunnerAdapter(tmp_path / "ledger.sqlite")
@@ -2427,6 +2464,25 @@ def test_recovery_callback_retains_exact_terminal_v2_envelope(tmp_path, sealed) 
     assert callback.flow_release_verification_receipt_object_sha256 == (
         dispatch.flow_release_verification_receipt.artifact_sha256
     )
+
+    mixed = callback.model_dump(mode="python")
+    mixed_events = list(mixed["events"])
+    mixed_events.insert(
+        -1,
+        {
+            "schema_version": "openadapt.hosted-runner-terminal/v1",
+            "run_id": binding.run_id,
+            "outcome": "REJECTED_POLICY",
+            "report_sha256": proof.payload.run_report_sha256,
+            "started": False,
+            "uncertain_delivery": False,
+            "terminal_verification_artifact_bytes_base64": None,
+            "terminal_verification_artifact_sha256": None,
+        },
+    )
+    mixed["events"] = tuple(mixed_events)
+    with pytest.raises(ValidationError, match="exactly one terminal"):
+        CallbackRequestV2.model_validate(mixed)
 
 
 @pytest.mark.parametrize(
@@ -2487,6 +2543,15 @@ def test_recovery_callback_retains_signed_non_success_terminal_v2(
     assert terminal.uncertain_delivery is uncertain_delivery
     assert terminal.terminal_verification_artifact_bytes_base64 is not None
     assert terminal.terminal_verification_artifact_sha256 == proof.artifact_sha256()
+    if outcome is TransactionOutcome.HALTED_BEFORE_EFFECT:
+        assert proof.payload.permit_count == 0
+        assert proof.payload.acknowledged_permit_count == 0
+        assert proof.payload.pending_permit_count == 0
+        assert proof.payload.permit_chain.entries == ()
+        assert all(
+            record.absence_basis in {"not_actuated", "verifier_refuted"}
+            for record in proof.payload.evidence_manifests.effect.records
+        )
 
 
 def test_safe_halt_callback_requires_signed_terminal_proof() -> None:

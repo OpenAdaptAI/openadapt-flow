@@ -102,9 +102,7 @@ def test_live_admission_is_reported_not_minted() -> None:
     assert report["pack"]["note"].startswith("This CLI reports")
 
 
-def test_cli_status_on_empty_ledger_exits_1_with_check(
-    tmp_path: Path, capsys
-) -> None:
+def test_cli_status_on_empty_ledger_exits_1_with_check(tmp_path: Path, capsys) -> None:
     path = _write(tmp_path, _ledger({}))
     code = main(["admit", "status", "--ledger", str(path), "--check"])
     captured = capsys.readouterr()
@@ -114,9 +112,7 @@ def test_cli_status_on_empty_ledger_exits_1_with_check(
     assert "does not mint" in captured.out
 
 
-def test_cli_status_json_does_not_invent_an_admission(
-    tmp_path: Path, capsys
-) -> None:
+def test_cli_status_json_does_not_invent_an_admission(tmp_path: Path, capsys) -> None:
     path = _write(tmp_path, _ledger({}))
     code = main(["admit", "status", "--ledger", str(path), "--json"])
     captured = capsys.readouterr()

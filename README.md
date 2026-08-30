@@ -8,9 +8,11 @@
 Record yourself doing a task in a browser or a desktop app. openadapt-flow
 compiles the recording into a script that runs on your machine. The default
 healthy path makes no generative-model API call. Before a governed run reports
-`VERIFIED`, Flow checks every declared effect at the required evidence tier.
-The screen says saved, the configured verifier finds no declared effect, and
-the run stops.
+`VERIFIED`, Flow confirms every declared effect through an independent
+system-of-record read. A pixel-only Citrix path with no such read cannot be
+`VERIFIED`: the run halts, or it ends `RECONCILIATION_REQUIRED`. The screen
+says saved, the configured verifier finds no declared effect, and the run
+stops.
 
 It's for work you do the same way every week and have to be able to prove
 afterwards: claims entry, referrals, eligibility checks, invoice posting. If
@@ -155,7 +157,10 @@ openadapt-flow replay bundle --rdp-window "Citrix Viewer" \
 That path is qualified against a no-DOM stand-in, 3 healthy runs and 3 drift
 halts, and the retained artifact records `ica_hdx_accepted=false`, so a live
 ICA/HDX session is something you qualify in your own deployment rather than
-inherit from ours.
+inherit from ours. Pixels plus a green banner are not a system-of-record
+read. Without REST, FHIR, SQL, a file oracle, or a separately authenticated
+session, Standard and Regulated cannot report `VERIFIED`; they halt or return
+`RECONCILIATION_REQUIRED`. See [docs/LIMITS.md](docs/LIMITS.md).
 
 macOS, Linux, network RDP, and Windows-hosted Citrix have different target
 flags. Some apply only to `replay` or `run` because Capture can't use them.
@@ -216,6 +221,28 @@ Compose will not retarget one recording onto a second backend. Program authors
 can bind individual steps to different HTTP systems, but that is API actuation
 rather than recorded GUI backend switching. If you installed the OpenAdapt
 launcher, `openadapt flow compose` is the same command.
+
+A process contract is a later layer. Each child already has its own signed
+qualification admission (`openadapt.qualification-admission/v1`). The parent
+names those admissions, the order or DAG, and which confirmed effect-bound
+facts may copy as handoffs:
+
+```bash
+openadapt-flow process \
+  --child intake=./intake-bundle \
+  --admission intake=./intake-admission.json \
+  --child posting=./posting-bundle \
+  --admission posting=./posting-admission.json \
+  --handoff intake.patient_id=posting.patient_id \
+  --out process
+openadapt-flow certify process --policy clinical-write
+openadapt-flow run process --config deploy.yaml
+```
+
+`openadapt-flow replay process` refuses; governed `run` is the path, same as
+compose. `openadapt flow process` is the launcher form. Compose still sequences
+recordings. Don't wrap a `composition.json` and call it admitted. Operator
+detail lives in [docs/PROCESS_CONTRACT.md](docs/PROCESS_CONTRACT.md).
 
 ## How a step finds its target
 

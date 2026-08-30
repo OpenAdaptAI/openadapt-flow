@@ -42,7 +42,9 @@ LOCAL_DEV_PUBLIC_BYTES: Final[bytes] = LOCAL_DEV_PRIVATE_KEY.public_key().public
 )
 LOCAL_DEV_PUBLIC_KEY_B64: Final[str] = b64encode(LOCAL_DEV_PUBLIC_BYTES).decode("ascii")
 LOCAL_DEV_KEY_ID: Final[str] = qualification_signer_key_id(LOCAL_DEV_PUBLIC_BYTES)
-LOCAL_DEV_ISSUER_WORKFLOW: Final[str] = "openadapt-flow/local-dev-admission"
+LOCAL_DEV_ISSUER_WORKFLOW: Final[Literal["openadapt-flow/local-dev-admission"]] = (
+    "openadapt-flow/local-dev-admission"
+)
 LOCAL_DEV_REF_PREFIX: Final[str] = "local-dev@"
 LOCAL_DEV_PURPOSE: Final[Literal["local-dev"]] = "local-dev"
 PRODUCTION_ISSUER_WORKFLOW: Final[str] = (

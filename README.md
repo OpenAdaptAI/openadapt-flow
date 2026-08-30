@@ -125,6 +125,14 @@ production trust map. The pin list and the failure matrix (`--break-it`, plus
 identity-swap or extra-field when the demo has parameters) are in
 [`docs/QUALIFICATION_PROJECT.md`](docs/QUALIFICATION_PROJECT.md).
 
+To generalize a task from several recordings, induce a program:
+
+```bash
+openadapt-flow induce rec1 rec2 --out program
+```
+
+`induce` emits a program when the traces agree, and a `record-next:` worklist of missing demonstrations when a consequential branch or loop stays underdetermined. The healthy replay path still makes no model call.
+
 `replay` is the permissive rehearsal path. It stays available while a bundle has
 certification gaps. For governed execution, complete the remaining idempotency
 and postcondition contracts, then use the gated path:

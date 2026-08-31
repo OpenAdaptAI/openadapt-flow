@@ -421,7 +421,7 @@ def cmd_run_process(args: argparse.Namespace, *, run_child) -> int:
                 f"{run_dir / 'human' / str(result.state.waiting_child)}"
             )
             return 3
-        print(f"Process {str(result.state.outcome).upper()}: " f"{result.state_path}")
+        print(f"Process {str(result.state.outcome).upper()}: {result.state_path}")
         if result.receipt_path is not None:
             print(f"Process receipt: {result.receipt_path}")
         return 0 if result.state.outcome == "verified" else 1

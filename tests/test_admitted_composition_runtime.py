@@ -393,14 +393,7 @@ def test_pointing_runtime_at_compose_recordings_fails_admission(
         contract,
         parent_dir=parent,
         run_dir=tmp_path / "run-ok",
-        child_run=lambda capability,
-        admission,
-        inputs,
-        *,
-        workflow,
-        bundle_dir,
-        run_dir,
-        child: (
+        child_run=lambda capability, admission, inputs, *, workflow, bundle_dir, run_dir, child: (
             ChildRunResult(
                 child=child,
                 outcome="VERIFIED",

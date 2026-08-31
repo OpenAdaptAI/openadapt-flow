@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -602,6 +603,48 @@ def test_manifest_encrypted_flag_present_and_false(tmp_path):
     loaded = Workflow.load(b)
     assert loaded.manifest.encrypted is False
     assert loaded.encrypted is False
+
+
+def test_unicode_bundle_io_uses_explicit_utf8(tmp_path, monkeypatch):
+    """中文与 emoji 必须跨系统默认编码稳定往返。"""
+    bundle = _write_bundle_dir(tmp_path)
+    workflow = _good_program_workflow()
+    workflow.name = "审批流程 ✅"
+    observed: list[tuple[str, str, str | None]] = []
+    original_write_text = Path.write_text
+    original_read_text = Path.read_text
+
+    def tracked_write_text(path, *args, **kwargs):
+        if path.name in {"workflow.json", "manifest.json"}:
+            observed.append(("write", path.name, kwargs.get("encoding")))
+        return original_write_text(path, *args, **kwargs)
+
+    def tracked_read_text(path, *args, **kwargs):
+        if path.name in {"workflow.json", "manifest.json"}:
+            observed.append(("read", path.name, kwargs.get("encoding")))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", tracked_write_text)
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+    workflow.save(bundle)
+
+    workflow_path = bundle / "workflow.json"
+    raw = json.loads(original_read_text(workflow_path, encoding="utf-8"))
+    raw["manifest"] = None
+    original_write_text(
+        workflow_path,
+        json.dumps(raw, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    loaded = Workflow.load(bundle, verify_integrity=False)
+
+    assert loaded.name == "审批流程 ✅"
+    assert {
+        ("write", "workflow.json", "utf-8"),
+        ("write", "manifest.json", "utf-8"),
+        ("read", "workflow.json", "utf-8"),
+        ("read", "manifest.json", "utf-8"),
+    }.issubset(observed)
 
 
 def test_certification_provenance_persists(tmp_path):

@@ -5756,6 +5756,10 @@
       "sha256": "c41ed9c8c53eaea968f136888ab1b599710dabeb26c75a4ba55a0deb87940608"
     },
     {
+      "path": "schemas/process-contract-v1.json",
+      "sha256": "b8eafabe4dc22777dc7fbee7549ef7f5a2ef90e7f03be7dbb2d66c6299e0fb9f"
+    },
+    {
       "path": "schemas/program-graph-v1.json",
       "sha256": "99facb6e1a726127c1623e0432e48fd7d96fe7747c835e5e069c68eae4ff2889"
     },

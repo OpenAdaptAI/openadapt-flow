@@ -1,4 +1,9 @@
-"""AuthoringSession: Recorder wrap, pause/continue, compile admit gate."""
+"""AuthoringSession: Recorder wrap, pause/continue, compile admit gate.
+
+Synthetic CI un-park gate for hosted authoring (openadapt-flow 449).
+Implementation continues without a real bank or tax job. MockMed here is
+a Playwright fixture: no PHI, CI-only, never the user's start/pack path.
+"""
 
 from __future__ import annotations
 
@@ -507,7 +512,7 @@ def test_compile_accepts_secret_pause_after_continue(tmp_path: Path) -> None:
     assert "VERIFIED" not in json.dumps(result)
 
 
-# -- MockMed: non-secret note via text_value_at / input_value ----------------
+# -- Synthetic CI gate (MockMed Playwright fixture; not a user-facing job) --
 
 
 @pytest.fixture(scope="module")

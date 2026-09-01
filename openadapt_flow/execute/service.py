@@ -6,7 +6,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional, cast
 from uuid import uuid4
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -19,6 +19,7 @@ from openadapt_types.execute import (
     ExecuteStatusV1,
     ExecuteTerminalOutcomeV1,
 )
+from openadapt_types.oracle import oracle_tier_from_effect_strength
 from pydantic import ValidationError
 
 from openadapt_flow.execute.dispatch import (
@@ -231,6 +232,12 @@ class ExecuteService:
             receipt_id=receipt_id,
             execution_id=execution_id,
             workflow_digest=result.workflow_digest,
+            workflow_version=request.workflow_version,
+            qualification_id=request.qualification_id,
+            environment_id=request.environment_id,
+            runner_id=_new_id("runner"),
+            nonce=_new_id("nonce"),
+            oracle_tier=_oracle_tier(result.observed_effect_strength),
             outcome=result.outcome,
             contracts=contracts,
             delivery_uncertain=result.delivery_uncertain,
@@ -310,6 +317,13 @@ class ExecuteService:
             encoding="utf-8",
         )
         tmp.replace(path)
+
+
+def _oracle_tier(observed: object | None) -> Literal[0, 1, 2, 3]:
+    return cast(
+        Literal[0, 1, 2, 3],
+        int(oracle_tier_from_effect_strength(observed)),
+    )
 
 
 def _new_id(prefix: str) -> str:

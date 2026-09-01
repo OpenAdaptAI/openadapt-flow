@@ -233,6 +233,12 @@ def test_receipt_refuses_extra_keys_and_screenshots() -> None:
         "receipt_id": "receipt_12345678",
         "execution_id": "execution_12345678",
         "workflow_digest": MOCKMED_WORKFLOW_DIGEST,
+        "workflow_version": MOCKMED_WORKFLOW_VERSION,
+        "qualification_id": MOCKMED_QUALIFICATION_ID,
+        "environment_id": MOCKMED_ENVIRONMENT_OK,
+        "runner_id": "runner_12345678",
+        "nonce": "nonce_12345678",
+        "oracle_tier": 2,
         "outcome": "verified",
         "contracts": {
             "authorization_passed": True,

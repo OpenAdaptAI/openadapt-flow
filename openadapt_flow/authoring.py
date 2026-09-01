@@ -32,6 +32,17 @@ from typing import Any, Literal, Mapping, Optional, TypedDict
 from openadapt_flow.compiler.compile import compile_recording
 from openadapt_flow.recorder import Recorder
 
+__all__ = [
+    "COACH_ONLY",
+    "NEEDS_HUMAN_ADMIT",
+    "AuthoringError",
+    "AuthoringSession",
+    "CoachOnlyError",
+    "CompileResult",
+    "MissingSecretTypeError",
+    "open_session",
+]
+
 COACH_ONLY = "COACH_ONLY"
 NEEDS_HUMAN_ADMIT: Literal["needs_human_admit"] = "needs_human_admit"
 
@@ -210,9 +221,9 @@ class AuthoringSession:
     def start_record(self) -> None:
         """Construct :class:`Recorder` over the bound backend."""
 
+        self._require_not_halted()
         if self._recorder is not None:
             raise AuthoringError("recording already started", code="already_recording")
-        self._halted = False
         self._recorder = Recorder(
             self._backend,
             self._out_dir,
@@ -269,7 +280,7 @@ class AuthoringSession:
         secret: bool = False,
         node_id: Optional[str] = None,
         backend_pixels: Optional[Mapping[str, Any]] = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """Capture the pause-target and before-frame; do not type.
 
         The pause-target is the node captured **at pause start** (remembered
@@ -300,6 +311,7 @@ class AuthoringSession:
         )
         if secret:
             self._secret_pause_params.append(param)
+        return {"paused": True, "param": param, "secret": bool(secret)}
 
     def continue_input(self, *, operator_confirmed: bool = True) -> dict[str, Any]:
         """Record the user's already-typed value. Never actuates ``type_text``.
@@ -314,7 +326,7 @@ class AuthoringSession:
 
         Returns:
             ``{recorded: true, param}`` with no value. ``recorded`` is false
-            when an empty readable secret field keeps the session paused.
+            when an empty readable field keeps the session paused.
         """
 
         recorder = self._require_recording()
@@ -335,11 +347,18 @@ class AuthoringSession:
                 "param": pause.param,
                 "reason": "unconfirmed_masked_secret",
             }
+        if not pause.secret and (text is None or not text):
+            # Non-secret MockMed note: do not persist an empty TYPE/param.
+            return {
+                "recorded": False,
+                "param": pause.param,
+                "reason": "empty_field" if text == "" else "unreadable_field",
+            }
         event: dict[str, Any] = {"kind": "type"}
         redact_region: Optional[tuple[int, int, int, int]] = None
         if pause.secret:
             redact_region = pause.target.region
-        elif text is not None:
+        else:
             event["text"] = text
         recorder.record_observed(
             event,
@@ -361,31 +380,45 @@ class AuthoringSession:
         """Stop without compile. Finishes an in-flight recording if any."""
 
         self._pause = None
-        self._halted = True
         if self._recorder is None:
+            self._halted = True
             return None
-        return self._finish_recording()
+        rec_dir = self._finish_recording()
+        self._halted = True
+        return rec_dir
 
     def compile(
         self,
-        bundle_dir: Path | str,
+        bundle_dir: Path | str | None = None,
         *,
-        name: str,
+        name: str = "authoring",
     ) -> CompileResult:
         """Compile via :func:`compile_recording`; never paints ``VERIFIED``.
 
-        Refuses if this session had a secret-field pause with no TYPE/param
-        event. The compiler signature and return type (``Workflow``) are
-        unchanged; this wrapper is the admit gate.
+        Refuses if this session was halted, is still paused, or had a
+        secret-field pause with no TYPE/param event. The compiler signature
+        and return type (``Workflow``) are unchanged; this wrapper is the
+        admit gate. ``bundle_dir`` defaults to a sibling of the recording.
         """
 
+        self._require_not_halted()
+        if self._pause is not None:
+            raise AuthoringError(
+                "session is paused for input; call continue_input",
+                code="paused",
+            )
         if self._recorder is not None:
             self._finish_recording()
         recording_dir = self._recording_dir
         if recording_dir is None:
             raise AuthoringError("no recording to compile", code="not_recording")
         self._refuse_missing_secret_type(recording_dir)
-        workflow = compile_recording(recording_dir, bundle_dir, name=name)
+        out_bundle = (
+            Path(bundle_dir)
+            if bundle_dir is not None
+            else recording_dir.parent / f"{recording_dir.name}-bundle"
+        )
+        workflow = compile_recording(recording_dir, out_bundle, name=name)
         recording_id = workflow.recording_id or uuid.uuid4().hex
         return {
             "status": NEEDS_HUMAN_ADMIT,
@@ -395,7 +428,15 @@ class AuthoringSession:
 
     # -- internals -----------------------------------------------------------
 
+    def _require_not_halted(self) -> None:
+        if self._halted:
+            raise AuthoringError(
+                "session was halted without compile",
+                code="halted",
+            )
+
     def _require_recording(self) -> Recorder:
+        self._require_not_halted()
         if self._recorder is None:
             raise AuthoringError(
                 "start_record has not been called", code="not_recording"
@@ -493,3 +534,26 @@ class AuthoringSession:
         for param in self._secret_pause_params:
             if param not in typed_params:
                 raise MissingSecretTypeError(param)
+
+
+def open_session(
+    backend: Any,
+    out_dir: Path | str,
+    *,
+    backend_kind: str,
+    app_url: Optional[str] = None,
+    settle_interval_s: float = 0.1,
+    settle_stable_frames: int = 2,
+    settle_timeout_s: float = 3.0,
+) -> AuthoringSession:
+    """Construct an :class:`AuthoringSession` (Desktop / stdio ``--authoring``)."""
+
+    return AuthoringSession(
+        backend,
+        out_dir,
+        backend_kind=backend_kind,
+        app_url=app_url,
+        settle_interval_s=settle_interval_s,
+        settle_stable_frames=settle_stable_frames,
+        settle_timeout_s=settle_timeout_s,
+    )

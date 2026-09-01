@@ -18,6 +18,7 @@ from openadapt_flow.authoring import (
     AuthoringSession,
     CoachOnlyError,
     MissingSecretTypeError,
+    open_session,
 )
 from openadapt_flow.compiler.compile import compile_recording
 from openadapt_flow.mockmed.server import serve
@@ -99,13 +100,35 @@ def _session(
 
 
 @pytest.mark.parametrize(
-    "kind", ["windows", "Windows", "rdp", "citrix", "remote_display"]
+    "kind",
+    ["windows", "Windows", "win", "win_agent", "rdp", "citrix", "remote_display"],
 )
 def test_citrix_rdp_windows_refuse_agent_drive(tmp_path: Path, kind: str) -> None:
     with pytest.raises(CoachOnlyError, match=COACH_ONLY) as excinfo:
         AuthoringSession(ScriptedBackend(), tmp_path / "rec", backend_kind=kind)
     assert excinfo.value.code == COACH_ONLY
     assert not hasattr(AuthoringSession, "record_injected")
+
+
+def test_authoring_module_does_not_spawn_win_agent_or_copy_replay_mcp() -> None:
+    import openadapt_flow.authoring as authoring_mod
+
+    src = Path(authoring_mod.__file__).read_text()
+    assert "from openadapt_flow.backends" not in src
+    assert "launch_agent" not in src
+    assert "parallels_vm" not in src
+    assert "emit.mcp_tool" not in src
+    assert "emit/mcp_tool" not in src
+
+
+def test_open_session_constructs_authoring_session(tmp_path: Path) -> None:
+    session = open_session(
+        ScriptedBackend(),
+        tmp_path / "rec",
+        backend_kind="macos",
+    )
+    assert isinstance(session, AuthoringSession)
+    assert session.backend_kind == "macos"
 
 
 def test_unknown_backend_kind_is_not_silently_web(tmp_path: Path) -> None:
@@ -168,12 +191,26 @@ def test_continue_does_not_invoke_backend_type_text(tmp_path: Path) -> None:
     session.remember_node("n_note", {"x": 40, "y": 50, "w": 20, "h": 20})
     backend.values_at[(50, 60)] = NOTE
     session.start_record()
+    recorder = session._recorder
+    assert recorder is not None
+    recorder_type_calls: list[tuple[str, Optional[str]]] = []
+    original_recorder_type = recorder.type_text
+
+    def _spy_recorder_type(text: str, param: Optional[str] = None) -> None:
+        recorder_type_calls.append((text, param))
+        original_recorder_type(text, param=param)
+
+    recorder.type_text = _spy_recorder_type  # type: ignore[method-assign]
     session.click(node_id="n_note")
-    session.pause_for_input(param="note", node_id="n_note")
+    paused = session.pause_for_input(param="note", node_id="n_note")
+    assert paused == {"paused": True, "param": "note", "secret": False}
+    assert "recorded" not in paused
+    assert "value" not in paused
     type_calls_before = [c for c in backend.calls if c[0] == "type_text"]
     result = session.continue_input()
     rec_dir = session.stop_record()
 
+    assert recorder_type_calls == []
     assert result == {"recorded": True, "param": "note"}
     assert "value" not in result
     assert NOTE not in json.dumps(result)
@@ -233,6 +270,94 @@ def test_secret_continue_persists_no_text_and_skips_type_text(
     assert event["param"] == "ssn"
     assert event["secret"] is True
     assert "text" not in event
+    # Pause-target bounds are blacked out in both frames (no secret pixels).
+    for suffix in ("before", "after"):
+        with Image.open(rec_dir / "frames" / f"0000_{suffix}.png") as frame:
+            region = frame.convert("RGB").crop((100, 200, 400, 240))
+            assert region.getextrema() == ((0, 0), (0, 0), (0, 0))
+
+
+def test_click_while_paused_is_refused(tmp_path: Path) -> None:
+    session, backend = _session(tmp_path)
+    session.remember_node("n_note", {"x": 0, "y": 0, "w": 10, "h": 10})
+    session.start_record()
+    session.pause_for_input(param="note", node_id="n_note")
+    with pytest.raises(AuthoringError) as excinfo:
+        session.click(node_id="n_note")
+    assert excinfo.value.code == "paused"
+    assert backend.calls == []
+
+
+def test_non_secret_empty_field_stays_paused(tmp_path: Path) -> None:
+    session, backend = _session(tmp_path)
+    session.remember_node("n_note", {"x": 0, "y": 0, "w": 10, "h": 10})
+    backend.values_at[(5, 5)] = ""
+    session.start_record()
+    session.pause_for_input(param="note", node_id="n_note")
+    result = session.continue_input()
+    assert result["recorded"] is False
+    assert result["reason"] == "empty_field"
+    assert not any(c[0] == "type_text" for c in backend.calls)
+    rec_dir = session.stop_record()
+    assert [e["kind"] for e in _events(rec_dir)] == []
+
+
+def test_continue_uses_playwright_input_value_when_text_value_at_missing(
+    tmp_path: Path,
+) -> None:
+    class PageOnlyBackend:
+        """Playwright-shaped backend with page.evaluate and no text_value_at."""
+
+        def __init__(self) -> None:
+            self._png = _png()
+            self.calls: list[tuple] = []
+            self.page = self
+
+        @property
+        def viewport(self) -> tuple[int, int]:
+            return (1280, 800)
+
+        def screenshot(self) -> bytes:
+            return self._png
+
+        def click(self, x: int, y: int, *, double: bool = False) -> None:
+            self.calls.append(("click", x, y, double))
+
+        def type_text(self, text: str) -> None:
+            self.calls.append(("type_text", text))
+
+        def press(self, key: str) -> None:
+            self.calls.append(("press", key))
+
+        def scroll(self, dx: int, dy: int) -> None:
+            self.calls.append(("scroll", dx, dy))
+
+        def evaluate(self, _script: str, _args: list[int]) -> str:
+            self.calls.append(("evaluate", tuple(_args)))
+            return NOTE
+
+    backend = PageOnlyBackend()
+    assert not hasattr(backend, "text_value_at")
+    assert not hasattr(backend, "focused_text_value")
+    session = AuthoringSession(
+        backend,
+        tmp_path / "rec",
+        backend_kind="web",
+        settle_interval_s=0.01,
+        settle_stable_frames=1,
+        settle_timeout_s=0.2,
+    )
+    session.remember_node("n_note", {"x": 40, "y": 50, "w": 20, "h": 20})
+    session.start_record()
+    session.pause_for_input(param="note", node_id="n_note")
+    result = session.continue_input()
+    rec_dir = session.stop_record()
+    assert result == {"recorded": True, "param": "note"}
+    assert not any(c[0] == "type_text" for c in backend.calls)
+    assert ("evaluate", (50, 60)) in backend.calls
+    (typed,) = [e for e in _events(rec_dir) if e["kind"] == "type"]
+    assert typed["text"] == NOTE
+    assert typed["param"] == "note"
 
 
 def test_empty_readable_secret_field_stays_paused(tmp_path: Path) -> None:
@@ -318,11 +443,56 @@ def test_compile_refuses_secret_pause_without_type_param(tmp_path: Path) -> None
     session.start_record()
     session.click(node_id="n_ssn")
     session.pause_for_input(param="ssn", secret=True, node_id="n_ssn")
-    session.halt()
+    # Empty readable field stays paused; stop without Continue → no TYPE/param.
+    assert session.continue_input()["recorded"] is False
+    session.stop_record()
     with pytest.raises(MissingSecretTypeError) as excinfo:
         session.compile(tmp_path / "bundle", name="missing-secret")
     assert excinfo.value.code == "missing_secret_type"
     assert excinfo.value.param == "ssn"
+
+
+def test_halt_refuses_later_compile(tmp_path: Path) -> None:
+    session, _backend = _session(tmp_path)
+    session.start_record()
+    session.click(10, 20)
+    session.halt()
+    with pytest.raises(AuthoringError) as excinfo:
+        session.compile(tmp_path / "bundle", name="halted")
+    assert excinfo.value.code == "halted"
+
+
+def test_compile_refuses_while_paused(tmp_path: Path) -> None:
+    session, _backend = _session(tmp_path)
+    session.remember_node("n_note", {"x": 0, "y": 0, "w": 10, "h": 10})
+    session.start_record()
+    session.pause_for_input(param="note", node_id="n_note")
+    with pytest.raises(AuthoringError) as excinfo:
+        session.compile(tmp_path / "bundle", name="still-paused")
+    assert excinfo.value.code == "paused"
+
+
+def test_compile_without_args_still_wraps_compile_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openadapt_flow.authoring as authoring_mod
+
+    session, _backend = _session(tmp_path)
+    session.start_record()
+    session.click(10, 20)
+    session.stop_record()
+    calls: list[tuple] = []
+    real = authoring_mod.compile_recording
+
+    def wrapped(recording_dir, out_bundle_dir, *, name, **kwargs):
+        calls.append((Path(recording_dir), Path(out_bundle_dir), name))
+        return real(recording_dir, out_bundle_dir, name=name, **kwargs)
+
+    monkeypatch.setattr(authoring_mod, "compile_recording", wrapped)
+    result = session.compile()
+    assert calls == [(tmp_path / "rec", tmp_path / "rec-bundle", "authoring")]
+    assert result["status"] == NEEDS_HUMAN_ADMIT
+    assert "VERIFIED" not in json.dumps(result)
 
 
 def test_compile_accepts_secret_pause_after_continue(tmp_path: Path) -> None:
@@ -409,6 +579,7 @@ def test_mockmed_continue_uses_text_value_at_not_type_text(
         page.fill("#note", NOTE)
         result = session.continue_input()
         rec_dir = session.stop_record()
+        compiled = session.compile(tmp_path / "bundle", name="mockmed-note")
     finally:
         close()
 
@@ -421,3 +592,7 @@ def test_mockmed_continue_uses_text_value_at_not_type_text(
     assert typed_events[0]["param"] == "note"
     assert typed_events[0]["text"] == NOTE
     assert "secret" not in typed_events[0]
+    assert compiled["status"] == NEEDS_HUMAN_ADMIT
+    assert compiled["workflow_id"].startswith("wf_")
+    assert compiled["recording_retained"] is True
+    assert "VERIFIED" not in json.dumps(compiled)

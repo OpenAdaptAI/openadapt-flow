@@ -50,6 +50,18 @@ from openadapt_flow.compiler.param_confirm import (
     decisions_interactive,
     load_proposals,
 )
+from openadapt_flow.compiler.qualification_pins import (
+    MinedFailureCase,
+    MinedPin,
+    MinedQualificationPins,
+    mine_qualification_pins,
+)
+from openadapt_flow.compiler.qualification_proposer import (
+    FlaggedSuggestion,
+    LazyLLMQualificationProposer,
+    collect_suggestions,
+    sanitize_recording_metadata,
+)
 
 __all__ = [
     "compile_recording",
@@ -99,4 +111,12 @@ __all__ = [
     "decisions_from_file",
     "decisions_interactive",
     "load_proposals",
+    "mine_qualification_pins",
+    "MinedQualificationPins",
+    "MinedPin",
+    "MinedFailureCase",
+    "FlaggedSuggestion",
+    "LazyLLMQualificationProposer",
+    "collect_suggestions",
+    "sanitize_recording_metadata",
 ]

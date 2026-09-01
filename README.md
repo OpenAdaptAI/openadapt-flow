@@ -106,9 +106,33 @@ Start with a local browser rehearsal:
 ```bash
 openadapt-flow record --backend web --url https://your.app --out rec
 openadapt-flow compile rec --out bundle --name my-task
+openadapt-flow qualify propose bundle --recording rec --out proposal.json
+openadapt-flow qualify accept bundle --proposal proposal.json
 openadapt-flow lint bundle --strict
 openadapt-flow replay bundle --backend web --url https://your.app
 ```
+
+Demo once, get a checked program. `qualify propose` fills the production-shaped
+pins from the recording: application identity, environment fingerprint,
+identity-gate fields, and the effect oracle from the write the demo actually
+observed. `qualify accept` confirms every pin in one command. If a pin isn't
+there, Flow HALTs. It will not guess.
+
+`qualify accept` also runs that proposed oracle against a `--break-it` fault
+before it can succeed. MockMed is the default fixture: the banner says the
+row was saved, the store did not change. If the oracle would have accepted
+the lie, the proposal stays draft or halted. Actor bytes and oracle bytes
+must be disjoint. Re-reading the acting screen or the same-session banner
+HALTs and names the shared channel. An API, SQL, file, or second-session
+read is allowed; Flow will not invent an endpoint. No second read in the
+recording means HALT: do not automate until a second read exists.
+
+`--policy-pack community` is the local/MockMed pack. `cloud` and `regulated`
+bind the stricter shipped policy. They do not skip a pin. On MockMed, add
+`--admit-local` to mint a signed local admission. That test key cannot enter a
+production trust map. The pin list and the failure matrix (`--break-it`, plus
+identity-swap or extra-field when the demo has parameters) are in
+[`docs/QUALIFICATION_PROJECT.md`](docs/QUALIFICATION_PROJECT.md).
 
 To generalize a task from several recordings, induce a program:
 
@@ -119,8 +143,8 @@ openadapt-flow induce rec1 rec2 --out program
 `induce` emits a program when the traces agree, and a `record-next:` worklist of missing demonstrations when a consequential branch or loop stays underdetermined. The healthy replay path still makes no model call.
 
 `replay` is the permissive rehearsal path. It stays available while a bundle has
-certification gaps. For governed execution, complete the deployment's identity,
-effect, idempotency, and postcondition contracts, then use the gated path:
+certification gaps. For governed execution, complete the remaining idempotency
+and postcondition contracts, then use the gated path:
 
 ```bash
 openadapt-flow certify bundle --config deploy.yaml
@@ -222,10 +246,9 @@ can bind individual steps to different HTTP systems, but that is API actuation
 rather than recorded GUI backend switching. If you installed the OpenAdapt
 launcher, `openadapt flow compose` is the same command.
 
-A process contract is a later layer. Each child already has its own signed
-qualification admission (`openadapt.qualification-admission/v1`). The parent
-names those admissions, the order or DAG, and which confirmed effect-bound
-facts may copy as handoffs:
+A V0 process contract sequences Flow children that already have signed
+qualification admissions. The parent names the order or DAG and the confirmed
+effect-bound facts that may copy as handoffs:
 
 ```bash
 openadapt-flow process \
@@ -243,6 +266,27 @@ openadapt-flow run process --config deploy.yaml
 compose. `openadapt flow process` is the launcher form. Compose still sequences
 recordings. Don't wrap a `composition.json` and call it admitted. Operator
 detail lives in [docs/PROCESS_CONTRACT.md](docs/PROCESS_CONTRACT.md).
+
+ProcessContract v1 adds sealed Python children, signed human tasks, and
+verified content-addressed artifact edges to that same parent:
+
+```bash
+openadapt-flow process --spec process-v1.json --out process
+openadapt-flow run process \
+  --run-dir runs/process-001 \
+  --code-trust code-signers.json \
+  --code-runtime-environment-digest sha256:... \
+  --allow-trusted-code \
+  --process-receipt-private-key runner-ed25519.key \
+  --config deploy.yaml
+```
+
+An admitted transform doesn't prove its output. The named verifier must confirm
+the exact artifact digest before another child can read it. Human completion
+records authority and intent; the declared verifier still proves the effect.
+`RECONCILIATION_REQUIRED` stops the parent and is never retried as a general
+halt. The [V1 design](docs/design/PROCESS_CONTRACT_V1.md) records the execution,
+authentication, portability, and isolation boundaries.
 
 ## How a step finds its target
 

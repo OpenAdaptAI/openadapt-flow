@@ -2284,7 +2284,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.3" },
     { name = "scikit-image", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0" },
-    { name = "transformers", marker = "extra == 'service-mlx'", specifier = ">=5.5,<5.15" },
+    { name = "transformers", marker = "extra == 'service-mlx'", specifier = ">=5.5,<5.17" },
     { name = "uvicorn", marker = "extra == 'console'", specifier = ">=0.29" },
     { name = "uvicorn", marker = "extra == 'dev'", specifier = ">=0.29" },
     { name = "uvicorn", marker = "extra == 'execute'", specifier = ">=0.29" },

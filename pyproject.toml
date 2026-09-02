@@ -108,7 +108,7 @@ console = [
 execute = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
-    "openadapt-types>=0.13.0,<0.14.0",
+    "openadapt-types>=0.17.0,<0.18.0",
 ]
 # WindowsBackend: HTTP client for the WAA (Windows Agent Arena) server.
 windows = ["requests>=2.31", "pywin32>=312; platform_system == 'Windows'"]

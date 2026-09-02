@@ -3,8 +3,9 @@
 Subcommands (thin wrappers over the module APIs; sibling modules are
 imported lazily inside each handler so ``--help`` always works):
 
-- ``record`` — open a headed browser on your OWN app (``--url``) and
-  record what you do into the format ``compile`` consumes.
+- ``record`` — record a demonstration into the format ``compile`` consumes.
+  With no ``--backend`` and no ``--url``, capture the desktop on this OS.
+  ``--url`` without ``--backend`` still records the browser.
 - ``demo-record`` — serve MockMed locally and record the canonical demo.
 - ``compile`` — compile a recording directory into a workflow bundle.
 - ``induce`` — induce a parameterized PROGRAM bundle from MULTIPLE recordings
@@ -58,6 +59,11 @@ imported lazily inside each handler so ``--help`` always works):
   command.
 - ``console`` — serve the localhost-only operator console (a read-first web
   UI over bundles / runs / skill libraries; requires the ``console`` extra).
+- ``serve-execute`` — host the public Execute HTTP+MCP contract on this
+  machine (self-signed local receipts; not an OpenAdapt production Seal).
+- ``serve-reward`` — score training episodes by reading the system of
+  record through an independent oracle (self-signed reward receipts; not
+  an Execute Seal).
 - ``emit-skill`` — emit an Agent Skills folder for a bundle.
 - ``emit-mcp`` — emit a standalone MCP ``server.py`` for a bundle.
 - ``connector`` — the BYOC (bring-your-own-cloud) outbound-pull daemon:
@@ -999,12 +1005,15 @@ def _cmd_record(args: argparse.Namespace) -> int:
     # target for the chosen backend raises rather than silently record web).
     #
     # Surface-selection neutrality (Section 5): a production posture
-    # (--profile standard/regulated) requires an explicit --backend; only the
-    # Demo/permissive posture may default to the browser, visibly. The
-    # last-used target is a Demo-only convenience from the CLI state file.
+    # (--profile standard/regulated) requires an explicit --backend. The
+    # Demo/permissive posture may omit --backend: capture on this OS unless
+    # --url selected the browser, and say so visibly. The last-used target is
+    # a Demo-only convenience from the CLI state file, and only when it is
+    # this OS.
     from openadapt_flow.surface_selection import (
         demo_default_notice,
         explicit_surface_refusal,
+        implicit_record_surface,
         load_last_surface,
         store_last_surface,
     )
@@ -1016,8 +1025,14 @@ def _cmd_record(args: argparse.Namespace) -> int:
             print(explicit_surface_refusal("record", profile))
             return 2
         last = load_last_surface() if profile == "demo" else None
-        backend = last or "web"
-        print(demo_default_notice(backend, from_last_used=last is not None))
+        try:
+            backend, from_last = implicit_record_surface(
+                url=getattr(args, "url", None),
+                last_used=last,
+            )
+        except ValueError as exc:
+            raise SystemExit(f"record: {exc}") from exc
+        print(demo_default_notice(backend, from_last_used=from_last))
     elif profile == "demo":
         store_last_surface(_report_backend_kind(backend))
     browser_attach_requested = bool(
@@ -4892,22 +4907,25 @@ def _cmd_repair(args: argparse.Namespace) -> int:
 def _add_backend_flags(p: argparse.ArgumentParser) -> None:
     """Add the backend-selector flags (``--backend`` + targets) to a subparser.
 
-    These override the ``backend`` section of a deployment ``--config``. Default
-    (``web`` / no flag) reproduces the historical browser behavior byte-for-byte.
+    These override the ``backend`` section of a deployment ``--config``.
+    There is no universal browser default: ``record`` with no ``--backend``
+    and no ``--url`` captures on this OS; ``--url`` without ``--backend``
+    still selects web. Production profiles still require an explicit target.
     """
     p.add_argument(
         "--backend",
         choices=["web", "windows", "macos", "linux", "rdp", "citrix"],
         default=None,
         help=(
-            "Backend to drive: 'web' (default; Playwright/Chromium), 'windows' "
+            "Backend to drive: 'web' (Playwright/Chromium), 'windows' "
             "(native Windows via the WAA HTTP agent at replay), 'macos' (one "
             "native Mac app window), 'linux' (one exact AT-SPI app window at "
             "replay), 'rdp' (pixel-only network or local remote desktop), or "
             "'citrix' (the local "
             "Citrix Workspace window; its owner defaults by host OS and a "
             "configured rdp_window may override it). Overrides backend.kind "
-            "from --config."
+            "from --config. Omit on record to capture on this OS, or pass "
+            "--url to record the browser."
         ),
     )
     p.add_argument(
@@ -5308,9 +5326,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Recording posture (Section 5). standard/regulated REQUIRE an "
             "explicit --backend (no implicit browser default in production). "
-            "demo may omit --backend: it defaults to the browser (or your "
-            "last-used demo target) and prints a visible notice. Omitted: "
-            "the permissive pre-profile default (browser, with notice)."
+            "demo may omit --backend: it defaults to capture on this OS "
+            "(macos/windows/linux), or to the browser when --url is given, "
+            "and prints a visible notice. Omitted: the same permissive "
+            "pre-profile default."
         ),
     )
     _add_backend_flags(p)
@@ -7617,6 +7636,91 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=_cmd_console)
 
     p = sub.add_parser(
+        "serve-execute",
+        help=(
+            "Host the public Execute v1 HTTP+MCP contract locally. Receipts "
+            "are self-signed with a local key. They are not OpenAdapt "
+            "production Seals. Needs `pip install 'openadapt-flow[execute]'`"
+        ),
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=8787,
+        help="Port (default: 8787)",
+    )
+    p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1)",
+    )
+    p.add_argument(
+        "--data-dir",
+        default=None,
+        help="Local data directory (default: ~/.openadapt/execute-ref)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token (default: generated on first start in --data-dir)",
+    )
+    p.add_argument(
+        "--seed-mockmed",
+        action="store_true",
+        help="Write the synthetic MockMed ok and banner-lie admissions",
+    )
+    p.set_defaults(func=_cmd_serve_execute)
+
+    p = sub.add_parser(
+        "serve-reward",
+        help=(
+            "Score training episodes by reading the system of record through "
+            "an independent oracle. Receipts are self-signed reward receipts, "
+            "not Execute Seals. Needs `pip install 'openadapt-flow[reward]'`"
+        ),
+    )
+    p.add_argument(
+        "--contract",
+        default=None,
+        help=(
+            "Reward contract bundle directory (contract.json, "
+            "required_effects.json, forbidden_effects.json, oracle.json, "
+            "optional certificate.json). Defaults to the seeded MockMed "
+            "tier-2 bundle when --seed-mockmed is given."
+        ),
+    )
+    p.add_argument(
+        "--port",
+        type=int,
+        default=8788,
+        help="Port (default: 8788)",
+    )
+    p.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1)",
+    )
+    p.add_argument(
+        "--data-dir",
+        default=None,
+        help="Local data directory (default: ~/.openadapt/reward-ref)",
+    )
+    p.add_argument(
+        "--token",
+        default=None,
+        help="Bearer token (default: generated on first start in --data-dir)",
+    )
+    p.add_argument(
+        "--seed-mockmed",
+        action="store_true",
+        help=(
+            "Write the synthetic MockMed reward bundles (tier-2 file oracle "
+            "with a calibrated synthetic certificate; tier-0 screen dump)"
+        ),
+    )
+    p.set_defaults(func=_cmd_serve_reward)
+
+    p = sub.add_parser(
         "business-decisions",
         help="Customer-runner typed-decision relay; it never resumes or acts.",
     )
@@ -7704,6 +7808,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--once", action="store_true", help="Poll once then exit (cron-style)"
     )
     pr.set_defaults(func=_cmd_connector)
+
+    from openadapt_flow.cli_admit import register_admit_parser
+
+    register_admit_parser(sub)
 
     return parser
 
@@ -7866,6 +7974,103 @@ def _cmd_console(args: argparse.Namespace) -> int:
             decision_supervisor=_decision_supervisor_from_args(args, attended_service),
             port=args.port,
         )
+    return 0
+
+
+def _cmd_serve_execute(args: argparse.Namespace) -> int:
+    from importlib.util import find_spec
+
+    missing = [
+        name
+        for name in ("fastapi", "uvicorn", "openadapt_types")
+        if find_spec(name) is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"serve-execute needs {', '.join(missing)} — install the "
+            "execute extra:  pip install 'openadapt-flow[execute]'"
+        )
+    from openadapt_flow.execute import SELF_SIGNED_NOTICE
+    from openadapt_flow.execute.app import serve
+    from openadapt_flow.execute.service import ExecuteService, default_data_dir
+
+    data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
+    store = ExecuteService(
+        data_dir,
+        token=args.token,
+        seed_mockmed=bool(args.seed_mockmed),
+    )
+    print("openadapt-flow reference Execute")
+    print(f"  http://{args.host}:{args.port}")
+    print(f"  data dir     {data_dir}")
+    print(f"  token        {store.token}")
+    print("  issuer       self_signed")
+    print(f"  fingerprint  {store.fingerprint}")
+    print(f"  {SELF_SIGNED_NOTICE}")
+    if args.seed_mockmed:
+        print("  seeded MockMed admissions (ok + banner-lie)")
+    serve(
+        data_dir,
+        host=args.host,
+        port=args.port,
+        token=store.token,
+        service=store,
+    )
+    return 0
+
+
+def _cmd_serve_reward(args: argparse.Namespace) -> int:
+    from importlib.util import find_spec
+
+    missing = [
+        name
+        for name in ("fastapi", "uvicorn", "openadapt_types")
+        if find_spec(name) is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"serve-reward needs {', '.join(missing)} — install the "
+            "reward extra:  pip install 'openadapt-flow[reward]'"
+        )
+    from openadapt_flow.reward import REWARD_NOTICE
+    from openadapt_flow.reward.serve import serve
+    from openadapt_flow.reward.worker import RewardWorker, default_data_dir
+
+    data_dir = Path(args.data_dir) if args.data_dir else default_data_dir()
+    contract = args.contract
+    seeded_paths: dict[str, Path] = {}
+    if args.seed_mockmed:
+        from openadapt_flow.execute.keys import (
+            fingerprint_of,
+            load_or_create_private_key,
+        )
+        from openadapt_flow.reward.seed import seed_mockmed
+
+        key = load_or_create_private_key(data_dir)
+        issuer_key_id = "self_signed:" + fingerprint_of(key.public_key())
+        seeded_paths = seed_mockmed(data_dir, key, issuer_key_id)
+        if contract is None:
+            contract = str(seeded_paths["tier2"])
+    if contract is None:
+        raise SystemExit("serve-reward needs --contract <bundle dir> or --seed-mockmed")
+    worker = RewardWorker(contract, data_dir, token=args.token)
+    print("openadapt-flow reference reward worker")
+    print(f"  http://{args.host}:{args.port}")
+    print(f"  data dir     {data_dir}")
+    print(f"  contract     {worker.bundle.directory}")
+    print(f"  digest       {worker.contract.digest}")
+    print(
+        f"  oracle       {worker.bundle.oracle.channel.value} "
+        f"(tier {int(worker.bundle.oracle.tier)})"
+    )
+    print(f"  certificate  {'present' if worker.certificate else 'absent'}")
+    print(f"  token        {worker.token}")
+    print("  issuer       self_signed")
+    print(f"  fingerprint  {worker.fingerprint}")
+    print(f"  {REWARD_NOTICE}")
+    for label, path in seeded_paths.items():
+        print(f"  seeded {label:<6} {path}")
+    serve(worker, host=args.host, port=args.port)
     return 0
 
 

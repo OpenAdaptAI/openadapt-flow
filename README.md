@@ -88,6 +88,27 @@ delivery is uncertain, so the transaction ends in `RECONCILIATION_REQUIRED` for
 a person to settle. Longer walkthrough, including the `--guided` presentation
 mode and the hand-driven stages: [docs/TUTORIAL.md](docs/TUTORIAL.md).
 
+## Reference Execute server
+
+You can host the public Execute HTTP contract on this machine, in one process.
+
+```bash
+pip install 'openadapt-flow[execute]'
+openadapt-flow serve-execute --port 8787 --seed-mockmed
+```
+
+That command binds loopback, generates an Ed25519 key on first start, and
+keeps it under `~/.openadapt/execute-ref/`. Health is `GET /health`. Submit
+`openadapt.execute-request/v1` to `POST /v1/executions`, poll
+`GET /v1/executions/{id}` until `terminal`, then read
+`GET /v1/executions/{id}/receipt`. The same process also speaks MCP at
+`POST /mcp`.
+
+Receipts are self-signed with that local key. They aren't OpenAdapt
+production Seals. `GET /seals/{id}` is the local verify page; it shows the
+key fingerprint and a $0 meter. Counterparties that require an OpenAdapt Seal
+still use Cloud.
+
 ## Record and rehearse your workflow
 
 Install the extras for the surface that will record and replay the workflow:
@@ -431,6 +452,27 @@ pluggable SQL, REST, FHIR and document-hash effect oracles; durable
 checkpoint and resume; Agent Skill and MCP emission. Those are in
 [docs/CAPABILITIES.md](docs/CAPABILITIES.md), and the whole documentation set
 is at [docs.openadapt.ai](https://docs.openadapt.ai).
+
+## Reward worker for a training loop
+
+`openadapt-flow serve-reward` scores a model's training episode by reading the
+system of record after the episode ends, through the same effect oracles the
+runtime uses. It returns a signed `RewardEvidenceReceiptV1`: the terminal
+effect landed, or it didn't, or the store couldn't be read and the episode is
+unscored. Unscored is never 0.
+
+```bash
+pip install 'openadapt-flow[reward]'
+openadapt-flow serve-reward --seed-mockmed --port 8788
+```
+
+A reward receipt isn't an Execute Seal. A model rollout isn't a qualified
+program, so it never gets one, and the receipt never says Flow governed the
+policy. The adapters for TRL's `GRPOTrainer` and verl's reward manager live in
+`openadapt_evals.reward` (`pip install 'openadapt-evals>=0.96.0'`), because
+TRL trains a `None` reward as 0.0 and the evals adapters drop an unscored
+episode instead. This package keeps the worker and the HTTP client. See
+[docs/REWARD_WORKER.md](docs/REWARD_WORKER.md).
 
 ## Development
 

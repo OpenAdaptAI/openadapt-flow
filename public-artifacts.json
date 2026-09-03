@@ -113,7 +113,7 @@
     },
     {
       "path": ".github/workflows/quickstart-lifecycle.yml",
-      "sha256": "8eae9755b0ba287c708dd078b996f4b139e949ae375cfc5bb7a6e0f441b38ece"
+      "sha256": "a6ee9a2d82d65555a59bea26bf30b62491bcad39f29a4c1e9eeeafcbf6c3866c"
     },
     {
       "path": ".github/workflows/release-health.yml",

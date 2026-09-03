@@ -83,6 +83,44 @@ def test_clean_browser_lifecycle_installs_the_browser_extra(tmp_path):
     )
 
 
+def test_browser_presence_reads_the_venv_playwright_path(tmp_path, monkeypatch):
+    lifecycle = _module()
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='{"executable": "/isolated/chromium", "present": false}\n',
+        )
+
+    monkeypatch.setattr(lifecycle, "_run", fake_run)
+
+    result = lifecycle._browser_presence(
+        Path("/venv/bin/python"), cwd=tmp_path, env={}, log=tmp_path / "probe.log"
+    )
+
+    assert result["present"] is False
+    assert captured["command"][0] == "/venv/bin/python"
+    assert "chromium.executable_path" in captured["command"][2]
+
+
+def test_browser_system_deps_requires_browser_extra():
+    lifecycle = _module()
+
+    with pytest.raises(SystemExit, match="requires --install-browser"):
+        lifecycle.main(
+            [
+                "--wheel",
+                "unused.whl",
+                "--work-dir",
+                "unused",
+                "--browser-system-deps",
+            ]
+        )
+
+
 def test_run_forces_utf8_for_child_cli_and_log(tmp_path, monkeypatch):
     lifecycle = _module()
     captured = {}

@@ -100,6 +100,64 @@ def _console_script(root: Path) -> Path:
     )
 
 
+def _browser_presence(
+    python: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    log: Path,
+) -> dict[str, object]:
+    """Read Playwright's expected Chromium path without downloading it."""
+
+    probe = _run(
+        [
+            str(python),
+            "-c",
+            (
+                "import json; from pathlib import Path; "
+                "from playwright.sync_api import sync_playwright; "
+                "p=sync_playwright().start(); "
+                "path=Path(p.chromium.executable_path); "
+                "print(json.dumps({'executable':str(path),'present':path.is_file()})); "
+                "p.stop()"
+            ),
+        ],
+        cwd=cwd,
+        env=env,
+        log=log,
+    )
+    payload = json.loads(probe.stdout.splitlines()[-1])
+    if not isinstance(payload, dict) or not isinstance(payload.get("present"), bool):
+        raise AssertionError("Chromium presence probe returned invalid JSON")
+    return payload
+
+
+def _verify_browser_launch(
+    python: Path,
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    log: Path,
+) -> None:
+    """Launch and close the Chromium that the first Flow command installed."""
+
+    _run(
+        [
+            str(python),
+            "-c",
+            (
+                "from playwright.sync_api import sync_playwright; "
+                "p=sync_playwright().start(); "
+                "browser=p.chromium.launch(headless=True); "
+                "browser.close(); p.stop(); print('Chromium launch verified')"
+            ),
+        ],
+        cwd=cwd,
+        env=env,
+        log=log,
+    )
+
+
 def _inspect_opencv_provider(
     python: Path,
     *,
@@ -277,7 +335,7 @@ def run_lifecycle(
     work_dir: Path,
     *,
     install_browser: bool,
-    browser_with_deps: bool,
+    browser_system_deps: bool,
     source_revision: str | None = None,
 ) -> dict[str, object]:
     """Run install through uninstall, returning the evidence summary."""
@@ -300,6 +358,10 @@ def run_lifecycle(
     # MockMed contains synthetic identities. Disable the optional PHI warning so
     # lifecycle output stays actionable; real regulated runs must use SCRUB=on.
     env["OPENADAPT_FLOW_SCRUB"] = "off"
+    if install_browser:
+        # Hosted runners can carry a global Playwright cache. An isolated empty
+        # cache makes the before/after result prove this wheel's lazy download.
+        env["PLAYWRIGHT_BROWSERS_PATH"] = str(work_dir / "playwright-browsers")
     installed = False
     summary: dict[str, object] = {
         "wheel": wheel.name,
@@ -338,29 +400,73 @@ def run_lifecycle(
             log=logs / "03-cli-help.log",
         )
 
-        # Linux needs host libraries that the ordinary unprivileged first-run
-        # download cannot install. Pre-provision them only in that lane. The
-        # macOS and Windows lanes leave Chromium absent here so the first Flow
-        # command proves the public lazy auto-install contract.
-        if browser_with_deps:
-            browser_command = [str(python), "-m", "playwright", "install"]
-            browser_command.append("--with-deps")
-            browser_command.append("chromium")
-            _run(
-                browser_command,
+        if install_browser:
+            before = _browser_presence(
+                python,
                 cwd=artifacts,
                 env=env,
-                log=logs / "04-browser-install.log",
+                log=logs / "04-browser-before-flow.log",
             )
+            if before["present"]:
+                raise AssertionError(
+                    "Chromium was present before the first Flow command"
+                )
+            summary["browser_present_before_flow"] = False
+
+        # Linux needs host libraries that the ordinary unprivileged first-run
+        # download cannot install. Install only those libraries. Chromium must
+        # stay absent so the first Flow browser command exercises lazy delivery.
+        if browser_system_deps:
+            _run(
+                [str(python), "-m", "playwright", "install-deps", "chromium"],
+                cwd=artifacts,
+                env=env,
+                log=logs / "04-browser-system-deps.log",
+            )
+            after_deps = _browser_presence(
+                python,
+                cwd=artifacts,
+                env=env,
+                log=logs / "04-browser-after-system-deps.log",
+            )
+            if after_deps["present"]:
+                raise AssertionError("install-deps downloaded Chromium")
+            summary["browser_present_after_system_deps"] = False
 
         cli = [str(python), "-m", "openadapt_flow"]
+        # Exercise the advertised one-command path before any other Flow command
+        # can install Chromium for it.
+        _run(
+            [*cli, "tutorial", "--out", str(artifacts / "tutorial")],
+            cwd=artifacts,
+            env=env,
+            log=logs / "05-tutorial-verified.log",
+        )
+        if install_browser:
+            after = _browser_presence(
+                python,
+                cwd=artifacts,
+                env=env,
+                log=logs / "05-browser-after-tutorial.log",
+            )
+            if not after["present"]:
+                raise AssertionError("the tutorial did not install Chromium")
+            _verify_browser_launch(
+                python,
+                cwd=artifacts,
+                env=env,
+                log=logs / "05-browser-launch.log",
+            )
+            summary["browser_present_after_tutorial"] = True
+            summary["browser_launch_verified"] = True
+
         recording = artifacts / "recording"
         bundle = artifacts / "bundle"
         _run(
             [*cli, "demo-record", "--out", str(recording)],
             cwd=artifacts,
             env=env,
-            log=logs / "05-record.log",
+            log=logs / "06-record.log",
         )
         _run(
             [
@@ -374,7 +480,7 @@ def run_lifecycle(
             ],
             cwd=artifacts,
             env=env,
-            log=logs / "06-compile.log",
+            log=logs / "07-compile.log",
         )
 
         # The bundled tutorial is deliberately not production-certified. The
@@ -387,20 +493,20 @@ def run_lifecycle(
             [*cli, "lint", str(bundle), "--strict"],
             cwd=artifacts,
             env=env,
-            log=logs / "07-strict-lint-expected-refusal.log",
+            log=logs / "08-strict-lint-expected-refusal.log",
             expected=1,
         )
         _run(
             [*cli, "certify", str(bundle), "--policy", "permissive"],
             cwd=artifacts,
             env=env,
-            log=logs / "08-certify-permissive.log",
+            log=logs / "09-certify-permissive.log",
         )
         _run(
             [*cli, "certify", str(bundle), "--policy", "clinical-write"],
             cwd=artifacts,
             env=env,
-            log=logs / "09-certify-clinical-expected-refusal.log",
+            log=logs / "10-certify-clinical-expected-refusal.log",
             expected=2,
         )
         _run(
@@ -413,7 +519,7 @@ def run_lifecycle(
             ],
             cwd=artifacts,
             env=env,
-            log=logs / "10-replay-baseline.log",
+            log=logs / "11-replay-baseline.log",
         )
         _run(
             [
@@ -429,15 +535,7 @@ def run_lifecycle(
             ],
             cwd=artifacts,
             env=env,
-            log=logs / "11-replay-drift.log",
-        )
-        # The COMPOSED free path. Every command above passed while this loop
-        # was broken; only running it end to end catches that.
-        _run(
-            [*cli, "tutorial", "--out", str(artifacts / "tutorial")],
-            cwd=artifacts,
-            env=env,
-            log=logs / "12-tutorial-verified.log",
+            log=logs / "12-replay-drift.log",
         )
         summary.update(_inspect_artifacts(artifacts))
     finally:
@@ -482,16 +580,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--install-browser",
         action="store_true",
         help=(
-            "Install the wheel's browser extra; Chromium remains lazy unless "
-            "--browser-with-deps pre-provisions it"
+            "Install the wheel's browser extra; Chromium remains absent until "
+            "the first Flow browser command downloads it"
         ),
     )
     parser.add_argument(
-        "--browser-with-deps",
+        "--browser-system-deps",
         action="store_true",
         help=(
-            "Pre-provision Chromium and its Linux host dependencies; without "
-            "this flag the first Flow command must auto-install Chromium"
+            "Install Linux Chromium host libraries without downloading the "
+            "browser; the first Flow command must auto-install Chromium"
         ),
     )
     parser.add_argument(
@@ -504,14 +602,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.browser_with_deps and not args.install_browser:
-        raise SystemExit("--browser-with-deps requires --install-browser")
+    if args.browser_system_deps and not args.install_browser:
+        raise SystemExit("--browser-system-deps requires --install-browser")
     wheel = _resolve_wheel(args.wheel)
     run_lifecycle(
         wheel,
         Path(args.work_dir).resolve(),
         install_browser=args.install_browser,
-        browser_with_deps=args.browser_with_deps,
+        browser_system_deps=args.browser_system_deps,
         source_revision=args.source_revision,
     )
     return 0

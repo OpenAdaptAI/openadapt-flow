@@ -479,9 +479,14 @@ episode instead. This package keeps the worker and the HTTP client. See
 ```bash
 git clone https://github.com/OpenAdaptAI/openadapt-flow && cd openadapt-flow
 pip install -e '.[dev]'
-playwright install chromium   # optional; otherwise downloaded on first launch
+python -m playwright install chromium  # optional browser pre-provisioning
 pytest -q
 ```
+
+On Linux, Flow checks the Chromium host libraries before an automatic browser
+download. A minimal host may need a one-time system-library install. Flow stops
+before the download and prints a command for the exact Python environment that
+runs it.
 
 Contributions welcome, see [CONTRIBUTING.md](CONTRIBUTING.md). If you want a
 first one that is genuinely useful: pick a module off the mypy type-debt

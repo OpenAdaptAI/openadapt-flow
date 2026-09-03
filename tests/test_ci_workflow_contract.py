@@ -99,6 +99,17 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     assert "pytest -q --basetemp=runs/ci" in matrix_job
 
 
+def test_clean_linux_lifecycle_keeps_chromium_lazy() -> None:
+    workflow = QUICKSTART.read_text(encoding="utf-8")
+    linux_start = workflow.index("- name: Full lifecycle (Linux)")
+    other_start = workflow.index("- name: Full lifecycle (macOS / Windows)")
+    linux_step = workflow[linux_start:other_start]
+
+    assert "--browser-system-deps" in linux_step
+    assert "--browser-with-deps" not in workflow
+    assert "playwright install --with-deps" not in workflow
+
+
 def test_standard_browser_step_covers_cleanup_and_launch_worst_cases() -> None:
     attempts = 2
     attempt_timeout_seconds = 270

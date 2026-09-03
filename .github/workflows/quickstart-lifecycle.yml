@@ -41,9 +41,8 @@ jobs:
           python -m pip install build
           python -m build --wheel --outdir lifecycle-dist
 
-      # The Linux lane passes --browser-with-deps, so the harness shells out to
-      # `playwright install --with-deps`, and that runs apt on the hosted
-      # runner. Point apt at the canonical archive first, and prove the archive
+      # The Linux lane installs only Chromium's host libraries before the
+      # tutorial. Point apt at the canonical archive first, and prove the archive
       # answers inside a bounded step, so a mirror fault fails here in seconds
       # instead of stalling inside the lifecycle harness.
       - name: Prefer the canonical Ubuntu archive (Linux)
@@ -81,7 +80,7 @@ jobs:
           --wheel "lifecycle-dist/*.whl"
           --work-dir "runs/lifecycle"
           --install-browser
-          --browser-with-deps
+          --browser-system-deps
           --source-revision "${{ github.sha }}"
 
       - name: Full lifecycle (macOS / Windows)

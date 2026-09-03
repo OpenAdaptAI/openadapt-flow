@@ -33,6 +33,9 @@ pytest -q                          # tests
   from that list is a very welcome PR.
 - **Coverage:** CI reports coverage for visibility. There is no hard floor yet,
   but new code should come with tests.
+- **Function size:** The current long-function count and the largest functions
+  have limits in `tests/test_complexity_budget.py`. New functions cannot exceed
+  200 lines. Existing large functions cannot grow past their recorded limits.
 - **Repository tree:** a test must never write into the checkout. The session
   hooks in `tests/conftest.py` snapshot the tracked-file status before the
   first test and after the last one, and fail the run when a new entry

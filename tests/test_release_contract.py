@@ -908,7 +908,9 @@ def test_archives_apply_canonical_private_content_patterns(tmp_path: Path) -> No
     license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
     metadata_path = "openadapt_flow-1.0.dist-info/METADATA"
     renamed = "openadapt_flow/neutral/settings.txt"
-    private_payload = b"deployment-derived threshold = 0.731"
+    # Assemble the sentinel so this release-contract test remains subject to
+    # the same archive scan. A literal copy here would force an exemption.
+    private_payload = b"deployment" + b"-derived threshold = 0.731"
 
     wheel = tmp_path / "renamed-private.whl"
     _write_wheel(

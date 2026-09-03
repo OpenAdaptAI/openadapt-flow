@@ -132,9 +132,9 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
             raise SourcePolicyError(f"{path}: a content signature is empty")
         signatures.append(joined.encode("ascii"))
 
-    repository_tree = artifacts
+    artifact_view = artifacts
     content_patterns = _policy_strings(
-        repository_tree,
+        artifact_view,
         "content_patterns",
         where="enforcement.built_artifacts",
     )
@@ -296,15 +296,6 @@ PUBLIC_SOURCE_ANYWHERE_IGNORED_DIRECTORIES = frozenset({"__pycache__"})
 # of which ship in the sdist) trips the content scan; every private-corpus
 # artifact carries the full banner. The parts come from the manifest.
 PRIVATE_CORPUS_CONTENT_SIGNATURES = SOURCE_POLICY.content_signatures
-
-# These files enforce or explain the source boundary and therefore carry the
-# policy terms by design. No other archive member is exempt from the canonical
-# content patterns. The wheel contains none of these repository-only files.
-PRIVATE_CONTENT_PATTERN_EXEMPT_PATHS = frozenset(
-    {
-        "tests/test_release_contract.py",
-    }
-)
 
 # Positive inventory for files that can carry data, evidence, static payloads,
 # models, or deployment-shaped configuration.  Ordinary Python/Markdown/TeX
@@ -508,8 +499,6 @@ def _private_content_pattern_hits(payloads: dict[str, bytes]) -> set[str]:
     """Return renamed private material found by canonical content patterns."""
     hits: set[str] = set()
     for member, payload in payloads.items():
-        if member in PRIVATE_CONTENT_PATTERN_EXEMPT_PATHS:
-            continue
         if SOURCE_POLICY.content_regex.search(payload.decode("utf-8", errors="ignore")):
             hits.add(member)
     return hits

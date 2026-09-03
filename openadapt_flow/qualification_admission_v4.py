@@ -7,7 +7,10 @@ until-revoked. A non-null ``revoked_at`` on the pinned key, or a revocation
 entry for the admission, fails closed.
 
 The issued synthetic admission binds one exact ``bundle_sha256``. A live run
-must reproduce that digest. Do not attach this object to a different bundle.
+must reproduce that digest and the other v4 contract fields. Do not attach
+this object to a different bundle. Recheck the current revocation state at
+every actuation edge. ``expires_at`` stays null; a later revocation still
+fails a previously saved authority file.
 """
 
 from __future__ import annotations
@@ -84,6 +87,30 @@ LOCAL_IDENTITY_OPENING: Final[dict[str, Any]] = {
     "revalidation_before_actuation": True,
     "maximum_age_seconds": 60,
 }
+
+LIVE_V4_FIELDS: Final[tuple[str, ...]] = (
+    "organization_id_sha256",
+    "workflow_id_sha256",
+    "workflow_version_id_sha256",
+    "admitted_runtime_sha256",
+    "application_contract_sha256",
+    "environment_contract_sha256",
+    "input_contract_sha256",
+    "action_contract_sha256",
+    "identity_contract_sha256",
+    "effect_contract_sha256",
+    "policy_contract_sha256",
+    "local_identity_opening",
+    "bundle_sha256",
+    "bundle_version",
+)
+_TEMPLATE_LIVE_FIELDS: Final[tuple[tuple[str, str], ...]] = (
+    ("environment_contract_sha256", "qualification_environment_contract_sha256"),
+    ("input_contract_sha256", "parameter_contract_sha256"),
+    ("action_contract_sha256", "qualification_project_contract_sha256"),
+    ("identity_contract_sha256", "identity_contract_sha256"),
+    ("policy_contract_sha256", "policy_contract_sha256"),
+)
 
 ADMISSION_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -226,6 +253,181 @@ def normalize_digest(value: str) -> str:
     return value
 
 
+def _prefixed_digest(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith("sha256:"):
+        return value if _DIGEST_RE.fullmatch(value) else None
+    if re.fullmatch(r"[a-f0-9]{64}", value) is not None:
+        return "sha256:" + value
+    return None
+
+
+def _attr(source: Any, name: str) -> Any:
+    if source is None:
+        return None
+    if isinstance(source, Mapping):
+        return source.get(name)
+    return getattr(source, name, None)
+
+
+def _controlled_malformed(exc: BaseException) -> QualificationAdmissionV4Error:
+    if isinstance(exc, QualificationAdmissionV4Error):
+        return exc
+    return QualificationAdmissionV4Error("qualification admission object is malformed")
+
+
+def extract_live_v4_binding(workflow: Any) -> dict[str, Any]:
+    """Collect live v4 fields already present on the workflow or run.
+
+    Missing values stay missing. This function does not invent a digest.
+    """
+
+    live: dict[str, Any] = {}
+    manifest = _attr(workflow, "manifest")
+    digest = _prefixed_digest(_attr(manifest, "content_digest"))
+    if digest is not None:
+        live["bundle_sha256"] = digest
+    live_source = _attr(workflow, "live_qualification_binding")
+    sources = (live_source, workflow, _attr(workflow, "qualification"))
+    for field in LIVE_V4_FIELDS:
+        if field in live:
+            continue
+        for source in sources:
+            value = _attr(source, field)
+            if value is None:
+                continue
+            if field == "local_identity_opening":
+                live[field] = value
+                break
+            if field == "bundle_version":
+                if isinstance(value, str) and value:
+                    live[field] = value
+                    break
+                continue
+            prefixed = _prefixed_digest(value)
+            if prefixed is not None:
+                live[field] = prefixed
+                break
+    provenance = _attr(manifest, "provenance")
+    template = _attr(provenance, "governed_authorization_template")
+    if template is not None:
+        for live_field, template_field in _TEMPLATE_LIVE_FIELDS:
+            if live_field in live:
+                continue
+            prefixed = _prefixed_digest(_attr(template, template_field))
+            if prefixed is not None:
+                live[live_field] = prefixed
+        if "effect_contract_sha256" not in live:
+            requirements = _attr(template, "qualified_effect_requirements")
+            if requirements is not None:
+                from openadapt_flow.qualification_admission_v2 import contract_sha256
+
+                dumped: list[Any] | None = []
+                for item in requirements:
+                    if hasattr(item, "model_dump"):
+                        dumped.append(item.model_dump(mode="json"))
+                    elif isinstance(item, dict):
+                        dumped.append(item)
+                    else:
+                        dumped = None
+                        break
+                if dumped is not None:
+                    live["effect_contract_sha256"] = "sha256:" + contract_sha256(dumped)
+    if "local_identity_opening" not in live:
+        live["local_identity_opening"] = LOCAL_IDENTITY_OPENING
+    return live
+
+
+def bind_live_v4_admission(
+    admission: Mapping[str, Any], live: Mapping[str, Any]
+) -> None:
+    """Compare issued v4 fields to live workflow/run values. Refuse if missing."""
+
+    missing = [
+        field
+        for field in LIVE_V4_FIELDS
+        if field not in live or live.get(field) in (None, "")
+    ]
+    if missing:
+        raise QualificationAdmissionV4Error(
+            "qualification admission live workflow is missing required fields"
+        )
+    for field in LIVE_V4_FIELDS:
+        admitted = admission.get(field)
+        current = live.get(field)
+        if field.endswith("_sha256"):
+            admitted_n = _prefixed_digest(admitted)
+            current_n = _prefixed_digest(current)
+            if admitted_n is None or current_n is None or admitted_n != current_n:
+                raise QualificationAdmissionV4Error(
+                    "qualification admission does not bind the live workflow"
+                )
+        elif admitted != current:
+            raise QualificationAdmissionV4Error(
+                "qualification admission does not bind the live workflow"
+            )
+
+
+def admission_is_revoked(admission: Mapping[str, Any], revocations: Any) -> str | None:
+    """Return a refusal reason when the current list revokes this admission."""
+
+    if not isinstance(revocations, list):
+        raise QualificationAdmissionV4Error("revocation list is invalid")
+    admission_identity = object_sha256(admission)
+    admission_id = admission.get("admission_id_sha256")
+    for item in revocations:
+        if not isinstance(item, dict):
+            raise QualificationAdmissionV4Error("revocation entry is invalid")
+        if item.get("revoked_at") is None:
+            raise QualificationAdmissionV4Error("revocation entry lacks revoked_at")
+        subject = (item.get("subject_kind"), item.get("subject_id"))
+        if subject in {
+            ("qualification-admission", admission_identity),
+            ("qualification-admission", admission_id),
+        }:
+            return "qualification admission is revoked"
+        if subject == ("qualification-signer-key", PINNED_PUBLIC_KEY_SHA256):
+            return "pinned qualification key is revoked"
+    return None
+
+
+def revocation_is_monotonic_successor(
+    *,
+    previous_digest: str,
+    previous_revision: Any,
+    previous_observed_at: Any,
+    current: Mapping[str, Any],
+) -> bool:
+    """True when current is a later current revocation state, not a rollback."""
+
+    current_digest = current.get("revocation_state_sha256")
+    if (
+        not isinstance(current_digest, str)
+        or _DIGEST_RE.fullmatch(current_digest) is None
+    ):
+        return False
+    if current_digest == previous_digest:
+        return True
+    if current.get("status") != "current":
+        return False
+    current_revision = current.get("revision")
+    if not isinstance(current_revision, int) or isinstance(current_revision, bool):
+        return False
+    if not isinstance(previous_revision, int) or isinstance(previous_revision, bool):
+        return False
+    if current_revision <= previous_revision:
+        return False
+    if current.get("previous_revocation_state_sha256") != previous_digest:
+        return False
+    try:
+        previous_time = _require_timestamp(previous_observed_at, "previous observed_at")
+        current_time = _require_timestamp(current.get("observed_at"), "observed_at")
+    except QualificationAdmissionV4Error:
+        return False
+    return current_time >= previous_time
+
+
 def _closed(
     value: Any, fields: frozenset[str] | set[str], label: str
 ) -> dict[str, Any]:
@@ -297,10 +499,21 @@ def _decode_pinned_public_key() -> bytes:
 
 
 def _workflow_identity(issuer: Mapping[str, Any]) -> str:
-    return (
-        f"https://github.com/{issuer['repository']}/{issuer['workflow']}"
-        f"@{issuer['ref']}"
-    )
+    repository = issuer.get("repository") if isinstance(issuer, Mapping) else None
+    workflow = issuer.get("workflow") if isinstance(issuer, Mapping) else None
+    ref = issuer.get("ref") if isinstance(issuer, Mapping) else None
+    if (
+        not isinstance(repository, str)
+        or not isinstance(workflow, str)
+        or not isinstance(ref, str)
+        or not repository
+        or not workflow
+        or not ref
+    ):
+        raise QualificationAdmissionV4Error(
+            "signed object issuer identity is incomplete"
+        )
+    return f"https://github.com/{repository}/{workflow}@{ref}"
 
 
 def _signing_statement(
@@ -332,6 +545,8 @@ def _verify_embedded_signature(
     signature_domain: bytes,
     expected_workflow: str,
 ) -> None:
+    if not isinstance(value, Mapping):
+        raise QualificationAdmissionV4Error("signed object is malformed")
     if value.get("algorithm") != "ed25519":
         raise QualificationAdmissionV4Error("signed object algorithm is not ed25519")
     if value.get("issuer_key_id") != PINNED_KEY_ID:
@@ -341,6 +556,10 @@ def _verify_embedded_signature(
     issuer = value.get("issuer")
     if not isinstance(issuer, dict):
         raise QualificationAdmissionV4Error("signed object has no issuer identity")
+    if "repository" not in issuer or "workflow" not in issuer or "ref" not in issuer:
+        raise QualificationAdmissionV4Error(
+            "signed object issuer identity is incomplete"
+        )
     if _workflow_identity(issuer) != expected_workflow:
         raise QualificationAdmissionV4Error(
             "signed object issuer workflow is not pinned"
@@ -480,9 +699,17 @@ def _validate_campaign_summary(value: Any) -> dict[str, Any]:
 def _validate_window(
     value: Mapping[str, Any], *, now: datetime, issued_field: str = "issued_at"
 ) -> None:
-    issued = _require_timestamp(value[issued_field], issued_field)
-    not_before = _require_timestamp(value["not_before"], "not_before")
-    expires = _optional_timestamp(value["expires_at"], "expires_at")
+    if not isinstance(value, Mapping):
+        raise QualificationAdmissionV4Error("validity window fields are missing")
+    if (
+        issued_field not in value
+        or "not_before" not in value
+        or "expires_at" not in value
+    ):
+        raise QualificationAdmissionV4Error("validity window fields are missing")
+    issued = _require_timestamp(value.get(issued_field), issued_field)
+    not_before = _require_timestamp(value.get("not_before"), "not_before")
+    expires = _optional_timestamp(value.get("expires_at"), "expires_at")
     if not_before > issued:
         raise QualificationAdmissionV4Error("validity window is invalid")
     if expires is not None and not issued < expires:
@@ -494,6 +721,17 @@ def _validate_window(
 
 
 def validate_qualification_admission_v4(
+    value: Any, *, now: datetime | None = None
+) -> dict[str, Any]:
+    try:
+        return _validate_qualification_admission_v4(value, now=now)
+    except QualificationAdmissionV4Error:
+        raise
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise _controlled_malformed(exc) from exc
+
+
+def _validate_qualification_admission_v4(
     value: Any, *, now: datetime | None = None
 ) -> dict[str, Any]:
     admission = _closed(value, ADMISSION_FIELDS, "qualification admission")
@@ -570,6 +808,8 @@ def _validate_decision_receipt(
         raise QualificationAdmissionV4Error("decision receipt is invalid")
     if value.get("schema_version") != RECEIPT_SCHEMA:
         raise QualificationAdmissionV4Error("decision receipt schema is not supported")
+    if "expires_at" not in value or "issuer" not in value:
+        raise QualificationAdmissionV4Error("decision receipt is malformed")
     if value.get("expires_at") is not None:
         raise QualificationAdmissionV4Error("decision receipt must be until-revoked")
     if value.get("signer_registry_sha256") != PINNED_REGISTRY_IDENTITY_SHA256:
@@ -602,11 +842,16 @@ def _validate_revocation_state(
     *,
     admission: Mapping[str, Any],
     now: datetime,
+    previous_digest: str | None = None,
+    previous_revision: int | None = None,
+    previous_observed_at: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise QualificationAdmissionV4Error("revocation state is invalid")
     if value.get("schema_version") != REVOCATION_SCHEMA:
         raise QualificationAdmissionV4Error("revocation state schema is not supported")
+    if "expires_at" not in value or "issuer" not in value or "observed_at" not in value:
+        raise QualificationAdmissionV4Error("revocation state is malformed")
     if value.get("expires_at") is not None:
         raise QualificationAdmissionV4Error("revocation state must be until-revoked")
     if value.get("status") != "current":
@@ -615,11 +860,23 @@ def _validate_revocation_state(
         raise QualificationAdmissionV4Error(
             "revocation state signer registry is not the pinned registry"
         )
-    _require_digest(value.get("revocation_state_sha256"), "revocation_state_sha256")
-    if admission["revocation_state_sha256"] != value["revocation_state_sha256"]:
-        raise QualificationAdmissionV4Error(
-            "qualification admission revocation state differs"
-        )
+    current_digest = _require_digest(
+        value.get("revocation_state_sha256"), "revocation_state_sha256"
+    )
+    issue_pin = _require_digest(
+        admission.get("revocation_state_sha256"), "revocation_state_sha256"
+    )
+    baseline = previous_digest or issue_pin
+    if current_digest != baseline:
+        if not revocation_is_monotonic_successor(
+            previous_digest=baseline,
+            previous_revision=previous_revision if previous_revision is not None else 0,
+            previous_observed_at=previous_observed_at or admission.get("issued_at"),
+            current=value,
+        ):
+            raise QualificationAdmissionV4Error(
+                "qualification revocation state rolled back"
+            )
     _validate_window(value, now=now, issued_field="observed_at")
     _verify_embedded_signature(
         value,
@@ -627,23 +884,9 @@ def _validate_revocation_state(
         signature_domain=REVOCATION_STATE_SIGNATURE_DOMAIN,
         expected_workflow=PINNED_REVOCATION_WORKFLOW,
     )
-    revocations = value.get("revocations")
-    if not isinstance(revocations, list):
-        raise QualificationAdmissionV4Error("revocation list is invalid")
-    admission_identity = object_sha256(admission)
-    for item in revocations:
-        if not isinstance(item, dict):
-            raise QualificationAdmissionV4Error("revocation entry is invalid")
-        if item.get("revoked_at") is None:
-            raise QualificationAdmissionV4Error("revocation entry lacks revoked_at")
-        subject = (item.get("subject_kind"), item.get("subject_id"))
-        if subject == ("qualification-admission", admission_identity) or subject == (
-            "qualification-admission",
-            admission["admission_id_sha256"],
-        ):
-            raise QualificationAdmissionV4Error("qualification admission is revoked")
-        if subject == ("qualification-signer-key", PINNED_PUBLIC_KEY_SHA256):
-            raise QualificationAdmissionV4Error("pinned qualification key is revoked")
+    revoked = admission_is_revoked(admission, value.get("revocations"))
+    if revoked is not None:
+        raise QualificationAdmissionV4Error(revoked)
     return value
 
 
@@ -689,10 +932,46 @@ def verify_qualification_admission_v4(
     decision_receipt: Mapping[str, Any] | Any,
     revocation_state: Mapping[str, Any] | Any,
     expected_bundle_sha256: str | None = None,
+    expected_live: Mapping[str, Any] | None = None,
+    previous_revocation_digest: str | None = None,
+    previous_revocation_revision: int | None = None,
+    previous_revocation_observed_at: str | None = None,
     now: datetime | None = None,
 ) -> VerifiedQualificationAdmissionV4:
     """Verify one issued v4 admission against the pinned published registry."""
 
+    try:
+        return _verify_qualification_admission_v4(
+            admission,
+            registry=registry,
+            decision_receipt=decision_receipt,
+            revocation_state=revocation_state,
+            expected_bundle_sha256=expected_bundle_sha256,
+            expected_live=expected_live,
+            previous_revocation_digest=previous_revocation_digest,
+            previous_revocation_revision=previous_revocation_revision,
+            previous_revocation_observed_at=previous_revocation_observed_at,
+            now=now,
+        )
+    except QualificationAdmissionV4Error:
+        raise
+    except (KeyError, TypeError, AttributeError, ValueError) as exc:
+        raise _controlled_malformed(exc) from exc
+
+
+def _verify_qualification_admission_v4(
+    admission: Mapping[str, Any] | Any,
+    *,
+    registry: Mapping[str, Any] | Any,
+    decision_receipt: Mapping[str, Any] | Any,
+    revocation_state: Mapping[str, Any] | Any,
+    expected_bundle_sha256: str | None = None,
+    expected_live: Mapping[str, Any] | None = None,
+    previous_revocation_digest: str | None = None,
+    previous_revocation_revision: int | None = None,
+    previous_revocation_observed_at: str | None = None,
+    now: datetime | None = None,
+) -> VerifiedQualificationAdmissionV4:
     current = _parse_utc_now(now)
     trusted_registry = verify_pinned_signer_registry(registry)
     trusted_admission = validate_qualification_admission_v4(admission, now=current)
@@ -704,9 +983,16 @@ def verify_qualification_admission_v4(
         receipt=trusted_receipt,
     )
     _validate_revocation_state(
-        revocation_state, admission=trusted_admission, now=current
+        revocation_state,
+        admission=trusted_admission,
+        now=current,
+        previous_digest=previous_revocation_digest,
+        previous_revision=previous_revocation_revision,
+        previous_observed_at=previous_revocation_observed_at,
     )
-    if expected_bundle_sha256 is not None:
+    if expected_live is not None:
+        bind_live_v4_admission(trusted_admission, expected_live)
+    elif expected_bundle_sha256 is not None:
         live = expected_bundle_sha256
         if not live.startswith("sha256:"):
             live = "sha256:" + live
@@ -729,16 +1015,22 @@ def verify_qualification_admission_v4(
 
 
 __all__ = [
+    "LIVE_V4_FIELDS",
+    "LOCAL_IDENTITY_OPENING",
     "PINNED_KEY_ID",
     "PINNED_PUBLIC_KEY",
     "PINNED_REGISTRY_IDENTITY_SHA256",
     "SCHEMA",
     "QualificationAdmissionV4Error",
     "VerifiedQualificationAdmissionV4",
+    "admission_is_revoked",
+    "bind_live_v4_admission",
     "canonical_json",
+    "extract_live_v4_binding",
     "normalize_digest",
     "object_sha256",
     "raw_object_sha256",
+    "revocation_is_monotonic_successor",
     "validate_qualification_admission_v4",
     "verify_pinned_signer_registry",
     "verify_qualification_admission_v4",

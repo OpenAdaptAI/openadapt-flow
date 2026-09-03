@@ -49,7 +49,9 @@ from openadapt_flow.qualification_admission_v2 import (
 from openadapt_flow.qualification_admission_v4 import (
     QualificationAdmissionV4Error,
     VerifiedQualificationAdmissionV4,
-    normalize_digest,
+    bind_live_v4_admission,
+    extract_live_v4_binding,
+    revocation_is_monotonic_successor,
     verify_qualification_admission_v4,
 )
 
@@ -315,13 +317,14 @@ def _workflow_binding_refusal(
 
     manifest = workflow.manifest
     if isinstance(authority, ProductionQualificationAuthorityV4):
-        if manifest is None or not manifest.content_digest:
+        if manifest is None or not getattr(manifest, "content_digest", None):
             return "Production qualification requires a sealed bundle"
-        live = normalize_digest(manifest.content_digest)
-        admitted = normalize_digest(
-            str(authority.qualification_admission.get("bundle_sha256", ""))
-        )
-        if not live or live != admitted:
+        try:
+            bind_live_v4_admission(
+                authority.qualification_admission,
+                extract_live_v4_binding(workflow),
+            )
+        except QualificationAdmissionV4Error:
             return (
                 "Production qualification does not bind the sealed workflow contracts"
             )
@@ -380,10 +383,14 @@ class ProductionQualificationGuard:
             self._revocation_state_sha256 = str(
                 initial.revocation_state.get("revocation_state_sha256")
             )
+            self._revocation_revision = initial.revocation_state.get("revision")
+            self._revocation_observed_at = initial.revocation_state.get("observed_at")
         else:
             self._expected = initial.expected
             self._revoked_ids = frozenset(initial.revoked_admission_ids)
             self._revocation_state_sha256 = None
+            self._revocation_revision = None
+            self._revocation_observed_at = None
 
     def _load_current(self) -> ProductionAuthority:
         current = load_production_qualification_authority(self.path)
@@ -405,9 +412,15 @@ class ProductionQualificationGuard:
             if (
                 self._revocation_state_sha256 is not None
                 and current_revocation != self._revocation_state_sha256
+                and not revocation_is_monotonic_successor(
+                    previous_digest=self._revocation_state_sha256,
+                    previous_revision=self._revocation_revision,
+                    previous_observed_at=self._revocation_observed_at,
+                    current=current.revocation_state,
+                )
             ):
                 raise ProductionQualificationAuthorityError(
-                    "qualification authority changed after run admission"
+                    "qualification revocation state rolled back"
                 )
             return current
         if current.expected != self._expected:
@@ -436,14 +449,21 @@ class ProductionQualificationGuard:
             raise ProductionQualificationAuthorityError(refusal)
         if isinstance(current, ProductionQualificationAuthorityV4):
             try:
-                return verify_qualification_admission_v4(
+                verified = verify_qualification_admission_v4(
                     current.qualification_admission,
                     registry=current.qualification_signer_registry,
                     decision_receipt=current.decision_receipt,
                     revocation_state=current.revocation_state,
-                    expected_bundle_sha256=(
-                        workflow.manifest.content_digest
-                        if workflow.manifest is not None
+                    expected_live=extract_live_v4_binding(workflow),
+                    previous_revocation_digest=self._revocation_state_sha256,
+                    previous_revocation_revision=(
+                        self._revocation_revision
+                        if isinstance(self._revocation_revision, int)
+                        else None
+                    ),
+                    previous_revocation_observed_at=(
+                        self._revocation_observed_at
+                        if isinstance(self._revocation_observed_at, str)
                         else None
                     ),
                 )
@@ -451,6 +471,12 @@ class ProductionQualificationGuard:
                 raise ProductionQualificationAuthorityError(
                     "Production qualification admission is not active"
                 ) from exc
+            self._revocation_state_sha256 = str(
+                current.revocation_state.get("revocation_state_sha256")
+            )
+            self._revocation_revision = current.revocation_state.get("revision")
+            self._revocation_observed_at = current.revocation_state.get("observed_at")
+            return verified
         revoked = frozenset(current.revoked_admission_ids)
         try:
             if for_actuation and not self.remote_permit_revalidation:
@@ -540,6 +566,61 @@ class ProductionQualificationGuard:
         }
 
 
+def managed_qualification_edge_refusal(
+    authorization: object,
+    workflow: object,
+) -> str | None:
+    """Recheck the Cloud admission at a consequential input edge.
+
+    Local tutorial and in-process Standard runs without managed dispatch keep
+    the existing no-guard path. A managed Standard or Regulated dispatch must
+    re-verify revocation, run binding, and admission identity here, not only
+    at ``_cmd_run`` entry.
+    """
+
+    admission = getattr(authorization, "qualification_admission", None)
+    if admission is None:
+        return (
+            "Standard and Regulated actuation requires a signed qualification admission"
+        )
+    try:
+        if isinstance(admission, dict):
+            from openadapt_flow.qualification_admission_v4 import (
+                validate_qualification_admission_v4,
+            )
+
+            trusted = validate_qualification_admission_v4(admission)
+            bind_live_v4_admission(trusted, extract_live_v4_binding(workflow))
+            return None
+        from openadapt_flow.qualification_admission import (
+            expected_from_payload,
+            load_qualification_signer_trust,
+            verify_qualification_admission,
+        )
+
+        signer_trust = load_qualification_signer_trust(
+            os.environ.get("OPENADAPT_QUALIFICATION_SIGNERS_JSON", "")
+        )
+        verify_qualification_admission(
+            admission,
+            trusted_signers=signer_trust,
+            expected=expected_from_payload(admission.payload),
+        )
+    except (
+        QualificationAdmissionError,
+        QualificationAdmissionV4Error,
+        KeyError,
+        TypeError,
+        AttributeError,
+        ValueError,
+    ):
+        return (
+            "the Production qualification authority is invalid, expired, "
+            "revoked, or does not match this exact run"
+        )
+    return None
+
+
 __all__ = [
     "AUTHORITY_SCHEMA",
     "AUTHORITY_SCHEMA_V4",
@@ -548,4 +629,5 @@ __all__ = [
     "ProductionQualificationAuthorityV4",
     "ProductionQualificationGuard",
     "load_production_qualification_authority",
+    "managed_qualification_edge_refusal",
 ]

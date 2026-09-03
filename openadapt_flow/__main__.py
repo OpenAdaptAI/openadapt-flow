@@ -1847,20 +1847,12 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 def _refuse_unverified_managed_qualification_admission(
     authorization: object,
+    workflow: object | None = None,
 ) -> int | None:
     """Verify the signed admission already bound on a Cloud authorization."""
 
-    import os
-
-    from openadapt_flow.qualification_admission import (
-        QualificationAdmissionError,
-        expected_from_payload,
-        load_qualification_signer_trust,
-        verify_qualification_admission,
-    )
-    from openadapt_flow.qualification_admission_v4 import (
-        QualificationAdmissionV4Error,
-        validate_qualification_admission_v4,
+    from openadapt_flow.production_qualification import (
+        managed_qualification_edge_refusal,
     )
 
     admission = getattr(authorization, "qualification_admission", None)
@@ -1870,19 +1862,8 @@ def _refuse_unverified_managed_qualification_admission(
             "qualification admission. Nothing was executed."
         )
         return 2
-    try:
-        if isinstance(admission, dict):
-            validate_qualification_admission_v4(admission)
-            return None
-        signer_trust = load_qualification_signer_trust(
-            os.environ.get("OPENADAPT_QUALIFICATION_SIGNERS_JSON", "")
-        )
-        verify_qualification_admission(
-            admission,
-            trusted_signers=signer_trust,
-            expected=expected_from_payload(admission.payload),
-        )
-    except (QualificationAdmissionError, QualificationAdmissionV4Error):
+    refusal = managed_qualification_edge_refusal(authorization, workflow)
+    if refusal is not None:
         print(
             "run REFUSED: the Production qualification authority is invalid, "
             "expired, revoked, or does not match this exact run. Nothing was "
@@ -2062,7 +2043,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 )
                 return 2
         elif dispatch_admission is not None:
-            refused = _refuse_unverified_managed_qualification_admission(authorization)
+            refused = _refuse_unverified_managed_qualification_admission(
+                authorization, workflow
+            )
             if refused is not None:
                 return refused
     policy_source = args.policy or cfg.policy.policy

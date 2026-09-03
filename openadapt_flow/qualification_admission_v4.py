@@ -323,16 +323,17 @@ def extract_live_v4_binding(workflow: Any) -> dict[str, Any]:
             if requirements is not None:
                 from openadapt_flow.qualification_admission_v2 import contract_sha256
 
-                dumped: list[Any] | None = []
+                dumped: list[Any] = []
+                valid_requirements = True
                 for item in requirements:
                     if hasattr(item, "model_dump"):
                         dumped.append(item.model_dump(mode="json"))
                     elif isinstance(item, dict):
                         dumped.append(item)
                     else:
-                        dumped = None
+                        valid_requirements = False
                         break
-                if dumped is not None:
+                if valid_requirements:
                     live["effect_contract_sha256"] = "sha256:" + contract_sha256(dumped)
     if "local_identity_opening" not in live:
         live["local_identity_opening"] = LOCAL_IDENTITY_OPENING

@@ -1860,6 +1860,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     from openadapt_flow.composition import is_composition_artifact
     from openadapt_flow.execution_profiles import (
         execution_profile_contract,
+        requires_signed_qualification_admission,
         resolve_execution_profile,
     )
     from openadapt_flow.ir import Workflow
@@ -1971,6 +1972,34 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return refused
     if _refuse_missing_citrix_readiness(backend_cfg, operation="run"):
         return 2
+    will_actuate = not bool(getattr(args, "dry_run", False))
+    authority_file = getattr(args, "qualification_authority_file", None)
+    if (
+        requires_signed_qualification_admission(
+            selected_profile, will_actuate=will_actuate
+        )
+        and qualification_case is None
+    ):
+        if not authority_file:
+            print(
+                "run REFUSED: Standard and Regulated actuation requires a signed "
+                "qualification admission. Nothing was executed."
+            )
+            return 2
+        try:
+            ProductionQualificationGuard(
+                authority_file,
+                remote_permit_revalidation=bool(
+                    getattr(args, "managed_dispatch_file", None)
+                ),
+            ).verify(workflow, for_actuation=False)
+        except ProductionQualificationAuthorityError:
+            print(
+                "run REFUSED: the Production qualification authority is invalid, "
+                "expired, revoked, or does not match this exact run. Nothing was "
+                "executed."
+            )
+            return 2
     policy_source = args.policy or cfg.policy.policy
 
     report = evaluate_run_gate(
@@ -2277,7 +2306,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         authority_file = getattr(args, "qualification_authority_file", None)
         if not authority_file:
             print(
-                "Resume REFUSED: Production actuation requires the private v2 "
+                "Resume REFUSED: Production actuation requires the private "
                 "qualification authority again. Nothing was executed."
             )
             return 3
@@ -5934,8 +5963,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Private owner-only v2 Production qualification authority; when "
-            "supplied it is verified and re-read at every input edge"
+            "Private owner-only Production qualification authority (v2 envelope "
+            "or issued openadapt.qualification-admission/v4). Required for "
+            "Standard and Regulated actuation; verified and re-read at every "
+            "input edge"
         ),
     )
     p.add_argument(
@@ -5971,7 +6002,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help=(
-            "Private owner-only v2 Production qualification authority for the "
+            "Private owner-only Production qualification authority for the "
             "resumed input edge"
         ),
     )

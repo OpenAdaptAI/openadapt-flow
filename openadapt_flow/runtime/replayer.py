@@ -9339,9 +9339,10 @@ class Replayer:
             return None
         guard = self.production_qualification_guard
         if guard is None:
-            # A local Standard/Regulated run keeps the run-gate contracts it
-            # always had; a v2 authority becomes mandatory once an admission
-            # issuer provisions one for the runner.
+            # ``openadapt flow run --profile standard|regulated`` refuses
+            # before constructing this replayer when the signed admission is
+            # missing. The tutorial and in-process tests still use the
+            # Standard evidence gate without that CLI actuation path.
             return None
         try:
             expected = guard.authorization_binding(workflow)

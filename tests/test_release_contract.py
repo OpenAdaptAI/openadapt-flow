@@ -908,7 +908,7 @@ def test_archives_apply_canonical_private_content_patterns(tmp_path: Path) -> No
     license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
     metadata_path = "openadapt_flow-1.0.dist-info/METADATA"
     renamed = "openadapt_flow/neutral/settings.txt"
-    private_payload = b"oracle_recipe_id = customer-ledger-v4"
+    private_payload = b"deployment-derived threshold = 0.731"
 
     wheel = tmp_path / "renamed-private.whl"
     _write_wheel(

@@ -132,13 +132,11 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
             raise SourcePolicyError(f"{path}: a content signature is empty")
         signatures.append(joined.encode("ascii"))
 
-    repository_tree = enforcement.get("repository_tree")
-    if not isinstance(repository_tree, dict):
-        raise SourcePolicyError(f"{path}: enforcement.repository_tree block is missing")
+    repository_tree = artifacts
     content_patterns = _policy_strings(
         repository_tree,
         "content_patterns",
-        where="enforcement.repository_tree",
+        where="enforcement.built_artifacts",
     )
     try:
         content_regex = re.compile(
@@ -147,7 +145,7 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
         )
     except re.error as exc:
         raise SourcePolicyError(
-            f"{path}: enforcement.repository_tree.content_patterns is invalid: {exc}"
+            f"{path}: enforcement.built_artifacts.content_patterns is invalid: {exc}"
         ) from exc
 
     return SourcePolicy(
@@ -304,11 +302,7 @@ PRIVATE_CORPUS_CONTENT_SIGNATURES = SOURCE_POLICY.content_signatures
 # content patterns. The wheel contains none of these repository-only files.
 PRIVATE_CONTENT_PATTERN_EXEMPT_PATHS = frozenset(
     {
-        "benchmark/vision_hardening/README.md",
-        "scripts/check_release_consistency.py",
-        "source-policy.public.json",
         "tests/test_release_contract.py",
-        "tests/test_source_policy_binding.py",
     }
 )
 

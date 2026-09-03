@@ -1845,6 +1845,53 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     )
 
 
+def _refuse_unverified_managed_qualification_admission(
+    authorization: object,
+) -> int | None:
+    """Verify the signed admission already bound on a Cloud authorization."""
+
+    import os
+
+    from openadapt_flow.qualification_admission import (
+        QualificationAdmissionError,
+        expected_from_payload,
+        load_qualification_signer_trust,
+        verify_qualification_admission,
+    )
+    from openadapt_flow.qualification_admission_v4 import (
+        QualificationAdmissionV4Error,
+        validate_qualification_admission_v4,
+    )
+
+    admission = getattr(authorization, "qualification_admission", None)
+    if admission is None:
+        print(
+            "run REFUSED: Standard and Regulated actuation requires a signed "
+            "qualification admission. Nothing was executed."
+        )
+        return 2
+    try:
+        if isinstance(admission, dict):
+            validate_qualification_admission_v4(admission)
+            return None
+        signer_trust = load_qualification_signer_trust(
+            os.environ.get("OPENADAPT_QUALIFICATION_SIGNERS_JSON", "")
+        )
+        verify_qualification_admission(
+            admission,
+            trusted_signers=signer_trust,
+            expected=expected_from_payload(admission.payload),
+        )
+    except (QualificationAdmissionError, QualificationAdmissionV4Error):
+        print(
+            "run REFUSED: the Production qualification authority is invalid, "
+            "expired, revoked, or does not match this exact run. Nothing was "
+            "executed."
+        )
+        return 2
+    return None
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     """Execute a bundle under a named deployment profile -- FAIL-CLOSED.
 
@@ -1974,32 +2021,50 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 2
     will_actuate = not bool(getattr(args, "dry_run", False))
     authority_file = getattr(args, "qualification_authority_file", None)
+    dispatch_file = getattr(args, "managed_dispatch_file", None)
+    managed_binding = None
+    authorization = None
+    if dispatch_file:
+        try:
+            managed_binding = read_managed_dispatch_envelope(Path(dispatch_file))
+            authorization = managed_binding.authorization
+        except ManagedDispatchEnvelopeError:
+            print(
+                "run REFUSED: managed dispatch binding is invalid. Nothing was executed."
+            )
+            return 2
     if (
         requires_signed_qualification_admission(
             selected_profile, will_actuate=will_actuate
         )
         and qualification_case is None
     ):
-        if not authority_file:
+        dispatch_admission = (
+            None if authorization is None else authorization.qualification_admission
+        )
+        if not authority_file and dispatch_admission is None:
             print(
                 "run REFUSED: Standard and Regulated actuation requires a signed "
                 "qualification admission. Nothing was executed."
             )
             return 2
-        try:
-            ProductionQualificationGuard(
-                authority_file,
-                remote_permit_revalidation=bool(
-                    getattr(args, "managed_dispatch_file", None)
-                ),
-            ).verify(workflow, for_actuation=False)
-        except ProductionQualificationAuthorityError:
-            print(
-                "run REFUSED: the Production qualification authority is invalid, "
-                "expired, revoked, or does not match this exact run. Nothing was "
-                "executed."
-            )
-            return 2
+        if authority_file:
+            try:
+                ProductionQualificationGuard(
+                    authority_file,
+                    remote_permit_revalidation=bool(dispatch_file),
+                ).verify(workflow, for_actuation=False)
+            except ProductionQualificationAuthorityError:
+                print(
+                    "run REFUSED: the Production qualification authority is invalid, "
+                    "expired, revoked, or does not match this exact run. Nothing was "
+                    "executed."
+                )
+                return 2
+        elif dispatch_admission is not None:
+            refused = _refuse_unverified_managed_qualification_admission(authorization)
+            if refused is not None:
+                return refused
     policy_source = args.policy or cfg.policy.policy
 
     report = evaluate_run_gate(
@@ -2028,7 +2093,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         # turn a locally refused bundle into an admitted one.
         return 2
 
-    dispatch_file = getattr(args, "managed_dispatch_file", None)
     if qualification_case is not None and dispatch_file:
         print(
             "run REFUSED: a qualification evidence run cannot accept a managed "
@@ -2041,18 +2105,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         if qualification_case is not None
         else _resolve_worklists(getattr(args, "worklist", None), workflow)
     )
-    managed_binding = None
-    authorization = None
     local_authorization = None
     if dispatch_file:
-        try:
-            managed_binding = read_managed_dispatch_envelope(Path(dispatch_file))
-            authorization = managed_binding.authorization
-        except ManagedDispatchEnvelopeError:
-            print(
-                "run REFUSED: managed dispatch binding is invalid. Nothing was executed."
-            )
-            return 2
+        assert managed_binding is not None
+        assert authorization is not None
         local_authorization = build_runtime_authorization(
             workflow,
             report,

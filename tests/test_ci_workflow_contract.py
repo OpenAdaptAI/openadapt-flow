@@ -90,7 +90,9 @@ def test_playwright_installs_and_enclosing_jobs_are_bounded() -> None:
     # The privileged cleanup proof runs before browser delivery and does not
     # depend on an apt mirror. The full suite excludes only that duplicate.
     assert "Linux retained installer process group (non-injecting)" in test_job
-    assert "pytest -vv --durations=20 tests/test_install_playwright_browser.py" in test_job
+    assert (
+        "pytest -vv --durations=20 tests/test_install_playwright_browser.py" in test_job
+    )
     assert "--ignore=tests/test_install_playwright_browser.py" in test_job
     assert "coverage report --fail-under=85" in test_job
     assert "pytest -vv --durations=20 tests/e2e/test_free_path_e2e.py" in e2e_job

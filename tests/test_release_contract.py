@@ -5,11 +5,15 @@ import io
 import json
 import os
 import re
+import stat
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
 
 import pytest
+
+import scripts.check_release_consistency as release_guard
 
 try:
     import tomllib
@@ -315,6 +319,10 @@ def test_public_source_tree_rejects_private_segments_tokens_and_signatures(
     with pytest.raises(ValueError, match="public source tree contains private"):
         validate_public_source_tree(tmp_path)
 
+    renamed.write_bytes(b"deployment" + b"-derived threshold = 0.731")
+    with pytest.raises(ValueError, match="public source tree contains private"):
+        validate_public_source_tree(tmp_path)
+
 
 def test_public_source_tree_rejects_symlinks_and_changed_inventory(
     tmp_path: Path,
@@ -337,6 +345,30 @@ def test_public_source_tree_rejects_symlinks_and_changed_inventory(
     except (OSError, NotImplementedError):
         pytest.skip("symlinks are unavailable on this platform")
     with pytest.raises(ValueError, match="symlink/special"):
+        validate_public_source_tree(tmp_path)
+
+
+def test_public_source_tree_rejects_special_files(tmp_path: Path) -> None:
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("special files are unavailable on this platform")
+    write_public_artifact_inventory(tmp_path)
+    fifo = tmp_path / "openadapt_flow/pipe"
+    fifo.parent.mkdir()
+    os.mkfifo(fifo)
+    with pytest.raises(ValueError, match="symlink/special"):
+        validate_public_source_tree(tmp_path)
+
+
+def test_public_source_tree_scans_tracked_files_under_ignored_build_roots(
+    tmp_path: Path,
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    hidden = tmp_path / "dist/neutral.py"
+    hidden.parent.mkdir()
+    hidden.write_bytes(b"deployment" + b"-derived threshold = 0.731")
+    write_public_artifact_inventory(tmp_path)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
+    with pytest.raises(ValueError, match="public source tree contains private"):
         validate_public_source_tree(tmp_path)
 
 
@@ -928,6 +960,73 @@ def test_archives_apply_canonical_private_content_patterns(tmp_path: Path) -> No
         payloads={renamed: private_payload},
     )
     with pytest.raises(ValueError, match="private source-policy"):
+        validate_sdist_license_boundary(sdist)
+
+
+def test_archives_reject_casefold_collisions(tmp_path: Path) -> None:
+    wheel = tmp_path / "casefold.whl"
+    _write_wheel(
+        wheel,
+        {
+            "openadapt_flow-1.0.dist-info/licenses/LICENSE",
+            "openadapt_flow-1.0.dist-info/METADATA",
+            "openadapt_flow/name.py",
+            "openadapt_flow/NAME.py",
+        },
+    )
+    with pytest.raises(ValueError, match="duplicate member"):
+        validate_wheel_license_boundary(wheel)
+
+    sdist = tmp_path / "casefold.tar.gz"
+    _write_sdist(
+        sdist,
+        {
+            *REQUIRED_SDIST_PATHS,
+            "PKG-INFO",
+            "openadapt_flow/name.py",
+            "openadapt_flow/NAME.py",
+        },
+    )
+    with pytest.raises(ValueError, match="duplicate member"):
+        validate_sdist_license_boundary(sdist)
+
+
+def test_wheel_rejects_device_members(tmp_path: Path) -> None:
+    wheel = tmp_path / "device.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        info = zipfile.ZipInfo("openadapt_flow/device")
+        info.create_system = 3
+        info.external_attr = stat.S_IFCHR << 16
+        archive.writestr(info, b"")
+    with pytest.raises(ValueError, match="link/device/special"):
+        validate_wheel_license_boundary(wheel)
+
+
+def test_archives_enforce_member_and_expanded_size_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / "bounded.whl"
+    _write_wheel(
+        wheel,
+        {
+            "openadapt_flow-1.0.dist-info/licenses/LICENSE",
+            "openadapt_flow-1.0.dist-info/METADATA",
+            "openadapt_flow/a.py",
+        },
+    )
+    monkeypatch.setattr(release_guard, "MAX_ARCHIVE_MEMBERS", 2)
+    with pytest.raises(ValueError, match="too many members"):
+        validate_wheel_license_boundary(wheel)
+    sdist = tmp_path / "bounded.tar.gz"
+    _write_sdist(sdist, {*REQUIRED_SDIST_PATHS, "PKG-INFO"})
+    with pytest.raises(ValueError, match="too many members"):
+        validate_sdist_license_boundary(sdist)
+
+    monkeypatch.setattr(release_guard, "MAX_ARCHIVE_MEMBERS", 20_000)
+    monkeypatch.setattr(release_guard, "MAX_ARCHIVE_EXPANDED_BYTES", 1)
+    with pytest.raises(ValueError, match="expanded size"):
+        validate_wheel_license_boundary(wheel)
+    with pytest.raises(ValueError, match="expanded size"):
         validate_sdist_license_boundary(sdist)
 
 

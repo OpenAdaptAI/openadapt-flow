@@ -16,6 +16,7 @@ manifest. Two properties are pinned here:
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -75,8 +76,19 @@ def _policy_document() -> dict:
     return json.loads(guard.SOURCE_POLICY_PATH.read_text(encoding="utf-8"))
 
 
-def _write_policy(tmp_path: Path, document: object) -> Path:
+def _write_policy(
+    tmp_path: Path, document: object, *, refresh_digest: bool = True
+) -> Path:
     path = tmp_path / "source-policy.public.json"
+    if refresh_digest and isinstance(document, dict):
+        document = copy.deepcopy(document)
+        document.pop("policy_digest", None)
+        canonical = (
+            json.dumps(document, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+        )
+        document["policy_digest"] = (
+            "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        )
     path.write_text(json.dumps(document), encoding="utf-8")
     return path
 
@@ -153,6 +165,28 @@ def test_unparseable_policy_raises(tmp_path: Path) -> None:
         guard.load_source_policy(path)
 
 
+def test_policy_path_must_be_a_regular_file(tmp_path: Path) -> None:
+    target = _write_policy(tmp_path, _policy_document())
+    link = tmp_path / "policy-link.json"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this platform")
+    with pytest.raises(guard.SourcePolicyError, match="symlink|cannot read"):
+        guard.load_source_policy(link)
+
+
+def test_policy_digest_rejects_a_rule_change_without_a_rerender(
+    tmp_path: Path,
+) -> None:
+    document = _policy_document()
+    document["enforcement"]["path_tokens"].append("renamed-private-rule")
+    with pytest.raises(guard.SourcePolicyError, match="policy_digest"):
+        guard.load_source_policy(
+            _write_policy(tmp_path, document, refresh_digest=False)
+        )
+
+
 def test_unknown_schema_raises(tmp_path: Path) -> None:
     document = _policy_document()
     document["schema_version"] = 99
@@ -181,6 +215,18 @@ def test_missing_categories_raise(tmp_path: Path) -> None:
         guard.load_source_policy(_write_policy(tmp_path, document))
 
 
+def test_flow_policy_must_cover_every_crown_jewel_category(tmp_path: Path) -> None:
+    document = _policy_document()
+    document["public_repositories"]["openadapt-flow"]["must_not_contain"].pop()
+    with pytest.raises(guard.SourcePolicyError, match="omits a crown-jewel"):
+        guard.load_source_policy(_write_policy(tmp_path, document))
+
+    document = _policy_document()
+    document["public_repositories"]["openadapt-flow"]["classification"] = "private"
+    with pytest.raises(guard.SourcePolicyError, match="classified as a public"):
+        guard.load_source_policy(_write_policy(tmp_path, document))
+
+
 def test_signature_parts_must_be_present(tmp_path: Path) -> None:
     document = _policy_document()
     document["enforcement"]["content_signature_parts"] = []
@@ -191,6 +237,11 @@ def test_signature_parts_must_be_present(tmp_path: Path) -> None:
 def test_content_patterns_must_be_present_and_valid(tmp_path: Path) -> None:
     document = _policy_document()
     document["enforcement"]["built_artifacts"]["content_patterns"] = []
+    with pytest.raises(guard.SourcePolicyError, match="content_patterns"):
+        guard.load_source_policy(_write_policy(tmp_path, document))
+
+    document = _policy_document()
+    document["enforcement"]["repository_tree"]["content_patterns"] = []
     with pytest.raises(guard.SourcePolicyError, match="content_patterns"):
         guard.load_source_policy(_write_policy(tmp_path, document))
 

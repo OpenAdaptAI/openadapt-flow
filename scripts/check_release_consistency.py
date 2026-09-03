@@ -55,6 +55,9 @@ AGPL_CONTENT_SIGNATURES = (
 # than a hardcoded list, because everyone believes it ran.
 SOURCE_POLICY_PATH = ROOT / "source-policy.public.json"
 SOURCE_POLICY_SCHEMA_VERSION = 1
+MAX_ARCHIVE_MEMBERS = 20_000
+MAX_ARCHIVE_MEMBER_BYTES = 64 * 1024 * 1024
+MAX_ARCHIVE_EXPANDED_BYTES = 512 * 1024 * 1024
 
 
 class SourcePolicyError(RuntimeError):
@@ -79,20 +82,57 @@ class SourcePolicy(NamedTuple):
     path_segments: frozenset[str]
     content_signatures: tuple[bytes, ...]
     content_regex: re.Pattern[str]
+    tree_content_regex: re.Pattern[str]
     crown_jewel_categories: frozenset[str]
     policy_digest: str
 
 
 def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
     """Return the rendered policy, or raise so the caller fails closed."""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        raw = path.read_text(encoding="utf-8")
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise SourcePolicyError(f"{path} is a symlink or special file")
+        descriptor = os.open(path, flags)
+    except SourcePolicyError:
+        raise
     except OSError as exc:
         raise SourcePolicyError(
             f"cannot read the rendered source policy {path}: {exc}. It is rendered "
             "from OpenAdaptAI/openadapt-internal:source-policy.yaml and must be "
             "committed in this repository"
         ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or before.st_dev != opened.st_dev
+            or before.st_ino != opened.st_ino
+        ):
+            raise SourcePolicyError(f"{path} is a symlink or special file")
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+        ):
+            raise SourcePolicyError(f"{path} changed while it was read")
+        raw = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise SourcePolicyError(f"{path} is not valid UTF-8") from exc
+    finally:
+        os.close(descriptor)
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -104,6 +144,15 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
             f"{path}: schema_version is {document.get('schema_version')!r}, expected "
             f"{SOURCE_POLICY_SCHEMA_VERSION}; refusing to enforce an unknown schema"
         )
+    claimed_digest = document.get("policy_digest")
+    unsigned = dict(document)
+    unsigned.pop("policy_digest", None)
+    canonical_unsigned = (
+        json.dumps(unsigned, indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    ).encode("utf-8")
+    expected_digest = "sha256:" + hashlib.sha256(canonical_unsigned).hexdigest()
+    if claimed_digest != expected_digest:
+        raise SourcePolicyError(f"{path}: policy_digest does not match its content")
     enforcement = document.get("enforcement")
     if not isinstance(enforcement, dict):
         raise SourcePolicyError(f"{path}: enforcement block is missing")
@@ -115,6 +164,26 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
         raise SourcePolicyError(f"{path}: crown_jewel_categories must be non-empty")
     if not all(isinstance(name, str) and name.strip() for name in categories):
         raise SourcePolicyError(f"{path}: crown_jewel_categories must be strings")
+    repositories = document.get("public_repositories")
+    flow_policy = (
+        repositories.get("openadapt-flow") if isinstance(repositories, dict) else None
+    )
+    if (
+        not isinstance(flow_policy, dict)
+        or flow_policy.get("classification") != "public"
+    ):
+        raise SourcePolicyError(
+            f"{path}: openadapt-flow must be classified as a public repository"
+        )
+    must_not_contain = flow_policy.get("must_not_contain")
+    if (
+        not isinstance(must_not_contain, list)
+        or not all(isinstance(item, str) for item in must_not_contain)
+        or not set(categories).issubset(must_not_contain)
+    ):
+        raise SourcePolicyError(
+            f"{path}: openadapt-flow must_not_contain omits a crown-jewel category"
+        )
 
     signature_parts = enforcement.get("content_signature_parts")
     if not isinstance(signature_parts, list) or not signature_parts:
@@ -147,6 +216,23 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
         raise SourcePolicyError(
             f"{path}: enforcement.built_artifacts.content_patterns is invalid: {exc}"
         ) from exc
+    tree_view = enforcement.get("repository_tree")
+    if not isinstance(tree_view, dict):
+        raise SourcePolicyError(f"{path}: enforcement.repository_tree is missing")
+    tree_content_patterns = _policy_strings(
+        tree_view,
+        "content_patterns",
+        where="enforcement.repository_tree",
+    )
+    try:
+        tree_content_regex = re.compile(
+            "|".join(f"(?:{pattern})" for pattern in tree_content_patterns),
+            re.IGNORECASE,
+        )
+    except re.error as exc:
+        raise SourcePolicyError(
+            f"{path}: enforcement.repository_tree.content_patterns is invalid: {exc}"
+        ) from exc
 
     return SourcePolicy(
         path_tokens=tuple(
@@ -162,8 +248,9 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
         ),
         content_signatures=tuple(signatures),
         content_regex=content_regex,
+        tree_content_regex=tree_content_regex,
         crown_jewel_categories=frozenset(str(name) for name in categories),
-        policy_digest=str(document.get("policy_digest", "unknown")),
+        policy_digest=claimed_digest,
     )
 
 
@@ -292,6 +379,15 @@ PUBLIC_SOURCE_ROOT_IGNORED_DIRECTORIES = frozenset(
     }
 )
 PUBLIC_SOURCE_ANYWHERE_IGNORED_DIRECTORIES = frozenset({"__pycache__"})
+PUBLIC_SOURCE_PATTERN_EXEMPT_PATHS = frozenset(
+    {
+        "benchmark/vision_hardening/README.md",
+        "scripts/check_release_consistency.py",
+        "source-policy.public.json",
+        "tests/test_release_contract.py",
+        "tests/test_source_policy_binding.py",
+    }
+)
 # Assembled from parts so neither this guard nor the rendered policy file (both
 # of which ship in the sdist) trips the content scan; every private-corpus
 # artifact carries the full banner. The parts come from the manifest.
@@ -624,7 +720,84 @@ def _walk_public_source_files(root: Path) -> dict[str, Path]:
                     f"public source tree contains a symlink/special file: {relative}"
                 )
             files[relative] = candidate
+    if (root / ".git").exists():
+        tracked_result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"],
+            check=False,
+            capture_output=True,
+        )
+        if tracked_result.returncode != 0:
+            raise ValueError("could not enumerate tracked public source files")
+        try:
+            tracked = [
+                item.decode("utf-8")
+                for item in tracked_result.stdout.split(b"\0")
+                if item
+            ]
+        except UnicodeDecodeError as exc:
+            raise ValueError("tracked public source path is not valid UTF-8") from exc
+        for raw_relative in tracked:
+            relative = _canonical_source_path(raw_relative, source="git index")
+            if relative in files:
+                continue
+            candidate = root / relative
+            try:
+                mode = candidate.lstat().st_mode
+            except OSError as exc:
+                raise ValueError(
+                    f"tracked public source file is unavailable: {relative}"
+                ) from exc
+            if not stat.S_ISREG(mode):
+                raise ValueError(
+                    f"public source tree contains a symlink/special file: {relative}"
+                )
+            files[relative] = candidate
     return files
+
+
+def _read_public_source_file(path: Path, *, relative: str) -> bytes:
+    """Read one regular source file without following a replaced link."""
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        before = path.lstat()
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(
+            f"public source tree contains an unreadable or unsafe file: {relative}"
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or before.st_dev != opened.st_dev
+            or before.st_ino != opened.st_ino
+        ):
+            raise ValueError(
+                f"public source tree contains a symlink/special file: {relative}"
+            )
+        chunks: list[bytes] = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            after.st_size != opened.st_size
+            or after.st_mtime_ns != opened.st_mtime_ns
+            or after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+        ):
+            raise ValueError(
+                f"public source tree file changed while it was read: {relative}"
+            )
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def build_public_artifact_inventory(root: Path = ROOT) -> dict[str, object]:
@@ -714,21 +887,35 @@ def _parse_public_artifact_inventory(payload: bytes, *, source: str) -> dict[str
     return inventory
 
 
-def _load_public_artifact_inventory(root: Path = ROOT) -> dict[str, str]:
+def _load_public_artifact_inventory(
+    root: Path = ROOT, *, payload: bytes | None = None
+) -> dict[str, str]:
     path = root / PUBLIC_ARTIFACT_INVENTORY_PATH
-    try:
-        payload = path.read_bytes()
-    except OSError as error:
-        raise ValueError(
-            f"could not read reviewed public artifact inventory at {path}: {error}"
-        ) from error
+    if payload is None:
+        try:
+            payload = _read_public_source_file(
+                path, relative=PUBLIC_ARTIFACT_INVENTORY_PATH
+            )
+        except ValueError as error:
+            raise ValueError(
+                f"could not read reviewed public artifact inventory at {path}: {error}"
+            ) from error
     return _parse_public_artifact_inventory(payload, source=str(path))
 
 
 def _validate_public_artifact_inventory(
-    files: dict[str, Path], *, root: Path = ROOT
+    files: dict[str, Path],
+    *,
+    root: Path = ROOT,
+    payloads: dict[str, bytes] | None = None,
 ) -> dict[str, str]:
-    inventory = _load_public_artifact_inventory(root)
+    payloads = payloads or {
+        path: _read_public_source_file(source, relative=path)
+        for path, source in files.items()
+    }
+    inventory = _load_public_artifact_inventory(
+        root, payload=payloads.get(PUBLIC_ARTIFACT_INVENTORY_PATH)
+    )
     observed = {path for path in files if _artifact_inventory_candidate(path)}
     expected = set(inventory)
     if observed != expected:
@@ -741,7 +928,7 @@ def _validate_public_artifact_inventory(
     changed = [
         path
         for path in sorted(expected)
-        if _sha256_file(files[path]) != inventory[path]
+        if _sha256_bytes(payloads[path]) != inventory[path]
     ]
     if changed:
         raise ValueError(
@@ -808,13 +995,20 @@ def _validate_lending_rate(
     return value
 
 
-def _validate_bounded_lending_evidence(files: dict[str, Path]) -> None:
+def _validate_bounded_lending_evidence(
+    files: dict[str, Path], *, payloads: dict[str, bytes] | None = None
+) -> None:
     """Recursively enforce the deterministic, aggregate-only lending schema."""
     path = files.get(LENDING_PUBLIC_EVIDENCE_PATH)
     if path is None:
         return
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        raw = (
+            payloads[LENDING_PUBLIC_EVIDENCE_PATH]
+            if payloads is not None
+            else _read_public_source_file(path, relative=LENDING_PUBLIC_EVIDENCE_PATH)
+        )
+        payload = json.loads(raw.decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise _bounded_lending_error(
             f"could not be parsed at {path}: {error}"
@@ -1022,20 +1216,31 @@ def _validate_archive_artifact_inventory(
 def validate_public_source_tree(root: Path = ROOT) -> None:
     """Fail if private data/recipes/tuning re-enter the public checkout."""
     files = _walk_public_source_files(root)
+    payloads = {
+        member: _read_public_source_file(path, relative=member)
+        for member, path in files.items()
+    }
     members = set(files)
-    _validate_public_artifact_inventory(files, root=root)
-    _validate_bounded_lending_evidence(files)
+    _validate_public_artifact_inventory(files, root=root, payloads=payloads)
+    _validate_bounded_lending_evidence(files, payloads=payloads)
 
     private_signature_hits = {
         member
-        for member, path in files.items()
-        if any(
-            signature in path.read_bytes()
-            for signature in PRIVATE_CORPUS_CONTENT_SIGNATURES
+        for member, payload in payloads.items()
+        if any(signature in payload for signature in PRIVATE_CORPUS_CONTENT_SIGNATURES)
+    }
+    private_pattern_hits = {
+        member
+        for member, payload in payloads.items()
+        if member not in PUBLIC_SOURCE_PATTERN_EXEMPT_PATHS
+        and SOURCE_POLICY.tree_content_regex.search(
+            payload.decode("utf-8", errors="ignore")
         )
     }
 
-    private = _private_distribution_hits(members, private_signature_hits)
+    private = _private_distribution_hits(
+        members, private_signature_hits | private_pattern_hits
+    )
     repository_only = {
         member
         for member in members
@@ -1211,15 +1416,32 @@ def _wheel_members(
     archive: zipfile.ZipFile,
 ) -> tuple[dict[str, zipfile.ZipInfo], set[str]]:
     by_name: dict[str, zipfile.ZipInfo] = {}
-    for member in archive.infolist():
+    casefolded: set[str] = set()
+    infos = archive.infolist()
+    if len(infos) > MAX_ARCHIVE_MEMBERS:
+        raise ValueError("wheel contains too many members")
+    expanded_size = 0
+    for member in infos:
         parts = _archive_parts(member.filename, source="wheel")
         normalized = "/".join(parts)
-        if normalized in by_name:
+        folded = normalized.casefold()
+        if normalized in by_name or folded in casefolded:
             raise ValueError(f"wheel contains duplicate member: {normalized!r}")
         mode = member.external_attr >> 16
-        if stat.S_IFMT(mode) == stat.S_IFLNK:
-            raise ValueError(f"wheel contains a symlink member: {normalized!r}")
+        kind = stat.S_IFMT(mode)
+        if kind not in {0, stat.S_IFREG, stat.S_IFDIR}:
+            raise ValueError(
+                f"wheel contains a link/device/special member: {normalized!r}"
+            )
+        if member.flag_bits & 0x1:
+            raise ValueError(f"wheel contains an encrypted member: {normalized!r}")
+        if member.file_size > MAX_ARCHIVE_MEMBER_BYTES:
+            raise ValueError(f"wheel member is too large: {normalized!r}")
+        expanded_size += member.file_size
+        if expanded_size > MAX_ARCHIVE_EXPANDED_BYTES:
+            raise ValueError("wheel expanded size is too large")
         by_name[normalized] = member
+        casefolded.add(folded)
     return by_name, set(by_name)
 
 
@@ -1298,8 +1520,14 @@ def validate_sdist_license_boundary(
     signature_hits: set[str] = set()
     private_signature_hits: set[str] = set()
     payloads: dict[str, bytes] = {}
+    casefolded_members: set[str] = set()
+    member_count = 0
+    expanded_size = 0
     with tarfile.open(sdist, mode="r:gz") as archive:
         for member in archive:
+            member_count += 1
+            if member_count > MAX_ARCHIVE_MEMBERS:
+                raise ValueError("source distribution contains too many members")
             parts = _archive_parts(member.name, source="source distribution")
             if parts[0] != expected_root:
                 raise ValueError(
@@ -1319,19 +1547,32 @@ def validate_sdist_license_boundary(
                     f"{member.name!r}"
                 )
             relative = "/".join(parts[1:])
-            if relative in members:
+            folded = relative.casefold()
+            if relative in members or folded in casefolded_members:
                 raise ValueError(
                     f"source distribution contains duplicate member: {relative!r}"
                 )
             members.add(relative)
+            casefolded_members.add(folded)
             if not member.isfile():
                 continue
+            if member.size > MAX_ARCHIVE_MEMBER_BYTES:
+                raise ValueError(
+                    f"source distribution member is too large: {relative!r}"
+                )
+            expanded_size += member.size
+            if expanded_size > MAX_ARCHIVE_EXPANDED_BYTES:
+                raise ValueError("source distribution expanded size is too large")
             extracted = archive.extractfile(member)
             if extracted is None:
                 raise ValueError(
                     f"source distribution member could not be read: {relative!r}"
                 )
             payload = extracted.read()
+            if len(payload) != member.size:
+                raise ValueError(
+                    f"source distribution member size differs: {relative!r}"
+                )
             payloads[relative] = payload
             if relative == "LICENSE":
                 archived_license = payload
@@ -1432,6 +1673,8 @@ def validate_wheel_license_boundary(
             if info.is_dir():
                 continue
             payload = archive.read(info)
+            if len(payload) != info.file_size:
+                raise ValueError(f"wheel member size differs: {name!r}")
             payloads[name] = payload
             if name in license_members:
                 archived_license = payload

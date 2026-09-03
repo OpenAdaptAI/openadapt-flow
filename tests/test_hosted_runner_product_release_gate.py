@@ -26,7 +26,6 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.runner.config import (
     AdmissionTrustFiles,
     LocalRuntimeRelease,
@@ -52,7 +51,9 @@ from openadapt_flow.runner.product_release import (
 
 SEQUENCE = 7
 SET_ID = "00000000-0000-4000-8000-000000000099"
-VERIFICATION_ID_DOMAIN = b"OpenAdapt qualification release verification receipt v1\0"
+# Inside the committed Flow receipt window
+# (verified_at 2026-08-27T12:00:00Z, expires_at 2026-09-03T12:00:00Z).
+RECEIPT_NOW = datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
 
 
 def _stamp(moment: datetime) -> str:
@@ -334,26 +335,6 @@ def _canonical_artifact_bytes(artifact: ProductReleaseAdmissionArtifact) -> byte
     ).encode("utf-8")
 
 
-def _current_flow_receipt_bytes() -> bytes:
-    """Return a self-bound test copy whose finite validity window is current."""
-    fixture = Path(
-        "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
-    )
-    payload = json.loads(fixture.read_text(encoding="utf-8"))
-    now = _now()
-    payload["verified_at"] = _stamp(now - timedelta(hours=1))
-    payload["expires_at"] = _stamp(now + timedelta(days=7))
-    projection = dict(payload)
-    projection.pop("verification_id_sha256")
-    payload["verification_id_sha256"] = (
-        "sha256:"
-        + hashlib.sha256(
-            VERIFICATION_ID_DOMAIN + canonical_json(projection)
-        ).hexdigest()
-    )
-    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-
-
 def _gate_fixture(tmp_path: Path, *, payload_raw=None, sequence: int = SEQUENCE):
     """Build a real adapter, config, and dispatch carrier for the gate."""
 
@@ -399,12 +380,14 @@ def _v2_gate_fixture(
     flow_release_id: str = "1.35.0",
     flow_artifact_sha256: str | None = None,
 ):
-    receipt_raw = _current_flow_receipt_bytes()
+    receipt_raw = Path(
+        "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
+    ).read_bytes()
     receipt_artifact = FlowReleaseVerificationReceiptArtifactBytes(
         artifact_bytes_base64=b64encode(receipt_raw).decode("ascii"),
         artifact_sha256="sha256:" + hashlib.sha256(receipt_raw).hexdigest(),
     )
-    receipt = receipt_artifact.decode(now=_now())
+    receipt = receipt_artifact.decode(now=RECEIPT_NOW)
     raw = _release_payload()
     targets = [dict(item) for item in raw["targets"]]  # type: ignore[arg-type]
     flow_index = TARGETS.index("flow")
@@ -418,7 +401,7 @@ def _v2_gate_fixture(
     )
     config = replace(
         config,
-        local_flow_release=receipt_artifact.identity(now=_now()),
+        local_flow_release=receipt_artifact.identity(now=RECEIPT_NOW),
     )
     dispatch = HostedDispatchV2.model_construct(
         product_release_admission=legacy_dispatch.product_release_admission,
@@ -443,7 +426,7 @@ def test_adapter_v2_gate_requires_matching_signed_product_and_flow_receipt(
 ) -> None:
     adapter, dispatch, config, artifact, receipt = _v2_gate_fixture(tmp_path)
 
-    payload = adapter._verify_product_release(dispatch, config)
+    payload = adapter._verify_product_release(dispatch, config, now=RECEIPT_NOW)
 
     admitted = {item.target: item for item in payload.targets}["flow"]
     assert admitted.release_id == receipt.version
@@ -468,7 +451,7 @@ def test_adapter_v2_gate_refuses_product_and_receipt_identity_drift(
     )
 
     with pytest.raises(ValueError, match="name different releases"):
-        adapter._verify_product_release(dispatch, config)
+        adapter._verify_product_release(dispatch, config, now=RECEIPT_NOW)
 
 
 def test_adapter_v2_gate_refuses_missing_local_flow_identity(tmp_path) -> None:
@@ -478,6 +461,18 @@ def test_adapter_v2_gate_refuses_missing_local_flow_identity(tmp_path) -> None:
         adapter._verify_product_release(
             dispatch,
             replace(config, local_flow_release=None),
+            now=RECEIPT_NOW,
+        )
+
+
+def test_adapter_v2_gate_refuses_an_expired_flow_receipt(tmp_path) -> None:
+    adapter, dispatch, config, _artifact, _receipt = _v2_gate_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="Flow receipt is expired"):
+        adapter._verify_product_release(
+            dispatch,
+            config,
+            now=datetime(2026, 9, 4, tzinfo=timezone.utc),
         )
 
 

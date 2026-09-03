@@ -112,7 +112,9 @@ def test_revoked_pinned_key_fails_closed() -> None:
     inner["status"] = "revoked"
     inner["revoked_at"] = "2026-09-02T18:24:25Z"
     registry["signers"] = [inner, registry["signers"][1]]
-    with pytest.raises(QualificationAdmissionV4Error, match="pinned published registry"):
+    with pytest.raises(
+        QualificationAdmissionV4Error, match="pinned published registry"
+    ):
         verify_pinned_signer_registry(registry)
 
 

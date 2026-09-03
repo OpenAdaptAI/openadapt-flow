@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import math
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,7 +34,11 @@ from openadapt_flow.runtime.resolver import (
 )
 
 VIEWPORT: tuple[int, int] = (1280, 800)
-_MASKED_SCREENSHOT_ATTEMPTS = 3
+# Secret-masked screenshots must not keep bytes from a changing frame tree.
+# Login pages often attach and detach iframes for a few seconds after a click.
+# Retry until the tree is quiet. Still refuse if it never settles.
+_MASKED_SCREENSHOT_TIMEOUT_S = 8.0
+_MASKED_SCREENSHOT_RETRY_SLEEP_S = 0.05
 
 _MODIFIER_ALIASES = {
     "meta": "Meta",
@@ -2300,10 +2305,14 @@ class PlaywrightBackend:
         if not self._screenshot_mask_selectors:
             return self.page.screenshot(type="png", full_page=False, **base_options)
 
-        for _attempt in range(_MASKED_SCREENSHOT_ATTEMPTS):
+        deadline = time.monotonic() + _MASKED_SCREENSHOT_TIMEOUT_S
+        while True:
             generation = self._screenshot_frame_generation
             frames = tuple(self.page.frames)
             if generation != self._screenshot_frame_generation:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_MASKED_SCREENSHOT_RETRY_SLEEP_S)
                 continue
             options = dict(base_options)
             options["mask"] = [
@@ -2319,6 +2328,9 @@ class PlaywrightBackend:
                 self.page.evaluate("() => null")
             except Exception:
                 if generation != self._screenshot_frame_generation:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(_MASKED_SCREENSHOT_RETRY_SLEEP_S)
                     continue
                 raise
             current_frames = tuple(self.page.frames)
@@ -2328,6 +2340,9 @@ class PlaywrightBackend:
                 return png
             # ``png`` is intentionally discarded here. It never reaches the
             # recorder, disk, or a compiled bundle.
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_MASKED_SCREENSHOT_RETRY_SLEEP_S)
         raise ScreenshotMaskStabilityError(
             "the browser frame tree changed during every secret-masked "
             "screenshot attempt; recording was refused"

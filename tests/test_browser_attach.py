@@ -2284,9 +2284,45 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                     "screenshot",
                     attach_and_detach_during_every_capture,
                 )
+                patch_context.setattr(
+                    "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_TIMEOUT_S",
+                    0.0,
+                )
+                patch_context.setattr(
+                    "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_RETRY_SLEEP_S",
+                    0.0,
+                )
                 with pytest.raises(ScreenshotMaskStabilityError, match="frame tree"):
                     race_backend.screenshot()
-                assert churn_attempts == 3
+                assert churn_attempts >= 1
+
+            settle_attempts = 0
+
+            def churn_twice_then_keep(**kwargs):
+                nonlocal settle_attempts
+                settle_attempts += 1
+                if settle_attempts <= 2:
+                    race_page.evaluate(
+                        """attempt => {
+                          const frame = document.createElement('iframe');
+                          frame.id = `settle-${attempt}`;
+                          frame.srcdoc = '<input type="password" value="tmp">';
+                          document.body.appendChild(frame);
+                          frame.remove();
+                        }""",
+                        settle_attempts,
+                    )
+                return original_screenshot(**kwargs)
+
+            with monkeypatch.context() as patch_context:
+                patch_context.setattr(
+                    race_page,
+                    "screenshot",
+                    churn_twice_then_keep,
+                )
+                png = race_backend.screenshot()
+            assert png
+            assert settle_attempts >= 3
         finally:
             if frame_race_session.page is not None:
                 frame_race_session.page.evaluate(

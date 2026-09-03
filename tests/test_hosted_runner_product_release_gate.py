@@ -26,6 +26,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.runner.config import (
     AdmissionTrustFiles,
     LocalRuntimeRelease,
@@ -51,6 +52,10 @@ from openadapt_flow.runner.product_release import (
 
 SEQUENCE = 7
 SET_ID = "00000000-0000-4000-8000-000000000099"
+FLOW_RECEIPT_FIXTURE = Path(
+    "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
+)
+FLOW_RECEIPT_DOMAIN = b"OpenAdapt qualification release verification receipt v1\0"
 
 
 def _stamp(moment: datetime) -> str:
@@ -59,6 +64,39 @@ def _stamp(moment: datetime) -> str:
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def _flow_release_receipt_artifact(
+    *,
+    verified_offset: timedelta = timedelta(days=-1),
+    expires_offset: timedelta = timedelta(days=30),
+) -> FlowReleaseVerificationReceiptArtifactBytes:
+    """Re-stamp the committed Flow receipt around the current time.
+
+    The committed fixture carries one fixed validity window because
+    ``tests/test_flow_release_receipt.py`` and ``public-artifacts.json`` both pin
+    its exact bytes by digest.  The gate exercised below reaches
+    ``assert_hosted_flow_release`` through ``HostedRunnerAdapter``, which reads
+    the wall clock and takes no injected instant, so a fixed window would make
+    these tests pass or fail by calendar date.  Re-stamping the window and
+    re-deriving the self-binding verification id keeps the expiry check itself
+    fully armed: the receipt is accepted because it is genuinely current, and
+    ``expires_offset`` puts a receipt back outside the window on demand.
+    """
+    moment = _now()
+    payload = json.loads(FLOW_RECEIPT_FIXTURE.read_text(encoding="utf-8"))
+    payload["verified_at"] = _stamp(moment + verified_offset)
+    payload["expires_at"] = _stamp(moment + expires_offset)
+    payload.pop("verification_id_sha256")
+    payload["verification_id_sha256"] = (
+        "sha256:"
+        + hashlib.sha256(FLOW_RECEIPT_DOMAIN + canonical_json(payload)).hexdigest()
+    )
+    raw = canonical_json(payload)
+    return FlowReleaseVerificationReceiptArtifactBytes(
+        artifact_bytes_base64=b64encode(raw).decode("ascii"),
+        artifact_sha256="sha256:" + hashlib.sha256(raw).hexdigest(),
+    )
 
 
 def _release_payload(**overrides: object) -> dict[str, object]:
@@ -377,14 +415,8 @@ def _v2_gate_fixture(
     flow_release_id: str = "1.35.0",
     flow_artifact_sha256: str | None = None,
 ):
-    receipt_raw = Path(
-        "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
-    ).read_bytes()
-    receipt_artifact = FlowReleaseVerificationReceiptArtifactBytes(
-        artifact_bytes_base64=b64encode(receipt_raw).decode("ascii"),
-        artifact_sha256="sha256:" + hashlib.sha256(receipt_raw).hexdigest(),
-    )
-    receipt = receipt_artifact.decode(now=_now())
+    receipt_artifact = _flow_release_receipt_artifact()
+    receipt = receipt_artifact.decode()
     raw = _release_payload()
     targets = [dict(item) for item in raw["targets"]]  # type: ignore[arg-type]
     flow_index = TARGETS.index("flow")
@@ -398,7 +430,7 @@ def _v2_gate_fixture(
     )
     config = replace(
         config,
-        local_flow_release=receipt_artifact.identity(now=_now()),
+        local_flow_release=receipt_artifact.identity(),
     )
     dispatch = HostedDispatchV2.model_construct(
         product_release_admission=legacy_dispatch.product_release_admission,
@@ -449,6 +481,34 @@ def test_adapter_v2_gate_refuses_product_and_receipt_identity_drift(
 
     with pytest.raises(ValueError, match="name different releases"):
         adapter._verify_product_release(dispatch, config)
+
+
+@pytest.mark.parametrize(
+    ("verified_offset", "expires_offset", "message"),
+    [
+        (timedelta(days=-30), timedelta(days=-1), "expired"),
+        (timedelta(days=1), timedelta(days=30), "in the future"),
+    ],
+)
+def test_adapter_v2_gate_refuses_a_receipt_outside_its_validity_window(
+    tmp_path, verified_offset, expires_offset, message
+) -> None:
+    """The wall-clock window check stays armed under the re-stamped fixture."""
+
+    adapter, dispatch, config, _artifact, _receipt = _v2_gate_fixture(tmp_path)
+    outside = _flow_release_receipt_artifact(
+        verified_offset=verified_offset,
+        expires_offset=expires_offset,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        adapter._verify_product_release(
+            HostedDispatchV2.model_construct(
+                product_release_admission=dispatch.product_release_admission,
+                flow_release_verification_receipt=outside,
+            ),
+            config,
+        )
 
 
 def test_adapter_v2_gate_refuses_missing_local_flow_identity(tmp_path) -> None:

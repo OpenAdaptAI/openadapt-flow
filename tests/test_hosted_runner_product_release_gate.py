@@ -26,6 +26,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+from openadapt_flow.qualification_admission_v2 import canonical_json
 from openadapt_flow.runner.config import (
     AdmissionTrustFiles,
     LocalRuntimeRelease,
@@ -51,6 +52,7 @@ from openadapt_flow.runner.product_release import (
 
 SEQUENCE = 7
 SET_ID = "00000000-0000-4000-8000-000000000099"
+VERIFICATION_ID_DOMAIN = b"OpenAdapt qualification release verification receipt v1\0"
 
 
 def _stamp(moment: datetime) -> str:
@@ -332,6 +334,26 @@ def _canonical_artifact_bytes(artifact: ProductReleaseAdmissionArtifact) -> byte
     ).encode("utf-8")
 
 
+def _current_flow_receipt_bytes() -> bytes:
+    """Return a self-bound test copy whose finite validity window is current."""
+    fixture = Path(
+        "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
+    )
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    now = _now()
+    payload["verified_at"] = _stamp(now - timedelta(hours=1))
+    payload["expires_at"] = _stamp(now + timedelta(days=7))
+    projection = dict(payload)
+    projection.pop("verification_id_sha256")
+    payload["verification_id_sha256"] = (
+        "sha256:"
+        + hashlib.sha256(
+            VERIFICATION_ID_DOMAIN + canonical_json(projection)
+        ).hexdigest()
+    )
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
 def _gate_fixture(tmp_path: Path, *, payload_raw=None, sequence: int = SEQUENCE):
     """Build a real adapter, config, and dispatch carrier for the gate."""
 
@@ -377,9 +399,7 @@ def _v2_gate_fixture(
     flow_release_id: str = "1.35.0",
     flow_artifact_sha256: str | None = None,
 ):
-    receipt_raw = Path(
-        "tests/fixtures/remote-safe-synthetic-flow-release-verification.json"
-    ).read_bytes()
+    receipt_raw = _current_flow_receipt_bytes()
     receipt_artifact = FlowReleaseVerificationReceiptArtifactBytes(
         artifact_bytes_base64=b64encode(receipt_raw).decode("ascii"),
         artifact_sha256="sha256:" + hashlib.sha256(receipt_raw).hexdigest(),

@@ -163,7 +163,7 @@ service-mlx = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "mlx-vlm>=0.6.4,<0.7",
-    "transformers>=5.5,<5.15",
+    "transformers>=5.5,<5.17",
 ]
 # Cross-platform desktop recording on-ramp: convert an openadapt-capture
 # session into a flow recording (openadapt_flow.adapters.capture). Optional and

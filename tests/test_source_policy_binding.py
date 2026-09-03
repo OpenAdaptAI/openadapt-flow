@@ -188,6 +188,18 @@ def test_signature_parts_must_be_present(tmp_path: Path) -> None:
         guard.load_source_policy(_write_policy(tmp_path, document))
 
 
+def test_content_patterns_must_be_present_and_valid(tmp_path: Path) -> None:
+    document = _policy_document()
+    document["enforcement"]["repository_tree"]["content_patterns"] = []
+    with pytest.raises(guard.SourcePolicyError, match="content_patterns"):
+        guard.load_source_policy(_write_policy(tmp_path, document))
+
+    document = _policy_document()
+    document["enforcement"]["repository_tree"]["content_patterns"] = ["["]
+    with pytest.raises(guard.SourcePolicyError, match="content_patterns is invalid"):
+        guard.load_source_policy(_write_policy(tmp_path, document))
+
+
 def test_the_script_refuses_to_run_without_the_policy(tmp_path: Path) -> None:
     """A checkout with no rendered policy must stop, not validate silently."""
     (tmp_path / "scripts").mkdir()

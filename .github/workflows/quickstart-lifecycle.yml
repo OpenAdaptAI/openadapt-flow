@@ -8,8 +8,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: quickstart-lifecycle-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Keep an exact-SHA release qualification isolated from scheduled and push
+  # activity on main. The release gate must be able to inspect the dispatched
+  # three-OS result even if main advances while that matrix is still running.
+  group: quickstart-lifecycle-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 permissions:
   contents: read

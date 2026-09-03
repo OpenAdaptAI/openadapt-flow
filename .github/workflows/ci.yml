@@ -57,11 +57,14 @@ on:
     - cron: "0 7 * * 0" # Sundays 07:00 UTC: full compatibility matrix
   workflow_dispatch:
 
-# Cancel any superseded in-flight run for the same ref (e.g. a force-push or a
-# rapid second push to a PR branch) instead of letting both run to completion.
+# Cancel a superseded ordinary run for the same ref (e.g. a force-push or a
+# rapid second push to a PR branch). Release qualification dispatches use the
+# exact candidate SHA as a separate group and are never canceled. A later push
+# to main therefore cannot invalidate a matrix that the release gate is already
+# waiting to inspect.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 # GitHub Actions are pinned to full commit SHAs (not mutable tags) as a
 # supply-chain control; the trailing comment records the human-readable

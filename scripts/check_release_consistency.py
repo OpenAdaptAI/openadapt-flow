@@ -78,6 +78,7 @@ class SourcePolicy(NamedTuple):
     path_prefixes: tuple[str, ...]
     path_segments: frozenset[str]
     content_signatures: tuple[bytes, ...]
+    content_regex: re.Pattern[str]
     crown_jewel_categories: frozenset[str]
     policy_digest: str
 
@@ -131,6 +132,24 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
             raise SourcePolicyError(f"{path}: a content signature is empty")
         signatures.append(joined.encode("ascii"))
 
+    repository_tree = enforcement.get("repository_tree")
+    if not isinstance(repository_tree, dict):
+        raise SourcePolicyError(f"{path}: enforcement.repository_tree block is missing")
+    content_patterns = _policy_strings(
+        repository_tree,
+        "content_patterns",
+        where="enforcement.repository_tree",
+    )
+    try:
+        content_regex = re.compile(
+            "|".join(f"(?:{pattern})" for pattern in content_patterns),
+            re.IGNORECASE,
+        )
+    except re.error as exc:
+        raise SourcePolicyError(
+            f"{path}: enforcement.repository_tree.content_patterns is invalid: {exc}"
+        ) from exc
+
     return SourcePolicy(
         path_tokens=tuple(
             _policy_strings(enforcement, "path_tokens", where="enforcement")
@@ -144,6 +163,7 @@ def load_source_policy(path: Path = SOURCE_POLICY_PATH) -> SourcePolicy:
             _policy_strings(enforcement, "private_path_segments", where="enforcement")
         ),
         content_signatures=tuple(signatures),
+        content_regex=content_regex,
         crown_jewel_categories=frozenset(str(name) for name in categories),
         policy_digest=str(document.get("policy_digest", "unknown")),
     )
@@ -278,6 +298,19 @@ PUBLIC_SOURCE_ANYWHERE_IGNORED_DIRECTORIES = frozenset({"__pycache__"})
 # of which ship in the sdist) trips the content scan; every private-corpus
 # artifact carries the full banner. The parts come from the manifest.
 PRIVATE_CORPUS_CONTENT_SIGNATURES = SOURCE_POLICY.content_signatures
+
+# These files enforce or explain the source boundary and therefore carry the
+# policy terms by design. No other archive member is exempt from the canonical
+# content patterns. The wheel contains none of these repository-only files.
+PRIVATE_CONTENT_PATTERN_EXEMPT_PATHS = frozenset(
+    {
+        "benchmark/vision_hardening/README.md",
+        "scripts/check_release_consistency.py",
+        "source-policy.public.json",
+        "tests/test_release_contract.py",
+        "tests/test_source_policy_binding.py",
+    }
+)
 
 # Positive inventory for files that can carry data, evidence, static payloads,
 # models, or deployment-shaped configuration.  Ordinary Python/Markdown/TeX
@@ -474,6 +507,17 @@ def _private_distribution_hits(members: set[str], signature_hits: set[str]) -> s
         )
     }
     hits.update(signature_hits)
+    return hits
+
+
+def _private_content_pattern_hits(payloads: dict[str, bytes]) -> set[str]:
+    """Return renamed private material found by canonical content patterns."""
+    hits: set[str] = set()
+    for member, payload in payloads.items():
+        if member in PRIVATE_CONTENT_PATTERN_EXEMPT_PATHS:
+            continue
+        if SOURCE_POLICY.content_regex.search(payload.decode("utf-8", errors="ignore")):
+            hits.add(member)
     return hits
 
 
@@ -1317,6 +1361,7 @@ def validate_sdist_license_boundary(
             ):
                 private_signature_hits.add(relative)
     private = _private_distribution_hits(members, private_signature_hits)
+    private.update(_private_content_pattern_hits(payloads))
     if private:
         raise ValueError(
             "source distribution contains private source-policy "
@@ -1432,6 +1477,7 @@ def validate_wheel_license_boundary(
         expected_version=expected_version,
     )
     private = _private_distribution_hits(members, private_signature_hits)
+    private.update(_private_content_pattern_hits(payloads))
     if private:
         raise ValueError(
             "wheel contains private source-policy material "

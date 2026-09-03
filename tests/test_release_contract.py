@@ -484,6 +484,26 @@ def test_release_tag_requires_reviewed_exact_main_and_release_app() -> None:
     assert "quickstart-lifecycle.yml" in gate
 
 
+def test_release_qualification_runs_cannot_be_canceled_by_main_activity() -> None:
+    """Exact-SHA matrices must survive unrelated work on the main ref."""
+    for workflow_name in ("ci.yml", "quickstart-lifecycle.yml"):
+        workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text()
+        concurrency = workflow[workflow.index("\nconcurrency:") :]
+        group = next(
+            line for line in concurrency.splitlines() if line.startswith("  group:")
+        )
+        cancel = next(
+            line
+            for line in concurrency.splitlines()
+            if line.startswith("  cancel-in-progress:")
+        )
+
+        assert "github.event_name == 'workflow_dispatch'" in group
+        assert "github.sha" in group
+        assert "github.ref" in group
+        assert "github.event_name != 'workflow_dispatch'" in cancel
+
+
 def test_tag_publication_requires_exact_tag_oidc_and_digest_verification() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text()
     validate = workflow[
@@ -881,6 +901,32 @@ def test_sdist_refuses_private_corpus_material(tmp_path: Path) -> None:
         )
         with pytest.raises(ValueError, match="private source-policy"):
             validate_sdist_license_boundary(mixed)
+
+
+def test_archives_apply_canonical_private_content_patterns(tmp_path: Path) -> None:
+    """A renamed recipe must not bypass the canonical source policy."""
+    license_path = "openadapt_flow-1.0.dist-info/licenses/LICENSE"
+    metadata_path = "openadapt_flow-1.0.dist-info/METADATA"
+    renamed = "openadapt_flow/neutral/settings.txt"
+    private_payload = b"oracle_recipe_id = customer-ledger-v4"
+
+    wheel = tmp_path / "renamed-private.whl"
+    _write_wheel(
+        wheel,
+        {license_path, metadata_path, renamed},
+        payloads={renamed: private_payload},
+    )
+    with pytest.raises(ValueError, match="private source-policy"):
+        validate_wheel_license_boundary(wheel)
+
+    sdist = tmp_path / "renamed-private.tar.gz"
+    _write_sdist(
+        sdist,
+        {*REQUIRED_SDIST_PATHS, "PKG-INFO", renamed},
+        payloads={renamed: private_payload},
+    )
+    with pytest.raises(ValueError, match="private source-policy"):
+        validate_sdist_license_boundary(sdist)
 
 
 def test_archives_refuse_neutral_unregistered_and_modified_artifacts(

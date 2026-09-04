@@ -95,7 +95,9 @@ def _default_recorder_factory(
     capture session and surfaced by the capture adapter into ``meta.json``.
     """
     try:
+        from loguru import logger
         from openadapt_capture import Recorder as CaptureRecorder
+        from openadapt_capture import recorder as capture_recorder
     except ImportError as exc:  # pragma: no cover - exercised via install state
         raise ImportError(
             "openadapt-capture is required to record a desktop workflow but is "
@@ -111,9 +113,18 @@ def _default_recorder_factory(
             "Need openadapt-capture>=1.2.2. Run: pip install -U "
             "'openadapt-capture==1.2.2'"
         )
-    return CaptureRecorder(
-        task_description=task_description, capture_dir=capture_dir, window=window
-    )
+    if hasattr(capture_recorder, "LOG_LEVEL"):
+        capture_recorder.LOG_LEVEL = "WARNING"
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING")
+    kwargs: dict[str, Any] = {
+        "task_description": task_description,
+        "capture_dir": capture_dir,
+        "window": window,
+    }
+    if "plot_performance" in params:
+        kwargs["plot_performance"] = False
+    return CaptureRecorder(**kwargs)
 
 
 def parse_until_cmd(raw: str) -> list[str]:

@@ -268,6 +268,122 @@ def test_backend_masks_password_and_declared_secret_fields_on_every_frame() -> N
     assert not any(page.listeners.values())
 
 
+def test_masked_screenshot_survives_three_iframe_storms_then_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce the ServiceNow Sign-in refuse with a fake page.
+
+    After Sign in, a login SPA attaches and detaches iframes. The old loop
+    tried three captures with no wait and then raised
+    ScreenshotMaskStabilityError. This page storms for those three captures
+    and then goes quiet. The record must keep a masked frame, not stop.
+    """
+
+    class Frame:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def locator(self, selector):
+            return f"locator:{self.name}:{selector}"
+
+    class Page:
+        def __init__(self) -> None:
+            self.frames = [Frame("main")]
+            self.listeners: dict[str, list] = {}
+            self.capture_count = 0
+
+        def on(self, event, listener):
+            self.listeners.setdefault(event, []).append(listener)
+
+        def remove_listener(self, event, listener):
+            self.listeners[event].remove(listener)
+
+        def evaluate(self, _script):
+            return None
+
+        def screenshot(self, **kwargs):
+            self.capture_count += 1
+            if self.capture_count <= 3:
+                frame = Frame(f"storm-{self.capture_count}")
+                self.frames.append(frame)
+                for listener in self.listeners.get("frameattached", []):
+                    listener(frame)
+                self.frames.pop()
+                for listener in self.listeners.get("framedetached", []):
+                    listener(frame)
+            return b"png"
+
+    monkeypatch.setattr(
+        "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_RETRY_SLEEP_S",
+        0.0,
+    )
+    page = Page()
+    backend = PlaywrightBackend(  # type: ignore[arg-type]
+        page,
+        screenshot_mask_selectors=("input[type='password']",),
+    )
+    assert backend.screenshot() == b"png"
+    assert page.capture_count >= 4
+    backend.stop_screenshot_mask_tracking()
+
+
+def test_masked_screenshot_still_refuses_a_frame_tree_that_never_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tree that never goes quiet must still refuse. Do not keep those bytes."""
+
+    class Frame:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def locator(self, selector):
+            return f"locator:{self.name}:{selector}"
+
+    class Page:
+        def __init__(self) -> None:
+            self.frames = [Frame("main")]
+            self.listeners: dict[str, list] = {}
+            self.capture_count = 0
+
+        def on(self, event, listener):
+            self.listeners.setdefault(event, []).append(listener)
+
+        def remove_listener(self, event, listener):
+            self.listeners[event].remove(listener)
+
+        def evaluate(self, _script):
+            return None
+
+        def screenshot(self, **kwargs):
+            self.capture_count += 1
+            frame = Frame(f"churn-{self.capture_count}")
+            self.frames.append(frame)
+            for listener in self.listeners.get("frameattached", []):
+                listener(frame)
+            self.frames.pop()
+            for listener in self.listeners.get("framedetached", []):
+                listener(frame)
+            return b"png"
+
+    monkeypatch.setattr(
+        "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_TIMEOUT_S",
+        0.0,
+    )
+    monkeypatch.setattr(
+        "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_RETRY_SLEEP_S",
+        0.0,
+    )
+    page = Page()
+    backend = PlaywrightBackend(  # type: ignore[arg-type]
+        page,
+        screenshot_mask_selectors=("input[type='password']",),
+    )
+    with pytest.raises(ScreenshotMaskStabilityError, match="frame tree"):
+        backend.screenshot()
+    assert page.capture_count >= 1
+    backend.stop_screenshot_mask_tracking()
+
+
 def test_declared_secret_selectors_use_css_string_escaping() -> None:
     selectors = _secret_screenshot_selectors({"päss", 'quote"\\line\nend'})
 
@@ -2284,9 +2400,45 @@ def test_live_cdp_attach_records_compiles_and_leaves_browser_running_three_trial
                     "screenshot",
                     attach_and_detach_during_every_capture,
                 )
+                patch_context.setattr(
+                    "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_TIMEOUT_S",
+                    0.0,
+                )
+                patch_context.setattr(
+                    "openadapt_flow.backends.playwright_backend._MASKED_SCREENSHOT_RETRY_SLEEP_S",
+                    0.0,
+                )
                 with pytest.raises(ScreenshotMaskStabilityError, match="frame tree"):
                     race_backend.screenshot()
-                assert churn_attempts == 3
+                assert churn_attempts >= 1
+
+            settle_attempts = 0
+
+            def churn_twice_then_keep(**kwargs):
+                nonlocal settle_attempts
+                settle_attempts += 1
+                if settle_attempts <= 2:
+                    race_page.evaluate(
+                        """attempt => {
+                          const frame = document.createElement('iframe');
+                          frame.id = `settle-${attempt}`;
+                          frame.srcdoc = '<input type="password" value="tmp">';
+                          document.body.appendChild(frame);
+                          frame.remove();
+                        }""",
+                        settle_attempts,
+                    )
+                return original_screenshot(**kwargs)
+
+            with monkeypatch.context() as patch_context:
+                patch_context.setattr(
+                    race_page,
+                    "screenshot",
+                    churn_twice_then_keep,
+                )
+                png = race_backend.screenshot()
+            assert png
+            assert settle_attempts >= 3
         finally:
             if frame_race_session.page is not None:
                 frame_race_session.page.evaluate(

@@ -102,6 +102,15 @@ def _default_recorder_factory(
             "not installed. Install the optional extra:\n\n"
             "    pip install 'openadapt-flow[capture]'\n"
         ) from exc
+    import inspect
+
+    params = inspect.signature(CaptureRecorder.__init__).parameters
+    if "window" not in params:
+        raise SystemExit(
+            "record: this openadapt-capture does not accept window=. "
+            "Need openadapt-capture>=1.2.2. Run: pip install -U "
+            "'openadapt-capture==1.2.2'"
+        )
     return CaptureRecorder(
         task_description=task_description, capture_dir=capture_dir, window=window
     )

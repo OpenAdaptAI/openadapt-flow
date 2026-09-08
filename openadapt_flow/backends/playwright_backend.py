@@ -2297,16 +2297,20 @@ class PlaywrightBackend:
 
     def screenshot(self) -> bytes:
         """Return a stable current full-viewport frame as PNG bytes."""
-        if self._screenshot_guard is not None:
-            self._screenshot_guard()
         base_options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
             base_options["scale"] = "css"
         if not self._screenshot_mask_selectors:
+            if self._screenshot_guard is not None:
+                self._screenshot_guard()
             return self.page.screenshot(type="png", full_page=False, **base_options)
 
         deadline = time.monotonic() + _MASKED_SCREENSHOT_TIMEOUT_S
         while True:
+            # A retry can observe a different secret boundary even after the
+            # frame tree settles. Rebind or refuse before every capture.
+            if self._screenshot_guard is not None:
+                self._screenshot_guard()
             generation = self._screenshot_frame_generation
             frames = tuple(self.page.frames)
             if generation != self._screenshot_frame_generation:
@@ -2333,6 +2337,10 @@ class PlaywrightBackend:
                     time.sleep(_MASKED_SCREENSHOT_RETRY_SLEEP_S)
                     continue
                 raise
+            # A closed root can appear during capture without changing the
+            # frame tree. Its privacy refusal must escape the retry handler.
+            if self._screenshot_guard is not None:
+                self._screenshot_guard()
             current_frames = tuple(self.page.frames)
             if generation == self._screenshot_frame_generation and self._same_frames(
                 frames, current_frames

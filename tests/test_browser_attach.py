@@ -1140,6 +1140,86 @@ def test_launched_browser_refuses_static_unbound_closed_shadow_password(
     assert not output.exists()
 
 
+@pytest.mark.timeout(60)
+@pytest.mark.parametrize("injection_point", ("before_retry", "during_capture"))
+@pytest.mark.parametrize("trial", range(3))
+def test_masked_screenshot_rechecks_new_closed_shadow_secret_boundaries(
+    attach_app_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    injection_point: str,
+    trial: int,
+) -> None:
+    """No retry may retain a secret that appears after the first privacy scan."""
+
+    if _chromium_executable() is None:
+        pytest.skip("no Chromium executable is installed")
+    output = tmp_path / f"new-closed-boundary-{injection_point}-{trial}"
+    session = InteractiveRecorder(
+        attach_app_url,
+        output,
+        headless=True,
+        secret_fields=("retry-secret",),
+    )
+    session.start()
+    try:
+        page, backend = session.page, session.backend
+        assert page is not None and backend is not None
+        original_screenshot = page.screenshot
+        original_sleep = time.sleep
+        captures = 0
+        inserted = False
+
+        def insert_unbound_secret() -> None:
+            nonlocal inserted
+            inserted = True
+            page.evaluate(
+                """() => {
+                  const host = document.createElement('x-unbound-secret');
+                  document.body.appendChild(host);
+                  const root = host.attachShadow({mode: 'closed'});
+                  const input = document.createElement('input');
+                  input.name = 'retry-secret';
+                  input.value = 'SYNTHETIC-RETRY-SECRET';
+                  root.appendChild(input);
+                }"""
+            )
+
+        def screenshot(**kwargs):
+            nonlocal captures
+            captures += 1
+            if injection_point == "before_retry" and captures <= 3:
+                page.evaluate(
+                    """() => {
+                      const frame = document.createElement('iframe');
+                      document.body.appendChild(frame);
+                      frame.remove();
+                    }"""
+                )
+            elif injection_point == "during_capture" and captures == 1:
+                insert_unbound_secret()
+            return original_screenshot(**kwargs)
+
+        def retry_sleep(seconds: float) -> None:
+            if injection_point == "before_retry" and captures == 3 and not inserted:
+                insert_unbound_secret()
+            original_sleep(seconds)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(page, "screenshot", screenshot)
+            patch.setattr(
+                "openadapt_flow.backends.playwright_backend.time.sleep",
+                retry_sleep,
+            )
+            with pytest.raises(BrowserAttachError, match="closed shadow root"):
+                backend.screenshot()
+        assert inserted
+        assert captures == (3 if injection_point == "before_retry" else 1)
+    finally:
+        session.abort()
+    assert not output.exists()
+
+
 @pytest.mark.timeout(30)
 def test_page_closure_scrubs_replaced_prefilled_and_reflected_secrets() -> None:
     """Real Chromium proves the page-local guard before screenshot handling."""

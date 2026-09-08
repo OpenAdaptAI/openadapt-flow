@@ -290,25 +290,25 @@ def band_sampler(
     """Read the runtime's OCR identity evidence around a resolved target.
 
     A supplied anchor binds the identifier region or excludes the target's own
-    mutable label, as runtime verification does. Scale those offsets to the
-    actual campaign frame; the scale case changes the viewport dimensions.
+    mutable label, as runtime verification does. Keep recorded offsets and
+    dimensions unchanged: the runtime OCR tier translates them but does not
+    scale them, even when a campaign frame has a different viewport size.
     """
     from datetime import date
 
     def sample(frame_png: bytes, point: Point) -> Optional[str]:
         with Image.open(io.BytesIO(frame_png)) as frame:
             live_viewport = frame.size
-        sx, sy = live_viewport[0] / viewport[0], live_viewport[1] / viewport[1]
         today = date.today()
         if anchor is not None:
 
             def translated(region: Region) -> Region:
                 x, y, width, height = region
                 return (
-                    point[0] + round((x - anchor.click_point[0]) * sx),
-                    point[1] + round((y - anchor.click_point[1]) * sy),
-                    max(1, round(width * sx)),
-                    max(1, round(height * sy)),
+                    point[0] + x - anchor.click_point[0],
+                    point[1] + y - anchor.click_point[1],
+                    width,
+                    height,
                 )
 
             if anchor.identifier_region is not None:
@@ -318,10 +318,10 @@ def band_sampler(
                     region=region,
                     reference_date=today,
                 )
-            height = max(1, round(anchor.region[3] * sy))
+            height = anchor.region[3]
             exclude = translated(anchor.region)
         else:
-            height = max(1, round(64 * sy))
+            height = 64
             exclude = None
         band = identity_mod.band_region(point, height, live_viewport)
         lines = [

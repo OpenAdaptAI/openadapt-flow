@@ -25,13 +25,13 @@ from typing import Callable, Optional
 
 from PIL import Image, ImageOps
 
-from openadapt_flow.ir import Anchor, Point
+from openadapt_flow.ir import Anchor, Point, Region
 from openadapt_flow.runtime import identity as identity_mod
 from openadapt_flow.runtime.healing.governance import (
     BandVerifier,
     _default_band_verifier,
 )
-from openadapt_flow.runtime.healing.patch import HealPatch
+from openadapt_flow.runtime.healing.patch import HealPatch, IdentitySnapshot
 
 
 class DriftKind(str, Enum):
@@ -187,6 +187,7 @@ def replay_patch(
     sample_band: SampleBandFn,
     band_verifier: BandVerifier = _default_band_verifier,
     locate_tolerance: int = 6,
+    identity_anchor: Optional[Anchor] = None,
 ) -> HarnessReport:
     """Replay a candidate patch against a drift battery + prior traces.
 
@@ -198,10 +199,16 @@ def replay_patch(
     identity-never-weakened rule the gate enforces, now across synthetic
     drift.
 
-    Unarmed patches (no post-heal context band) skip the identity leg: there
-    was no band to preserve (the governance gate has already ensured such a
-    patch did not DROP an armed band).
+    Only genuinely unarmed patches skip identity verification. A hashed or
+    structured identity snapshot without its verification material fails closed.
+    ``identity_anchor`` supplies the complete repaired identity evidence; its
+    projection must match the patch. The caller supplies the complete anchor
+    from its integrity-verified candidate bundle.
     """
+    if identity_anchor is not None and (
+        IdentitySnapshot.from_anchor(identity_anchor) != patch.identity_after
+    ):
+        raise ValueError("repair identity anchor does not match the patch snapshot")
     expected_band = patch.identity_after.context_text
     results: list[CaseResult] = []
     for case in cases:
@@ -222,50 +229,109 @@ def replay_patch(
             )
             continue
 
-        if not expected_band:
-            results.append(
-                CaseResult(
-                    case.label,
-                    case.kind,
-                    located=True,
-                    identity_ok=True,
-                    detail="unarmed patch: no identity band to verify",
-                )
-            )
-            continue
-
         observed = sample_band(case.frame_png, located_point) or ""
-        status = band_verifier(expected_band, observed)
+        if identity_anchor is not None:
+            status = anchor_band_verdict(identity_anchor, observed, band_verifier)
+        elif expected_band:
+            status = band_verifier(expected_band, observed)
+        elif (
+            patch.identity_after.armed
+            or patch.identity_after.has_identity_template
+            or patch.identity_after.identifier_crop
+            or patch.identity_after.identifier_region
+        ):
+            status = "unreadable"
+        else:
+            status = "unarmed"
         results.append(
             CaseResult(
                 case.label,
                 case.kind,
                 located=True,
-                identity_ok=(status == "verified"),
+                identity_ok=(status in ("verified", "unarmed")),
                 detail=f"band verdict {status!r}",
             )
         )
     return HarnessReport(results=results)
 
 
-def band_sampler(viewport: tuple[int, int], vision: object) -> SampleBandFn:
-    """A :data:`SampleBandFn` that reads the OCR identity band via ``vision``.
+def anchor_band_verdict(
+    anchor: Anchor,
+    observed: str,
+    band_verifier: BandVerifier = _default_band_verifier,
+) -> str:
+    """Apply the runtime OCR identity check without restoring plaintext identity.
 
-    Mirrors the replayer's own band read (full-width band at the anchor
-    height around the point, volatile lines dropped against today's date), so
-    the harness verifies identity by the same rule the pre-click gate uses.
-    Provided as a convenience for wiring the harness to a real vision object;
-    tests inject a simpler fake.
+    Pixel-only or structured-only evidence cannot be verified by this OCR
+    campaign. Keep it unreadable rather than treating its missing context as
+    an unarmed target. The runtime's hashed OCR tier takes precedence over a
+    plaintext context, so a conflicting context cannot replace its identity.
+    """
+    template = anchor.identity_template
+    if template is not None and template.tokens:
+        from openadapt_flow.runtime.identity_template import verify_template_identity
+
+        return verify_template_identity(template, observed).status
+    if anchor.context_text:
+        return band_verifier(anchor.context_text, observed)
+    if (
+        template is not None
+        or anchor.structured_identity
+        or anchor.identifier_crop
+        or anchor.identifier_region
+    ):
+        return "unreadable"
+    return "unarmed"
+
+
+def band_sampler(
+    viewport: tuple[int, int], vision: object, *, anchor: Optional[Anchor] = None
+) -> SampleBandFn:
+    """Read the runtime's OCR identity evidence around a resolved target.
+
+    A supplied anchor binds the identifier region or excludes the target's own
+    mutable label, as runtime verification does. Scale those offsets to the
+    actual campaign frame; the scale case changes the viewport dimensions.
     """
     from datetime import date
 
     def sample(frame_png: bytes, point: Point) -> Optional[str]:
-        band = identity_mod.band_region(point, 64, viewport)
+        with Image.open(io.BytesIO(frame_png)) as frame:
+            live_viewport = frame.size
+        sx, sy = live_viewport[0] / viewport[0], live_viewport[1] / viewport[1]
         today = date.today()
+        if anchor is not None:
+
+            def translated(region: Region) -> Region:
+                x, y, width, height = region
+                return (
+                    point[0] + round((x - anchor.click_point[0]) * sx),
+                    point[1] + round((y - anchor.click_point[1]) * sy),
+                    max(1, round(width * sx)),
+                    max(1, round(height * sy)),
+                )
+
+            if anchor.identifier_region is not None:
+                region = translated(anchor.identifier_region)
+                return identity_mod.identifier_text_from_lines(
+                    vision.ocr(frame_png),  # type: ignore[attr-defined]
+                    region=region,
+                    reference_date=today,
+                )
+            height = max(1, round(anchor.region[3] * sy))
+            exclude = translated(anchor.region)
+        else:
+            height = max(1, round(64 * sy))
+            exclude = None
+        band = identity_mod.band_region(point, height, live_viewport)
         lines = [
             line
             for line in vision.ocr(frame_png, region=band)  # type: ignore[attr-defined]
             if line.text.strip()
+            and (
+                exclude is None
+                or not identity_mod.regions_intersect(line.region, exclude)
+            )
             and not identity_mod.is_volatile_line(line.text, reference_date=today)
         ]
         lines = identity_mod.lines_near_point(lines, point[1])

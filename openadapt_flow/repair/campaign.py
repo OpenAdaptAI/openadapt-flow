@@ -41,6 +41,7 @@ from openadapt_flow.runtime.healing.perturbation import (
     DriftKind,
     ResolveFn,
     SampleBandFn,
+    anchor_band_verdict,
     perturbation_set,
     replay_patch,
 )
@@ -226,6 +227,7 @@ def run_replay_campaign(
         resolve=resolve,
         sample_band=sample_band,
         band_verifier=band_verifier,
+        identity_anchor=anchor,
     )
     case_results = [
         CampaignCaseResult(
@@ -265,7 +267,6 @@ def run_fault_campaign(
     identity band verifies (or there is no identity band to check at all,
     which on an adversarial frame is a silent wrong action).
     """
-    expected_band = anchor.context_text
     case_results: list[CampaignCaseResult] = []
     for case in fault_battery(frame_png, anchor, kinds=kinds):
         label = f"{step_id}:{case.label}"
@@ -291,7 +292,9 @@ def run_fault_campaign(
                 )
             )
             continue
-        if not expected_band:
+        observed = sample_band(case.frame_png, located_point) or ""
+        status = anchor_band_verdict(anchor, observed, band_verifier)
+        if status == "unarmed":
             case_results.append(
                 CampaignCaseResult(
                     label=label,
@@ -304,8 +307,6 @@ def run_fault_campaign(
                 )
             )
             continue
-        observed = sample_band(case.frame_png, located_point) or ""
-        status = band_verifier(expected_band, observed)
         if status == "verified":
             case_results.append(
                 CampaignCaseResult(

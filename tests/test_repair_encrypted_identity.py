@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
 from openadapt_flow import vision
-from openadapt_flow.ir import ActionKind, Anchor, Step, Workflow
+from openadapt_flow.ir import ActionKind, Anchor, Resolution, Step, Workflow
 from openadapt_flow.repair.campaign import (
     _patch_for_anchor,
     run_fault_campaign,
@@ -30,6 +31,7 @@ from openadapt_flow.runtime.healing.perturbation import (
     replay_patch,
 )
 from openadapt_flow.runtime.identity_template import build_identity_template
+from openadapt_flow.runtime.replayer import Replayer
 
 VIEWPORT = (1000, 260)
 REGION = (720, 90, 220, 70)
@@ -225,3 +227,43 @@ def test_real_fault_battery_preserves_all_cases_and_checks_hashed_band():
     assert cases["wrong_entity"].passed
     assert cases["verifier_failure"].passed
     assert all("unarmed" not in case.detail for case in result.cases)
+
+
+def test_compact_scaled_identifier_does_not_pass_when_runtime_refuses():
+    image = Image.new("RGB", VIEWPORT, "white")
+    ImageDraw.Draw(image).text(
+        (35, 108), "Triage note entry", font=ImageFont.load_default(18), fill="black"
+    )
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    anchor = hashed_anchor().model_copy(
+        update={
+            "identity_template": build_identity_template("Triage note entry"),
+            "identifier_region": (30, 100, 190, 45),
+        }
+    )
+    step = Step(
+        id="entry", intent="Focus the note", action=ActionKind.CLICK, anchor=anchor
+    )
+    workflow = Workflow(name="compact-identity", viewport=VIEWPORT, steps=[step])
+    case = perturb(output.getvalue(), POINT, DriftKind.SCALE)
+    live_size = Image.open(io.BytesIO(case.frame_png)).size
+    replayer = Replayer(SimpleNamespace(viewport=live_size), vision=vision)
+    runtime = replayer._verify_identity_ocr(
+        step,
+        Resolution(
+            rung="template", point=case.expected_point, confidence=1.0, elapsed_ms=0.0
+        ),
+        case.frame_png,
+        {},
+        workflow,
+    )
+    observed = (
+        band_sampler(VIEWPORT, vision, anchor=anchor)(
+            case.frame_png, case.expected_point
+        )
+        or ""
+    )
+    campaign = anchor_band_verdict(anchor, observed)
+    assert runtime.status != "verified"
+    assert campaign != "verified"

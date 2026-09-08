@@ -51,6 +51,7 @@ class DriftCase:
     kind: DriftKind
     frame_png: bytes
     expected_point: Point
+    construction_error: Optional[str] = None
 
 
 @dataclass
@@ -157,16 +158,53 @@ def perturb(
     raise ValueError(f"unknown drift kind {kind!r}")
 
 
+def identity_row_region(anchor: Anchor, viewport: tuple[int, int]) -> Region:
+    """Bound the complete target and its declared OCR identity in one row strip."""
+    regions = [anchor.region]
+    regions.append(
+        anchor.identifier_region
+        or identity_mod.band_region(anchor.click_point, anchor.region[3], viewport)
+    )
+    if any(
+        x < 0 or y < 0 or x + width > viewport[0] or y + height > viewport[1]
+        for x, y, width, height in regions
+    ):
+        raise ValueError("target or identity region is outside the evidence frame")
+    top = min(region[1] for region in regions)
+    bottom = max(region[1] + region[3] for region in regions)
+    return (0, top, viewport[0], bottom - top)
+
+
 def perturbation_set(
     frame_png: bytes,
     anchor: Anchor,
     *,
     kinds: Optional[tuple[DriftKind, ...]] = None,
 ) -> list[DriftCase]:
-    """The full deterministic drift battery for an anchor's target point."""
+    """Build all requested conditions; an invalid fixture remains a failed case."""
     kinds = kinds or tuple(DriftKind)
     target = anchor.click_point
-    return [perturb(frame_png, target, kind) for kind in kinds]
+    cases: list[DriftCase] = []
+    for kind in kinds:
+        if kind != DriftKind.REFLOW:
+            cases.append(perturb(frame_png, target, kind))
+            continue
+        try:
+            with Image.open(io.BytesIO(frame_png)) as frame:
+                viewport = frame.size
+            _, top, _, height = identity_row_region(anchor, viewport)
+            if top + height + 24 > viewport[1]:
+                raise ValueError("reflow would clip the target or identity evidence")
+            # Insert above the complete row, never through the target or its
+            # identity text. The fold at the click point split glyphs in half.
+            cases.append(perturb(frame_png, target, kind, reflow_from_y=top))
+        except ValueError as exc:
+            cases.append(
+                DriftCase(
+                    "reflow", kind, frame_png, target, construction_error=str(exc)
+                )
+            )
+    return cases
 
 
 # Resolve a target in a (possibly drifted) frame -> its point, or None if the
@@ -212,6 +250,17 @@ def replay_patch(
     expected_band = patch.identity_after.context_text
     results: list[CaseResult] = []
     for case in cases:
+        if case.construction_error is not None:
+            results.append(
+                CaseResult(
+                    case.label,
+                    case.kind,
+                    located=False,
+                    identity_ok=False,
+                    detail=f"invalid drift fixture: {case.construction_error}",
+                )
+            )
+            continue
         located_point = resolve(case.frame_png)
         located = located_point is not None and (
             abs(located_point[0] - case.expected_point[0]) <= locate_tolerance

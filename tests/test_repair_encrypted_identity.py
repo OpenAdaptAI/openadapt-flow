@@ -16,8 +16,11 @@ from PIL import Image, ImageDraw, ImageFont
 from openadapt_flow import vision
 from openadapt_flow.ir import ActionKind, Anchor, Resolution, Step, Workflow
 from openadapt_flow.repair.campaign import (
+    FaultKind,
     _patch_for_anchor,
+    fault_battery,
     run_fault_campaign,
+    run_replay_campaign,
 )
 from openadapt_flow.repair.cli import _campaign_inputs
 from openadapt_flow.repair.registration import build_candidate
@@ -27,7 +30,9 @@ from openadapt_flow.runtime.healing.perturbation import (
     DriftKind,
     anchor_band_verdict,
     band_sampler,
+    identity_row_region,
     perturb,
+    perturbation_set,
     replay_patch,
 )
 from openadapt_flow.runtime.identity_template import build_identity_template
@@ -267,3 +272,116 @@ def test_compact_scaled_identifier_does_not_pass_when_runtime_refuses():
     campaign = anchor_band_verdict(anchor, observed)
     assert runtime.status != "verified"
     assert campaign != "verified"
+
+
+def test_reflow_moves_complete_target_and_identity_row_without_splitting_pixels():
+    anchor = hashed_anchor()
+    frame = pixels()
+    case = next(
+        c for c in perturbation_set(frame, anchor) if c.kind == DriftKind.REFLOW
+    )
+    assert case.construction_error is None
+    x, y, width, height = identity_row_region(anchor, VIEWPORT)
+    before = Image.open(io.BytesIO(frame))
+    after = Image.open(io.BytesIO(case.frame_png))
+    assert (
+        before.crop((x, y, x + width, y + height)).tobytes()
+        == after.crop((x, y + 24, x + width, y + height + 24)).tobytes()
+    )
+    assert case.expected_point == (POINT[0], POINT[1] + 24)
+    observed = (
+        band_sampler(VIEWPORT, vision, anchor=anchor)(
+            case.frame_png, case.expected_point
+        )
+        or ""
+    )
+    assert anchor_band_verdict(anchor, observed) == "verified"
+    located = real_resolver(anchor, png_crop(frame))(case.frame_png)
+    assert located == case.expected_point
+
+
+def test_ambiguity_has_two_valid_targets_in_search_scope_without_original():
+    anchor = hashed_anchor()
+    frame = pixels()
+    case = next(
+        c for c in fault_battery(frame, anchor) if c.kind == FaultKind.AMBIGUITY
+    )
+    assert case.construction_error is None
+    assert len(case.candidate_points) == 2
+    sx, sy, sw, sh = resolver.pad_region(anchor.region, anchor.search_pad, VIEWPORT)
+    sample = band_sampler(VIEWPORT, vision, anchor=anchor)
+    for point in case.candidate_points:
+        dx, dy = point[0] - POINT[0], point[1] - POINT[1]
+        x, y, width, height = anchor.region
+        region = (x + dx, y + dy, width, height)
+        assert sx <= region[0] and region[0] + width <= sx + sw
+        assert sy <= region[1] and region[1] + height <= sy + sh
+        match = vision.find_template(
+            case.frame_png,
+            png_crop(frame),
+            search_region=region,
+            scales=(1.0,),
+            threshold=0.99,
+        )
+        assert match is not None and match.confidence >= 0.99
+        assert (
+            anchor_band_verdict(anchor, sample(case.frame_png, point) or "")
+            == "verified"
+        )
+    assert (
+        vision.find_template(
+            case.frame_png,
+            png_crop(frame),
+            search_region=anchor.region,
+            scales=(1.0,),
+            threshold=0.99,
+        )
+        is None
+    )
+    with pytest.raises(resolver.AmbiguousOcrMatchError):
+        real_resolver(anchor, png_crop(frame))(case.frame_png)
+    result = run_fault_campaign(
+        "save",
+        anchor,
+        frame,
+        resolve=real_resolver(anchor, png_crop(frame)),
+        sample_band=sample,
+    )
+    assert result.passed
+    assert len(result.cases) == 5
+
+
+def test_invalid_ambiguity_geometry_is_retained_as_failure_not_a_safe_refusal():
+    anchor = hashed_anchor().model_copy(update={"search_pad": 0})
+    frame = pixels()
+    result = run_fault_campaign(
+        "save",
+        anchor,
+        frame,
+        resolve=real_resolver(anchor, png_crop(frame)),
+        sample_band=band_sampler(VIEWPORT, vision, anchor=anchor),
+    )
+    assert len(result.cases) == 5
+    ambiguity = next(c for c in result.cases if c.kind == "ambiguity")
+    assert not ambiguity.passed
+    assert "invalid fault fixture" in ambiguity.detail
+    assert not result.passed
+
+
+def test_reflow_that_would_clip_identity_is_retained_as_failed_condition():
+    anchor = hashed_anchor().model_copy(
+        update={"identifier_region": (30, 220, 190, 40)}
+    )
+    frame = pixels()
+    result = run_replay_campaign(
+        "save",
+        anchor,
+        frame,
+        resolve=real_resolver(anchor, png_crop(frame)),
+        sample_band=band_sampler(VIEWPORT, vision, anchor=anchor),
+    )
+    assert len(result.cases) == 5
+    reflow = next(c for c in result.cases if c.kind == "reflow")
+    assert not reflow.passed
+    assert "invalid drift fixture" in reflow.detail
+    assert not result.passed

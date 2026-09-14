@@ -163,7 +163,7 @@ service-mlx = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "mlx-vlm>=0.6.17,<0.8",
-    "transformers>=5.14,<5.17",
+    "transformers>=5.14,<5.18",
     "jinja2>=3.1,<4",
 ]
 # Cross-platform desktop recording on-ramp: convert an openadapt-capture

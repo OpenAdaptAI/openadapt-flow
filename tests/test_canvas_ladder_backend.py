@@ -146,3 +146,134 @@ def test_canvas_backend_maps_portable_select_all_to_remote_control():
     module.CanvasBrowserBackend(page).press("ControlOrMeta+a")
 
     assert page.keyboard.events == [("press", "Control+a")]
+
+
+def test_moderate_over_halt_retains_native_reason_without_report_payloads(
+    tmp_path, monkeypatch
+):
+    """The scheduled result must diagnose a refusal without exporting text."""
+    import json
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+
+    from openadapt_flow.ir import (
+        IdentityCheck,
+        Resolution,
+        RunReport,
+        SafetyRefusalEvidence,
+        StepResult,
+    )
+
+    module = _module()
+    secret = "SECRET-CANARY-DO-NOT-EXPORT" * 1000
+    healthy = RunReport(
+        workflow_name=secret,
+        started_at="2026-09-14T00:00:00Z",
+        success=True,
+        rung_counts={"template": 2, "ocr": 1},
+        results=[StepResult(step_id=secret, intent=secret, ok=True)],
+    )
+    moderate = RunReport(
+        workflow_name=secret,
+        started_at="2026-09-14T00:00:00Z",
+        execution_outcome="HALTED",
+        transaction_outcome="HALTED_BEFORE_EFFECT",
+        params={"note": secret},
+        results=[
+            StepResult(step_id=secret, intent=secret, ok=True),
+            StepResult(
+                step_id=secret,
+                intent=secret,
+                ok=False,
+                error=secret,
+                before_png=secret,
+                after_png=secret,
+                failure_category="governed_refusal",
+                delivery_attempted=False,
+                resolution=Resolution(
+                    rung="ocr", point=(910, 648), confidence=1.0, elapsed_ms=1.0
+                ),
+                identity=IdentityCheck(
+                    status="unreadable",
+                    mode="context",
+                    coverage=0.24,
+                    expected=secret,
+                    observed=secret,
+                    param=secret,
+                ),
+                safety_refusal_evidence=SafetyRefusalEvidence(
+                    stage="identity_verification",
+                    code="identity_unverifiable",
+                    detector_input_sha256="a" * 64,
+                ),
+            ),
+        ],
+    )
+    severe = moderate.model_copy(deep=True)
+    reports = iter([healthy, moderate, severe])
+    saved_notes = iter([f"{module.EXPECTED_MRN}\t{module.NOTE_VALUE}", None, None])
+    monkeypatch.setattr(
+        "playwright.sync_api.sync_playwright", lambda: nullcontext(None)
+    )
+    monkeypatch.setattr("openadapt_flow.recorder.Recorder", Mock())
+    monkeypatch.setattr("openadapt_flow.compiler.compile_recording", Mock())
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.replayer.Replayer",
+        lambda *args, **kwargs: Mock(run=lambda *args, **kwargs: next(reports)),
+    )
+    monkeypatch.setattr(module, "_reset_kiosk", lambda *args: None)
+    monkeypatch.setattr(module, "_read_saved_note", lambda *args: next(saved_notes))
+    monkeypatch.setattr(module, "_new_page", lambda *args: (Mock(), None, Mock()))
+
+    evidence = module.run_qualification(
+        "unused-test-container", out_dir=tmp_path, base_url="unused", port=0
+    )
+    trial = evidence["trials"][1]
+    assert trial["failure_class"] == "moderate_drift_over_halt"
+    assert trial["passed"] is False
+    assert evidence["accepted"] is False
+    assert evidence["successes"] == 2
+    diagnostic = trial["native_diagnostics"]
+    assert diagnostic["transaction_outcome"] == "HALTED_BEFORE_EFFECT"
+    failed = diagnostic["first_failed_step"]
+    assert failed["result_index"] == 2
+    assert failed["refusal_stage"] == "identity_verification"
+    assert failed["refusal_code"] == "identity_unverifiable"
+    assert failed["delivery_attempted"] is False
+    assert failed["resolution"] == {"rung": "ocr", "confidence": 1.0}
+    assert failed["identity"] == {
+        "status": "unreadable",
+        "mode": "context",
+        "coverage": 0.24,
+    }
+    encoded = json.dumps(evidence, allow_nan=False)
+    assert "SECRET-CANARY" not in encoded
+    assert len(json.dumps(diagnostic)) < 4096
+    assert all("native_diagnostics" in row for row in evidence["trials"])
+    # No frame, native report or path sweep is part of this projection.
+    assert list(tmp_path.rglob("*")) == [tmp_path / "work"]
+
+
+def test_native_diagnostics_bounds_the_scan_and_omits_nonfinite_metrics():
+    import json
+
+    from openadapt_flow.ir import IdentityCheck, RunReport, StepResult
+
+    module = _module()
+    result = StepResult(
+        step_id="private-step",
+        intent="private-intent",
+        ok=False,
+        identity=IdentityCheck(status="abstain", coverage=float("nan")),
+    )
+    report = RunReport(
+        workflow_name="private-name",
+        started_at="2026-09-14T00:00:00Z",
+        results=[result] * 1000,
+    )
+    diagnostic = module._native_diagnostics(report)
+    assert diagnostic["examined_step_count"] == 64
+    assert diagnostic["step_scan_truncated"] is True
+    assert diagnostic["first_failed_step"]["refusal_code"] is None
+    assert diagnostic["first_failed_step"]["identity"]["coverage"] is None
+    assert len(json.dumps(diagnostic, allow_nan=False)) < 4096

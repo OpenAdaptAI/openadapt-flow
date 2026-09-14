@@ -39,14 +39,18 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from PIL import Image, ImageFilter, ImageOps
+
+if TYPE_CHECKING:
+    from openadapt_flow.ir import RunReport
 
 # -- fixture geometry (kiosk_app.py renders these at fixed positions) ----------
 VIEWPORT = (1280, 800)
@@ -380,6 +384,62 @@ def _new_page(pw, base_url: str, container_port: int):
     raise RuntimeError("noVNC canvas never painted a non-blank kiosk frame")
 
 
+def _native_diagnostics(report: "RunReport") -> dict:
+    """Keep bounded typed halt evidence, never report text or local files.
+
+    Step IDs, intents, errors, OCR strings, paths and frames can contain live
+    values. A one-based result index plus native refusal enums locates the
+    failure without copying those fields into the scheduled public artifact.
+    """
+    examined = report.results[:64]
+    failed = next(
+        ((index, result) for index, result in enumerate(examined, 1) if not result.ok),
+        None,
+    )
+    diagnostic = {
+        "schema_version": "openadapt.canvas-native-diagnostics.v1",
+        "execution_outcome": report.execution_outcome,
+        "transaction_outcome": report.transaction_outcome,
+        "examined_step_count": len(examined),
+        "step_scan_truncated": len(report.results) > len(examined),
+        "first_failed_step": None,
+    }
+    if failed is None:
+        return diagnostic
+    index, result = failed
+
+    def fraction(value: float) -> Optional[float]:
+        return round(value, 4) if math.isfinite(value) and 0 <= value <= 1 else None
+
+    refusal = result.safety_refusal_evidence
+    diagnostic["first_failed_step"] = {
+        "result_index": index,
+        "failure_category": result.failure_category,
+        "refusal_stage": refusal.stage if refusal else None,
+        "refusal_code": refusal.code if refusal else None,
+        "error_present": result.error is not None,
+        "delivery_attempted": result.delivery_attempted,
+        "starting_state_settled": result.starting_state_settled,
+        "input_verified": result.input_verified,
+        "postconditions_ok": result.postconditions_ok,
+        "effect_verified": result.effect_verified,
+        "resolution": {
+            "rung": result.resolution.rung,
+            "confidence": fraction(result.resolution.confidence),
+        }
+        if result.resolution
+        else None,
+        "identity": {
+            "status": result.identity.status,
+            "mode": result.identity.mode,
+            "coverage": fraction(result.identity.coverage),
+        }
+        if result.identity
+        else None,
+    }
+    return diagnostic
+
+
 def run_qualification(
     container: str,
     *,
@@ -459,6 +519,7 @@ def run_qualification(
             {
                 "trial": 1,
                 "kind": "healthy_record_compile_replay",
+                "native_diagnostics": _native_diagnostics(report),
                 "success": bool(report.success),
                 "model_calls": int(report.model_calls),
                 "rung_counts": rung_counts,
@@ -501,6 +562,7 @@ def run_qualification(
             {
                 "trial": 2,
                 "kind": "moderate_drift_no_silent_wrong_write",
+                "native_diagnostics": _native_diagnostics(mod_report),
                 "drift": "downscale_0.4x + theme_invert + jpeg_q12 (legible; simulated on real session)",
                 "resolved_and_correct": bool(mod_correct_write),
                 "halted": bool(not mod_report.success),
@@ -550,6 +612,7 @@ def run_qualification(
             {
                 "trial": 3,
                 "kind": "severe_drift_safe_halt",
+                "native_diagnostics": _native_diagnostics(sev_report),
                 "drift": "downscale_0.14x + gaussian_blur_2.0 + theme_invert + jpeg_q5 (illegible; simulated on real session)",
                 "halted": bool(sev_halted),
                 "rung_counts": dict(sev_report.rung_counts),

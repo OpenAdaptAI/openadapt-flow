@@ -148,13 +148,34 @@ def test_canvas_backend_maps_portable_select_all_to_remote_control():
     assert page.keyboard.events == [("press", "Control+a")]
 
 
+def _run_qualification_reports(module, tmp_path, monkeypatch, reports, saved_notes):
+    from contextlib import nullcontext
+    from unittest.mock import Mock
+
+    reports = iter(reports)
+    saved_notes = iter(saved_notes)
+    monkeypatch.setattr(
+        "playwright.sync_api.sync_playwright", lambda: nullcontext(None)
+    )
+    monkeypatch.setattr("openadapt_flow.recorder.Recorder", Mock())
+    monkeypatch.setattr("openadapt_flow.compiler.compile_recording", Mock())
+    monkeypatch.setattr(
+        "openadapt_flow.runtime.replayer.Replayer",
+        lambda *args, **kwargs: Mock(run=lambda *args, **kwargs: next(reports)),
+    )
+    monkeypatch.setattr(module, "_reset_kiosk", lambda *args: None)
+    monkeypatch.setattr(module, "_read_saved_note", lambda *args: next(saved_notes))
+    monkeypatch.setattr(module, "_new_page", lambda *args: (Mock(), None, Mock()))
+    return module.run_qualification(
+        "unused-test-container", out_dir=tmp_path, base_url="unused", port=0
+    )
+
+
 def test_moderate_over_halt_retains_native_reason_without_report_payloads(
     tmp_path, monkeypatch
 ):
     """The scheduled result must diagnose a refusal without exporting text."""
     import json
-    from contextlib import nullcontext
-    from unittest.mock import Mock
 
     from openadapt_flow.ir import (
         IdentityCheck,
@@ -210,23 +231,12 @@ def test_moderate_over_halt_retains_native_reason_without_report_payloads(
         ],
     )
     severe = moderate.model_copy(deep=True)
-    reports = iter([healthy, moderate, severe])
-    saved_notes = iter([f"{module.EXPECTED_MRN}\t{module.NOTE_VALUE}", None, None])
-    monkeypatch.setattr(
-        "playwright.sync_api.sync_playwright", lambda: nullcontext(None)
-    )
-    monkeypatch.setattr("openadapt_flow.recorder.Recorder", Mock())
-    monkeypatch.setattr("openadapt_flow.compiler.compile_recording", Mock())
-    monkeypatch.setattr(
-        "openadapt_flow.runtime.replayer.Replayer",
-        lambda *args, **kwargs: Mock(run=lambda *args, **kwargs: next(reports)),
-    )
-    monkeypatch.setattr(module, "_reset_kiosk", lambda *args: None)
-    monkeypatch.setattr(module, "_read_saved_note", lambda *args: next(saved_notes))
-    monkeypatch.setattr(module, "_new_page", lambda *args: (Mock(), None, Mock()))
-
-    evidence = module.run_qualification(
-        "unused-test-container", out_dir=tmp_path, base_url="unused", port=0
+    evidence = _run_qualification_reports(
+        module,
+        tmp_path,
+        monkeypatch,
+        [healthy, moderate, severe],
+        [f"{module.EXPECTED_MRN}\t{module.NOTE_VALUE}", None, None],
     )
     trial = evidence["trials"][1]
     assert trial["failure_class"] == "moderate_drift_over_halt"
@@ -277,3 +287,79 @@ def test_native_diagnostics_bounds_the_scan_and_omits_nonfinite_metrics():
     assert diagnostic["first_failed_step"]["refusal_code"] is None
     assert diagnostic["first_failed_step"]["identity"]["coverage"] is None
     assert len(json.dumps(diagnostic, allow_nan=False)) < 4096
+
+
+@pytest.mark.parametrize("saved_note", [None, "", "WRONG-MRN\twrong note", "expected"])
+def test_severe_halt_rejects_every_persisted_note(tmp_path, monkeypatch, saved_note):
+    from openadapt_flow.ir import RunReport, StepResult
+
+    module = _module()
+    expected = f"{module.EXPECTED_MRN}\t{module.NOTE_VALUE}"
+    if saved_note == "expected":
+        saved_note = expected
+    healthy = RunReport(
+        workflow_name="fixture",
+        started_at="2026-09-14T00:00:00Z",
+        success=True,
+        rung_counts={"template": 2, "ocr": 1},
+        results=[StepResult(step_id="fixture-step", intent="fixture", ok=True)],
+    )
+    halted = RunReport(
+        workflow_name="fixture",
+        started_at="2026-09-14T00:00:00Z",
+        execution_outcome="HALTED",
+        transaction_outcome="HALTED_BEFORE_EFFECT",
+        results=[StepResult(step_id="fixture-step", intent="fixture", ok=False)],
+    )
+    evidence = _run_qualification_reports(
+        module,
+        tmp_path,
+        monkeypatch,
+        [healthy, healthy, halted],
+        [expected, expected, saved_note],
+    )
+    severe = evidence["trials"][2]
+    absent = saved_note is None
+    assert severe["effect_after_drift"] == saved_note
+    assert severe["silent_write"] is not absent
+    assert severe["passed"] is absent
+    assert severe["failure_class"] == (None if absent else "drift_not_safely_halted")
+    assert evidence["accepted"] is absent
+
+
+@pytest.mark.parametrize("content", [None, b"", b"\n", b"\t\n", b"wrong note\n"])
+def test_saved_note_probe_distinguishes_absence_from_existing_rows(
+    tmp_path, monkeypatch, content
+):
+    module = _module()
+    note = tmp_path / "saved-note.txt"
+    if content is not None:
+        note.write_bytes(content)
+    real_run = module.subprocess.run
+
+    def local_probe(command, **kwargs):
+        assert command[:4] == ["docker", "exec", "fixture", "python3"]
+        assert command[-1] == module.SAVE_PATH
+        return real_run([sys.executable, "-S", *command[4:-1], str(note)], **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", local_probe)
+    observed = module._read_saved_note("fixture")
+    assert observed == (None if content is None else content.decode().strip())
+
+
+@pytest.mark.parametrize("returncode", [1, 125, 126, 127, 137])
+def test_saved_note_probe_failure_cannot_prove_no_write(monkeypatch, returncode):
+    from subprocess import CompletedProcess
+
+    module = _module()
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: CompletedProcess(
+            args=args, returncode=returncode, stdout=b"", stderr=b"private detail"
+        ),
+    )
+    with pytest.raises(
+        RuntimeError, match=rf"^Canvas saved-note probe failed \(exit {returncode}\)$"
+    ):
+        module._read_saved_note("fixture")

@@ -331,14 +331,25 @@ class _DriftBackend:
 
 
 def _read_saved_note(container: str) -> Optional[str]:
+    # Only an explicit missing file proves absence. Docker/read failures must
+    # not become a no-write result, and an existing empty file remains a write.
+    probe = """import pathlib, sys
+try:
+    data = pathlib.Path(sys.argv[1]).read_bytes()
+except FileNotFoundError:
+    sys.exit(44)
+sys.stdout.buffer.write(data)
+"""
     res = subprocess.run(
-        ["docker", "exec", container, "cat", SAVE_PATH],
+        ["docker", "exec", container, "python3", "-c", probe, SAVE_PATH],
         capture_output=True,
         timeout=15,
         check=False,
     )
-    if res.returncode != 0:
+    if res.returncode == 44:
         return None
+    if res.returncode != 0:
+        raise RuntimeError(f"Canvas saved-note probe failed (exit {res.returncode})")
     return res.stdout.decode(errors="replace").strip()
 
 
@@ -605,7 +616,8 @@ def run_qualification(
             browser.close()
         saved_sev = _read_saved_note(container)
         sev_halted = not sev_report.success
-        sev_no_write = saved_sev != expected_saved
+        # An empty or wrong persisted note is still a write after the halt.
+        sev_no_write = saved_sev is None
         sev_no_model = sev_report.model_calls == 0
         sev_ok = sev_halted and sev_no_write and sev_no_model
         trials.append(
@@ -617,7 +629,7 @@ def run_qualification(
                 "halted": bool(sev_halted),
                 "rung_counts": dict(sev_report.rung_counts),
                 "model_calls": int(sev_report.model_calls),
-                "silent_write": bool(saved_sev == expected_saved),
+                "silent_write": not sev_no_write,
                 "effect_after_drift": saved_sev,
                 "passed": bool(sev_ok),
                 "failure_class": None if sev_ok else "drift_not_safely_halted",

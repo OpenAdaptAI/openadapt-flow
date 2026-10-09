@@ -425,7 +425,7 @@ def run_explanation(run: RunEvidence) -> str:
             "It saved the note, then read the record back and found it. Only "
             "then did it report the run as done."
         )
-    if run.records == 0 and plain.write_status in {"possible", "unknown"}:
+    if run.records == 0 and plain.key == "check_the_record":
         # The record check found nothing, but the engine did not prove that
         # no part of the save landed. Say both, and never claim absence.
         return (
@@ -796,13 +796,13 @@ def _technical_details(evidence: DemoEvidence) -> str:
     reconcile_note = ""
     if broken.transaction_outcome == "RECONCILIATION_REQUIRED":
         reconcile_note = (
-            f"<p>The store held {broken.records} matching rows, and the run "
-            "still ended <code>RECONCILIATION_REQUIRED</code>, not "
+            f"<p>The store held {broken.records} rows after the run, and the "
+            "run still ended <code>RECONCILIATION_REQUIRED</code>, not "
             "<code>HALTED_BEFORE_EFFECT</code>. The save declared "
-            f"{broken.effects_required} effects, and the engine proved "
-            f"{broken.effects_refuted} of them absent before it stopped. It "
-            "claims &ldquo;nothing was written&rdquo; only when every declared "
-            "effect is proven absent.</p>"
+            f"{broken.effects_required} effects, and the record check refuted "
+            f"{broken.effects_refuted} of them before the engine stopped. The "
+            "engine claims &ldquo;nothing was written&rdquo; only when every "
+            "declared effect is proven absent.</p>"
         )
     bundle_arg = shlex.quote(str(evidence.bundle_dir))
     graph_arg = shlex.quote(str(root / "graph.html"))

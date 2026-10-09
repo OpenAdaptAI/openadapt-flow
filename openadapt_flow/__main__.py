@@ -1324,10 +1324,12 @@ def _cmd_record_desktop(args: argparse.Namespace, backend: str) -> int:
             + ", ".join(f"{k}={v!r}" for k, v in params.items())
             + ". Override at replay with --param NAME=VALUE."
         )
+    from openadapt_flow.cli_hints import command
+
     print(
-        "Compile it:  openadapt-flow compile "
+        f"Compile it:  {command('compile')} "
         f"{out} --out <bundle> --name <workflow>\n"
-        f"Then replay: openadapt-flow replay <bundle> --backend {backend} …"
+        f"Then replay: {command('replay')} <bundle> --backend {backend} …"
     )
     return 0
 
@@ -2770,10 +2772,12 @@ def _cmd_approve(args: argparse.Namespace) -> int:
         approval=approval,
         target_status="approved",
     )
+    from openadapt_flow.cli_hints import command
+
     print(
         f"Approved pending escalation at {run_dir} by {approver!r} "
         f"(step {pending.step_index} '{pending.step_id}': {pending.category}).\n"
-        f"Resume it with:  openadapt-flow resume {run_dir}"
+        f"Resume it with:  {command('resume')} {run_dir}"
     )
     return 0
 
@@ -3612,8 +3616,10 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
         save_qualified_workflow(workflow, args.bundle)
         print(workflow.qualification.model_dump_json(indent=2))
         if changed:
+            from openadapt_flow.cli_hints import command
+
             print(
-                "Certification invalidated. Run `openadapt-flow qualify certify "
+                f"Certification invalidated. Run `{command('qualify certify')} "
                 "<bundle> --evidence-root <path>` before production V2 tasks.",
                 file=sys.stderr,
             )
@@ -4645,8 +4651,10 @@ def _cmd_push(args: argparse.Namespace) -> int:
         )
         print(f"Review original: {result['original_path']}")
         print(f"Sanitized derivative: {result['sanitized_path']}")
+        from openadapt_flow.cli_hints import command
+
         print(
-            "Review locally: openadapt-flow review-sanitized "
+            f"Review locally: {command('review-sanitized')} "
             f"{result['sanitized_path']} --original {result['original_path']}"
         )
         return 0
@@ -4735,8 +4743,10 @@ def _cmd_sanitize(args: argparse.Namespace) -> int:
         f"Sanitized {manifest['processed_file_count']} file(s) into {args.out}; "
         f"execution semantics: {manifest['execution_semantics']}."
     )
+    from openadapt_flow.cli_hints import command
+
     print(
-        "Review locally: openadapt-flow review-sanitized "
+        f"Review locally: {command('review-sanitized')} "
         f"{args.out} --original {args.path}"
     )
     return 0
@@ -4919,10 +4929,12 @@ def _emit_local_receipt(args: argparse.Namespace) -> int:
         return 0
 
     if not args.production:
+        from openadapt_flow.cli_hints import command
+
         print(
             "report-run REFUSED: --production is required because a saved "
-            "report cannot prove synthetic provenance. Run `openadapt-flow "
-            "tutorial` to emit the bundled reference receipt directly."
+            f"report cannot prove synthetic provenance. Run `{command('tutorial')}` "
+            "to emit the bundled reference receipt directly."
         )
         return 2
     try:
@@ -5088,9 +5100,11 @@ def _cmd_teach(args: argparse.Namespace) -> int:
 
     print(result.summary())
     if result.promoted:
+        from openadapt_flow.cli_hints import command
+
         print(
             "\nLEARNED. Re-run the updated bundle and the workflow no longer "
-            f"halts on this situation:\n    openadapt-flow replay {args.out}"
+            f"halts on this situation:\n    {command('replay')} {args.out}"
         )
         return 0
     print(

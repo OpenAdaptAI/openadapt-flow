@@ -129,10 +129,11 @@ openadapt-flow report-break runs/replay-… \          # PHI-free break diagnost
   compliance certification, or a safety SLA.
 - **Halt signaling** is read from **`report.json` (`RunReport.halt` /
   `HaltObservation`)**, never from a process exit code. `replay` and `run`
-  exit `0` or `1` when a run finishes, and `run` exits `2` when it refuses
-  before acting; none of these codes says why a run stopped. `report-break` posts only a schema-minimal descriptor: hashes,
-  status, resolver rung, and numeric metrics. Free text, screenshots, DOM, and
-  field values never enter the automatic payload. A `422` boundary rejection
+  exit `0` or `1` when a run finishes and `2` when they refuse before acting;
+  none of these codes says why a run stopped. `report-break` posts only a
+  schema-minimal descriptor: hashes, status, resolver rung, and numeric
+  metrics. Free text, screenshots, DOM, and field values never enter the
+  automatic payload. A `422` boundary rejection
   retries the same minimal shape, then falls back to local-only.
 - **Opt-in post-run hook:** set `OPENADAPT_FLOW_HOSTED_WORKFLOW_ID` (and
   optionally `OPENADAPT_FLOW_DEPLOYMENT_KIND` / `OPENADAPT_FLOW_ORG_ID`) and a

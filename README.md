@@ -279,7 +279,7 @@ bundle that passes it can still be refused by a governed `clinical-write` run.
 | Command | Exit 0 | Exit 1 | Exit 2 |
 |---|---|---|---|
 | `demo` | Run 1 was done and checked, and run 2 stopped | The pair didn't show that difference | The demo couldn't start, a stage lacked evidence, or a usage error |
-| `replay` (Demo profile) | The steps finished, not checked | The run didn't finish, or the command refused its inputs | Usage error |
+| `replay` (Demo profile) | The steps finished, not checked | The run didn't finish, or an input couldn't be used | Refused before acting (for example, a program recorded on another surface), or a usage error |
 | `run --profile standard` | `VERIFIED`: done and checked | Any other ending | Refused before acting, or a usage error |
 | `certify` | Passes the policy | No policy given, or it couldn't load | Fails the policy, or a usage error |
 | `lint` | No `error` gap (with `--strict`, no warnings either) | A gap at the threshold | Usage error |

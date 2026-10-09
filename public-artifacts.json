@@ -1520,6 +1520,10 @@
       "sha256": "1c7281f44523d366f6d5479d45b6d34c6786fa5e5b847494fc3d9b1567d3d4c6"
     },
     {
+      "path": "docs/showcase/demo-proof.png",
+      "sha256": "dcc435f85022598cf9ab5e32fe9a0e33968827c0067bdbcd6cb3e550973bd9ef"
+    },
+    {
       "path": "docs/showcase/demo.gif",
       "sha256": "cec6464e0e7acabc5c551e047bc906488bcc0be5e8c62a2cc082a21a36e16f7f"
     },

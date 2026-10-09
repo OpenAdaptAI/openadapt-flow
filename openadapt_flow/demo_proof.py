@@ -636,7 +636,10 @@ def _frame_figure(run: RunEvidence, alt: str, root: Path) -> str:
     link = ""
     relative = _relative_link(run.final_screenshot, root)
     if relative is not None:
-        link = f' <a href="{_e(relative)}">Open the full screen</a>.'
+        link = (
+            f' <span class="full-link"><a href="{_e(relative)}">Open the full '
+            "screen</a>.</span>"
+        )
     return (
         '<figure class="shot">'
         f'<div class="frame" style="aspect-ratio: {crop_w} / {crop_h}">'

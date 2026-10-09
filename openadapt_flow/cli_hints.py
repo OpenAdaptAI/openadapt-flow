@@ -1,7 +1,7 @@
 """Spell next-step commands the way the person invoked the engine.
 
 The OpenAdapt launcher runs this engine in-process (``openadapt flow <verb>``,
-``openadapt quickstart``, ``openadapt demo``). A hint that then says
+``openadapt quickstart``). A hint that then says
 ``openadapt-flow <verb>`` names a program the person never typed. Both
 spellings work when the launcher is installed, so this only picks the one
 that matches what the person used.
@@ -9,7 +9,6 @@ that matches what the person used.
 
 from __future__ import annotations
 
-import os
 import sys
 from typing import Optional, Sequence
 
@@ -31,7 +30,8 @@ def command_prefix(argv: Optional[Sequence[str]] = None) -> str:
     args = sys.argv if argv is None else argv
     if not args:
         return ENGINE_PREFIX
-    name = os.path.basename(str(args[0])).lower()
+    # Split on both separators so a Windows path reads the same on any host.
+    name = str(args[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if name.endswith(".exe"):
         name = name[: -len(".exe")]
     return LAUNCHER_PREFIX if name == "openadapt" else ENGINE_PREFIX

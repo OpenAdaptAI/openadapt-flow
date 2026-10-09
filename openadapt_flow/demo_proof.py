@@ -52,6 +52,14 @@ PAGE_NAME = "index.html"
 #: The placeholder app address in the one next command.
 NEXT_URL = "https://your-test-app.example"
 
+#: The part of each final frame the cards show, in frame pixels from the top
+#: left. On the bundled demo app this holds the patient banner, the saved
+#: message, and the encounters list; the rest of the 1280x800 frame is empty
+#: page. The full frame stays one click away and is what the identical-screens
+#: check hashes.
+CROP_WIDTH = 640
+CROP_HEIGHT = 320
+
 
 class DemoError(RuntimeError):
     """The demo could not run or could not produce honest evidence."""
@@ -169,6 +177,25 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def png_size(path: Optional[Path]) -> Optional[tuple[int, int]]:
+    """Width and height from a PNG's IHDR chunk, or ``None`` if unreadable."""
+
+    if path is None:
+        return None
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(24)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(head[16:20], "big")
+    height = int.from_bytes(head[20:24], "big")
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
 def _load_report(run_dir: Path) -> Any:
     from openadapt_flow.ir import RunReport
 
@@ -226,8 +253,8 @@ _PLAIN_CHOICES: tuple[tuple[str, str], ...] = (
     ),
     (
         "Approve and RESUME from the last verified checkpoint",
-        "After checking the record, let the run continue. Only the stopped "
-        "step runs again; steps already confirmed don't repeat.",
+        "After checking the record, let the run continue from the stopped "
+        "step. Steps already confirmed don't repeat.",
     ),
     ("Abort the run", "Cancel the run."),
 )
@@ -366,11 +393,22 @@ def _screen_words(showed: Optional[bool]) -> str:
     return "Not recorded"
 
 
+#: Plain results that mean the run stopped short of reporting done.
+_STOPPED_KEYS = frozenset({"check_the_record", "stopped_before_saving"})
+
+
 def run_headline(run: RunEvidence) -> str:
-    """The card title for one run."""
+    """The card title for one run.
+
+    The "screen said saved, record says no" title needs all three facts: the
+    transaction outcome is a stop (never done or unchecked), the app painted
+    its success message, and the record check found nothing. Otherwise the
+    title is the plain result's own label.
+    """
 
     if (
-        run.execution_outcome == "HALTED"
+        run.plain.key in _STOPPED_KEYS
+        and run.execution_outcome == "HALTED"
         and run.screen_showed_success
         and run.records == 0
     ):
@@ -398,12 +436,16 @@ def run_explanation(run: RunEvidence) -> str:
     return plain.meaning
 
 
-def what_openadapt_did(run: RunEvidence) -> str:
+def what_openadapt_did(run: RunEvidence, *, asked_a_person: bool = False) -> str:
+    """One short phrase for the card's "OpenAdapt" row."""
+
     plain = run.plain
     if plain.key == "done_and_checked":
         return "Reported done"
-    if run.execution_outcome == "HALTED":
-        return "Stopped and asked a person. No retry."
+    if plain.key in _STOPPED_KEYS and run.execution_outcome == "HALTED":
+        if asked_a_person:
+            return "Stopped and asked a person. No retry."
+        return "Stopped. No retry."
     return plain.label
 
 
@@ -459,11 +501,12 @@ h1 {
   letter-spacing: -.01em; max-width: 900px;
 }
 .lede { margin: 0 0 32px; max-width: 760px; font-size: 18px; color: var(--muted); }
-.runs { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
-@media (max-width: 780px) { .runs { grid-template-columns: 1fr; } }
+.runs { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
+@media (max-width: 780px) { .runs { grid-template-columns: 1fr; row-gap: 0; } }
 .run {
   background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
-  overflow: hidden; display: flex; flex-direction: column;
+  overflow: hidden; display: grid; grid-row: span 3; grid-template-rows: subgrid;
+  row-gap: 0; margin-bottom: 20px;
 }
 .run header { padding: 16px 18px 14px; border-bottom: 1px solid var(--line); }
 .run .which { margin: 0 0 4px; font-size: 13px; color: var(--muted); }
@@ -489,8 +532,11 @@ h1 {
 .badge.tone-unchecked { color: var(--unchecked); }
 .badge.tone-failed { color: var(--failed); }
 .shot { margin: 0; background: var(--bg); border-bottom: 1px solid var(--line); }
-.shot img { display: block; width: 100%; height: auto; }
+.shot .frame { position: relative; overflow: hidden; background: #fff; }
+.shot .frame img { position: absolute; top: 0; left: 0; max-width: none;
+  height: auto; }
 .shot figcaption { padding: 6px 18px; font-size: 13px; color: var(--muted); }
+.shot figcaption a { color: var(--accent); }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px;
   margin: 0; padding: 16px 18px 18px; align-items: baseline; }
 .facts dt { color: var(--muted); font-size: 14px; }
@@ -529,6 +575,11 @@ details h3 { font-size: 15px; margin: 18px 0 6px; }
   margin: 0; font-size: 14px; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
+.kv dd code { font-size: 13px; }
+@media (max-width: 640px) {
+  .kv { grid-template-columns: 1fr; gap: 0; }
+  .kv dt { margin-top: 10px; }
+}
 details ul { margin: 4px 0; padding-left: 20px; font-size: 14px; }
 footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
 """
@@ -554,7 +605,51 @@ def _rel(path: Optional[Path], root: Path) -> str:
         return str(path)
 
 
-def _run_card(run: RunEvidence, which: str, alt: str) -> str:
+def _relative_link(path: Optional[Path], root: Path) -> Optional[str]:
+    """A forward-slash link from the page to ``path``, if it sits under ``root``."""
+
+    if path is None:
+        return None
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def _frame_figure(run: RunEvidence, alt: str, root: Path) -> str:
+    """The top of the run's final frame, cropped by CSS, plus a full-size link.
+
+    The embedded bytes are the retained frame unchanged, so the page shows the
+    same pixels the identical-screens check hashed.
+    """
+
+    image = _data_uri(run.final_screenshot)
+    if image is None:
+        return (
+            '<figure class="shot"><figcaption>No final screen was retained.'
+            "</figcaption></figure>"
+        )
+    width, height = png_size(run.final_screenshot) or (1280, 800)
+    crop_w = min(CROP_WIDTH, width)
+    crop_h = min(CROP_HEIGHT, height)
+    scale = width / crop_w * 100
+    link = ""
+    relative = _relative_link(run.final_screenshot, root)
+    if relative is not None:
+        link = f' <a href="{_e(relative)}">Open the full screen</a>.'
+    return (
+        '<figure class="shot">'
+        f'<div class="frame" style="aspect-ratio: {crop_w} / {crop_h}">'
+        f'<img src="{image}" alt="{_e(alt)}" width="{width}" height="{height}" '
+        f'style="width: {scale:.4g}%"></div>'
+        f"<figcaption>Top of the final screen of this run.{link}</figcaption>"
+        "</figure>"
+    )
+
+
+def _run_card(
+    run: RunEvidence, which: str, alt: str, root: Path, *, asked_a_person: bool
+) -> str:
     headline = run_headline(run)
     badge = ""
     if headline != run.plain.label:
@@ -564,15 +659,8 @@ def _run_card(run: RunEvidence, which: str, alt: str) -> str:
         )
     unit = "note" if run.records == 1 else "notes"
     screen = _e(_screen_words(run.screen_showed_success))
-    image = _data_uri(run.final_screenshot)
-    figure = (
-        f'<figure class="shot"><img src="{image}" alt="{_e(alt)}" '
-        'width="1280" height="800"><figcaption>Final screen of this run'
-        "</figcaption></figure>"
-        if image
-        else '<figure class="shot"><figcaption>No final screen was retained.'
-        "</figcaption></figure>"
-    )
+    figure = _frame_figure(run, alt, root)
+    did = _e(what_openadapt_did(run, asked_a_person=asked_a_person))
     return f"""
     <article class="run tone-{_e(run.plain.tone)}">
       <header>
@@ -586,7 +674,7 @@ def _run_card(run: RunEvidence, which: str, alt: str) -> str:
         <dt>Screen showed</dt><dd>{screen}</dd>
         <dt>Record check</dt>
         <dd class="count">{run.records} <small>{unit} found</small></dd>
-        <dt>OpenAdapt</dt><dd>{_e(what_openadapt_did(run))}</dd>
+        <dt>OpenAdapt</dt><dd>{did}</dd>
       </dl>
     </article>"""
 
@@ -599,7 +687,11 @@ def _headline(evidence: DemoEvidence) -> tuple[str, str]:
     both_screens_said_saved = bool(
         evidence.clean.screen_showed_success and evidence.broken.screen_showed_success
     )
-    if evidence.showed_the_difference and both_screens_said_saved:
+    if (
+        evidence.showed_the_difference
+        and both_screens_said_saved
+        and evidence.clean.records == 1
+    ):
         return (
             "The screen said \u201csaved\u201d both times. Only one note was saved.",
             lede,
@@ -617,8 +709,10 @@ def _choices_section(evidence: DemoEvidence) -> str:
     if not evidence.choices:
         return ""
     step = evidence.save_step_name
+    # Say what the check found, never that nothing was written: the engine
+    # may leave this run at "Check the record".
     lead = (
-        f"“{_e(step)}” didn't reach the record. "
+        f"The record check didn't find the note from “{_e(step)}”. "
         if step and evidence.broken.records == 0
         else "The run stopped. "
     )
@@ -716,10 +810,8 @@ def _technical_details(evidence: DemoEvidence) -> str:
             "Read a run in plain words",
             command(f"explain {shlex.quote(str(broken.run_dir))}"),
         ),
-        (
-            "Answer a stop (real deployment)",
-            f"{command('approve RUN_DIR')}, then {command('resume RUN_DIR')}",
-        ),
+        ("Answer a stop: record the decision", command("approve RUN_DIR")),
+        ("Answer a stop: continue the run", command("resume RUN_DIR")),
     ]
     provenance = _kv(
         [
@@ -729,7 +821,14 @@ def _technical_details(evidence: DemoEvidence) -> str:
             ("compiled program", _rel(evidence.bundle_dir, root)),
         ]
     )
-    command_rows = _kv(commands)
+    command_rows = (
+        '<dl class="kv">'
+        + "".join(
+            f"<dt>{_e(label)}</dt><dd><code>{_e(text)}</code></dd>"
+            for label, text in commands
+        )
+        + "</dl>"
+    )
     return f"""
   <details>
     <summary>Technical details</summary>
@@ -761,18 +860,26 @@ def render_demo_page(evidence: DemoEvidence) -> str:
         "the screen would report both runs as done."
     )
     next_cmd = command(f"record --backend web --url {NEXT_URL} --out my-task")
+    asked = bool(evidence.choices)
     clean_card = _run_card(
         evidence.clean,
         "honest app",
         "Final screen of run 1: the app shows its saved message",
+        evidence.out_dir,
+        asked_a_person=asked,
     )
     broken_card = _run_card(
         evidence.broken,
         "app that drops the save",
         "Final screen of run 2: the same saved message",
+        evidence.out_dir,
+        asked_a_person=asked,
     )
     choices = _choices_section(evidence)
     details = _technical_details(evidence)
+    eyebrow = "Fake clinic data · ran on this computer"
+    if evidence.clean.model_calls == 0 and evidence.broken.model_calls == 0:
+        eyebrow += " · no AI calls"
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -784,7 +891,7 @@ def render_demo_page(evidence: DemoEvidence) -> str:
 </head>
 <body>
 <main>
-  <p class="eyebrow"><span class="tag">Synthetic recording</span>Fake clinic data · ran on this computer · no AI calls</p>
+  <p class="eyebrow"><span class="tag">Synthetic recording</span>{_e(eyebrow)}</p>
   <h1>{_e(title)}</h1>
   <p class="lede">{_e(lede)} Both runs used the same automation, built from one
   recorded example of filing a follow-up note in a fake clinic app. For the
@@ -835,23 +942,42 @@ def write_demo_page(evidence: DemoEvidence) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def summary_lines(evidence: DemoEvidence, page: Path, opened: bool) -> list[str]:
-    """At most six lines: two results, the page, and one next command."""
+def _run_summary(run: RunEvidence) -> list[str]:
+    """One or two terminal lines for one run, from its plain result."""
 
-    def line(run: RunEvidence) -> str:
-        screen = (
-            "Screen said saved." if run.screen_showed_success else "No success screen."
+    headline = run_headline(run)
+    if headline != run.plain.label:
+        first = f"{run.title}  {headline}."
+    else:
+        screen = {
+            True: "The screen said saved",
+            False: "No success message on screen",
+            None: "Screen not recorded",
+        }[run.screen_showed_success]
+        first = (
+            f"{run.title}  {run.plain.label}. {screen}; the record check found "
+            f"{_notes(run.records)}."
         )
-        return (
-            f"{run.title}  {run.plain.label:<22} {screen} "
-            f"Record check: {_notes(run.records)}."
-        )
+    lines = [first]
+    if run.plain.key != "done_and_checked":
+        lines.append(" " * (len(run.title) + 2) + run.plain.next_step)
+    return lines
+
+
+def summary_lines(evidence: DemoEvidence, page: Path, opened: bool) -> list[str]:
+    """A short terminal summary: both results, the page, and one next command.
+
+    A blank line, at most two lines per run (the result, plus the next step
+    when the run isn't done and checked), the page, and the next command: at
+    most seven lines, so the demo prints at most nine with its two-line intro
+    and eight in the usual case.
+    """
 
     where = "opened in your browser" if opened else "open it in a browser"
     return [
         "",
-        line(evidence.clean),
-        line(evidence.broken),
+        *_run_summary(evidence.clean),
+        *_run_summary(evidence.broken),
         f"Proof page: {page} ({where})",
         "Next: " + command(f"record --backend web --url {NEXT_URL} --out my-task"),
     ]
@@ -897,6 +1023,7 @@ __all__ = [
     "display_available",
     "open_page",
     "plain_choice",
+    "png_size",
     "render_demo_page",
     "run_explanation",
     "run_headline",

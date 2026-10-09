@@ -1520,12 +1520,12 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         return 2
 
     print(
-        "OpenAdapt demo: 2 runs on a fake clinic app. No AI calls, and nothing "
-        "leaves this computer."
+        "OpenAdapt demo: one task, run twice on a fake clinic app on this "
+        "computer. No AI calls."
     )
     print(
-        "This takes a minute or two, longer the first time while the browser "
-        "downloads."
+        "It usually takes 1 to 3 minutes, longer the first time while the "
+        "browser downloads."
     )
 
     # The bundled demo app holds only fixed synthetic data. Keep an installed
@@ -1551,7 +1551,12 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         elif scrub == "auto":
             os.environ["OPENADAPT_FLOW_SCRUB"] = scrub
 
-    evidence = demo_proof.collect_evidence(result, out_dir)
+    try:
+        evidence = demo_proof.collect_evidence(result, out_dir)
+    except demo_proof.DemoError as exc:
+        print(f"\nThe demo couldn't build its proof page: {exc}")
+        print(f"Both runs' evidence is in {out_dir}")
+        return 2
     page = demo_proof.write_demo_page(evidence)
     opened = False
     if not args.no_open and demo_proof.display_available():

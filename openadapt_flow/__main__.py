@@ -827,6 +827,7 @@ def _replay_outcome_epilogue(
     Fail-closed semantics are untouched: this only explains an ending that
     already happened.
     """
+    from openadapt_flow.cli_hints import command
     from openadapt_flow.tutorial import outcome_epilogue_lines
 
     halt = getattr(report, "halt", None)
@@ -858,7 +859,7 @@ def _replay_outcome_epilogue(
             outcome_epilogue_lines(
                 what=what,
                 why_safe=why_safe,
-                next_command=f"openadapt-flow explain {run_dir}",
+                next_command=command(f"explain {run_dir}"),
             )
         )
     if outcome == "COMPLETED_UNVERIFIED":
@@ -870,8 +871,8 @@ def _replay_outcome_epilogue(
                 ),
                 why_safe=("screen-only completion can never claim success under Flow"),
                 next_command=(
-                    "openadapt-flow scaffold-verifier <recording-or-bundle>  "
-                    "# draft an oracle, wire effects:, re-run"
+                    command("scaffold-verifier <recording-or-bundle>")
+                    + "  # draft an oracle, wire effects:, re-run"
                 ),
             )
         )
@@ -879,7 +880,7 @@ def _replay_outcome_epilogue(
         outcome_epilogue_lines(
             what=f"the run ended {outcome} and reported the failure loudly",
             why_safe="a failure is never guessed into a success",
-            next_command=f"openadapt-flow explain {run_dir}",
+            next_command=command(f"explain {run_dir}"),
         )
     )
 
@@ -891,13 +892,24 @@ def _finish_replay(
     *,
     backend_kind: Optional[str] = None,
 ) -> int:
-    """Render the run report, print the outcome, and map it to an exit code."""
+    """Render the run report, print the outcome, and map it to an exit code.
+
+    Exit codes are unchanged and documented in the README: under the Demo
+    profile a completed run exits 0 even when it ends ``COMPLETED_UNVERIFIED``
+    (finished, not checked). The printed result line says so, so a person
+    never reads exit 0 as a confirmed save; scripts that need a checked result
+    read ``transaction_outcome`` from ``report.json`` or use ``run`` under the
+    Standard profile.
+    """
+    from openadapt_flow.plain_outcome import plain_result
     from openadapt_flow.report import render_run_report
 
     report_md = render_run_report(run_dir)
     outcome = getattr(report, "execution_outcome", None) or (
         "success" if report.success else "FAILED"
     )
+    plain = plain_result(getattr(report, "transaction_outcome", None), outcome)
+    print(f"Result: {plain.label}. {plain.meaning}")
     print(f"Replay {outcome}: {report_md}")
     if report.screenshots_may_leave_box:
         print(
@@ -913,6 +925,12 @@ def _finish_replay(
     _maybe_attest_run(run_dir, report, args)
     if getattr(report, "execution_profile", None) in {"standard", "regulated"}:
         return 0 if outcome == "VERIFIED" else 1
+    if report.success and outcome != "VERIFIED":
+        print(
+            "\nExit code 0 here means the steps finished, not that the save was "
+            "checked.\nFor a checked result, read transaction_outcome in "
+            "report.json or use run under the standard profile."
+        )
     return 0 if report.success else 1
 
 
@@ -2843,13 +2861,20 @@ def _cmd_lint(args: argparse.Namespace) -> int:
     threshold = "warn" if args.strict else "error"
     fail = SEVERITY_ORDER[report.max_severity] >= SEVERITY_ORDER[threshold]
     if report.findings and fail:
-        _print_lint_epilogue(args.bundle, threshold)
+        _print_lint_epilogue(
+            args.bundle,
+            threshold,
+            warnings_only=SEVERITY_ORDER[report.max_severity] < SEVERITY_ORDER["error"],
+        )
         return 1
     return 0
 
 
-def _print_lint_epilogue(bundle: str, threshold: str) -> None:
+def _print_lint_epilogue(
+    bundle: str, threshold: str, *, warnings_only: bool = False
+) -> None:
     """Three-line epilogue after a failing lint (presentation only)."""
+    from openadapt_flow.cli_hints import command
     from openadapt_flow.tutorial import outcome_epilogue_lines
 
     lines = outcome_epilogue_lines(
@@ -2861,9 +2886,16 @@ def _print_lint_epilogue(bundle: str, threshold: str) -> None:
             "gaps are reported instead of silently running unguarded or "
             "unverifiable steps"
         ),
-        next_command=f"openadapt-flow certify {bundle} --policy <policy>",
+        next_command=command(f"certify {bundle} --policy clinical-write"),
     )
     print("\n" + "\n".join(lines))
+    if warnings_only:
+        # --strict is a CI gate: a fresh recording usually carries warnings,
+        # so say plainly why this exited 1 and what the default does.
+        print(
+            "Only warnings were found. --strict fails on warnings; without it, "
+            "lint exits 0 unless a finding reaches 'error'."
+        )
 
 
 def _cmd_scaffold_verifier(args: argparse.Namespace) -> int:
@@ -6473,7 +6505,8 @@ def build_parser() -> argparse.ArgumentParser:
         "certify",
         help=(
             "Enforce a policy on a bundle (exits nonzero + reports if it "
-            "fails); makes 'runnable' distinct from 'certified safe'"
+            "fails); passing means the bundle meets that policy's rules, "
+            "not that it is safe to run"
         ),
     )
     p.add_argument("bundle", help="Workflow bundle directory")

@@ -5395,18 +5395,21 @@ def _package_version() -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argument parser."""
+    from openadapt_flow.cli_hints import command
+
     parser = argparse.ArgumentParser(
         prog="openadapt-flow",
         description=(
-            "Record a task once, compile it into a program that runs on this "
-            "computer, and confirm each save by reading the record back. A run "
-            "that can't confirm a save stops and asks a person. When the screen "
+            "Record a task once and compile it into a program that runs on "
+            "this computer. With a record check configured, a governed run "
+            "confirms each save by reading the record back, and a run that "
+            "can't confirm a save stops and asks a person. When the screen "
             "changes, it finds the same field again or stops, and a lasting fix "
             "needs a person's approval."
         ),
         epilog=(
-            "New here? Run '%(prog)s demo' to see a checked run and a stopped "
-            "run side by side on one page."
+            f"New here? Run '{command('demo')}' to see a checked run and a "
+            "stopped run side by side on one page."
         ),
     )
     parser.add_argument(

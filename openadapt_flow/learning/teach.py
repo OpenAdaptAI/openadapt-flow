@@ -153,6 +153,91 @@ def load_base_program(bundle_dir: Path | str) -> tuple[Workflow, ProgramGraph]:
     return workflow, program
 
 
+def check_provenance(
+    report: RunReport,
+    base_workflow: Workflow,
+    program: ProgramGraph,
+    *,
+    run_dir: Path | str,
+    bundle_dir: Path | str,
+) -> None:
+    """Require that the halted run came from the bundle passed as ``--bundle``.
+
+    A mismatched pair can't be taught: the correction would be spliced into a
+    program that never ran, and the learn loop would only report a generic
+    refusal. Raises :class:`TeachError` before anything is written.
+    """
+    if report.workflow_name != base_workflow.name:
+        raise TeachError(
+            f"the run at {run_dir} came from the workflow "
+            f"{report.workflow_name!r}, but --bundle {bundle_dir} is the "
+            f"workflow {base_workflow.name!r}. Pass the bundle whose replay "
+            "stopped."
+        )
+    halt = report.halt
+    assert halt is not None  # guaranteed by load_halt_report
+    graphs = [program, *base_workflow.subflows.values()]
+    if any(halt.state_id in graph.states for graph in graphs):
+        return
+    if halt.intent and any(
+        state.kind is StateKind.ACTION
+        and state.step is not None
+        and state.step.intent == halt.intent
+        for graph in graphs
+        for state in graph.states.values()
+    ):
+        return
+    raise TeachError(
+        f"the step where the run at {run_dir} stopped ({halt.intent!r}) is not "
+        f"in --bundle {bundle_dir}. Pass the bundle whose replay stopped."
+    )
+
+
+def _seed_or_check_library(
+    library: SkillLibrary,
+    skill_id: str,
+    program: ProgramGraph,
+    subflows: dict[str, ProgramGraph],
+    *,
+    bundle_dir: Path | str,
+) -> None:
+    """Seed the skill from the bundle, or check an existing skill came from it.
+
+    The library lives beside ``--out`` and outlives a refused teach. A skill
+    seeded from a different bundle would make every later teach to that
+    ``--out`` learn against the wrong program and refuse, so it is reported
+    instead of reused. A skill with any version equal to this bundle's program
+    descends from it and is reused, which keeps the promotion lineage.
+    """
+    if not library.has(skill_id):
+        library.create_skill(skill_id, program, subflows=subflows)
+        return
+    if any(
+        _same_program(version.graph, version.subflows, program, subflows)
+        for version in library.get(skill_id).versions
+    ):
+        return
+    raise TeachError(
+        f"the skill library at {library.root} holds a different program for "
+        f"{skill_id!r} than --bundle {bundle_dir}, probably from an earlier "
+        "teach with another bundle. Pass a new --out, or --library with a new "
+        "directory, or remove that library directory."
+    )
+
+
+def _same_program(
+    graph: ProgramGraph,
+    subflows: dict[str, ProgramGraph],
+    other_graph: ProgramGraph,
+    other_subflows: dict[str, ProgramGraph],
+) -> bool:
+    if graph.model_dump(mode="json") != other_graph.model_dump(mode="json"):
+        return False
+    return {k: g.model_dump(mode="json") for k, g in subflows.items()} == {
+        k: g.model_dump(mode="json") for k, g in other_subflows.items()
+    }
+
+
 # -- deriving the correction from the base program + halt --------------------
 
 
@@ -465,10 +550,13 @@ def teach(
         and exit nonzero.
 
     Raises:
-        TeachError: The inputs are unusable (no halt, no bundle, a malformed fix).
+        TeachError: The inputs are unusable (no halt, no bundle, a malformed
+            fix, a run that did not come from ``bundle``, or a library at
+            ``library_dir`` seeded from a different bundle).
     """
     report = load_halt_report(run_dir)
     base_workflow, program = load_base_program(bundle)
+    check_provenance(report, base_workflow, program, run_dir=run_dir, bundle_dir=bundle)
     sid = skill_id or report.workflow_name
 
     spec = _load_fix(fix)
@@ -483,8 +571,9 @@ def teach(
         else Path(out).parent / f"{Path(out).name}.skills"
     )
     library = SkillLibrary(lib_root)
-    if not library.has(sid):
-        library.create_skill(sid, program, subflows=dict(base_workflow.subflows))
+    _seed_or_check_library(
+        library, sid, program, dict(base_workflow.subflows), bundle_dir=bundle
+    )
 
     outcome, _ = learn_from_halt(
         library,

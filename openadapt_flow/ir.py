@@ -2838,6 +2838,15 @@ class EffectVerificationEvidence(BaseModel):
     #: or reconciled effect). Additive; defaults to the fail-safe "unknown" so an
     #: evidence record that predates this field never asserts "no effect".
     observed_effect: Literal["present", "absent", "conflicting", "unknown"] = "unknown"
+    #: Where the verifier read the system of record: ``loopback`` (this
+    #: computer), ``external``, or ``unknown`` when the verifier names no
+    #: endpoint. Only a loopback read keeps a network substrate such as REST or
+    #: FHIR from counting as an external network call. The default is left out
+    #: of the serialized record, so evidence written before this field existed
+    #: keeps its exact bytes.
+    endpoint_scope: Literal["loopback", "external", "unknown"] = Field(
+        default="unknown", exclude_if=lambda value: value == "unknown"
+    )
 
 
 class QualifiedEffectRequirement(BaseModel):

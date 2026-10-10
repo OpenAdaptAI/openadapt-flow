@@ -123,6 +123,7 @@ from openadapt_flow.ir import (
     Workflow,
     predicate_contract_sha256,
 )
+from openadapt_flow.network_scope import EndpointScope, endpoint_scope
 from openadapt_flow.privacy import scrub_image_bytes as _scrub_png
 from openadapt_flow.privacy import scrub_text as _scrub_phi
 from openadapt_flow.qualification_environment import (
@@ -350,6 +351,17 @@ class _ProgramHalt(Exception):
         self.program_frames: list[GraphFrame] = []
         self.program_params: dict[str, RuntimeParamScalar] = {}
         self.program_history_hash: str = ""
+
+
+def effect_endpoint_scope(verifier: Any) -> EndpointScope:
+    """Where an effect verifier reads its system of record.
+
+    A verifier that names a ``base_url`` (REST, FHIR) is ``loopback`` when that
+    URL is on this computer and ``external`` otherwise. A verifier without one
+    is ``unknown``, which keeps a network substrate counted as egress.
+    """
+    base_url = getattr(verifier, "base_url", None)
+    return endpoint_scope(base_url) if isinstance(base_url, str) else "unknown"
 
 
 def _record_loop_iteration(
@@ -1223,6 +1235,9 @@ class Replayer:
         # with caller-supplied values overriding both. A v0 bundle (empty
         # ``param_specs``) collapses to exactly the old ``{**workflow.params,
         # **caller}`` merge.
+        prior_external_network_calls = self._initial_external_network_calls(
+            prior_external_network_calls
+        )
         merged: dict[str, RuntimeParamScalar] = {**workflow.params}
         for pname, spec in workflow.param_specs.items():
             if spec.example is not None:
@@ -2359,6 +2374,20 @@ class Replayer:
                 else 0
             )
         )
+
+    def _initial_external_network_calls(
+        self, prior: Literal["none", "observed", "unknown"]
+    ) -> Literal["none", "observed", "unknown"]:
+        """Seed the run's network observation before any step runs.
+
+        A Cloud-dispatched run exchanges its dispatch binding and delivery
+        permits with Cloud, so it made external network calls whatever its
+        target's origin is. Without this, a Cloud run against a loopback app
+        could be reported as having made none.
+        """
+        if self.delivery_authority_kind == "cloud_runner":
+            return "observed"
+        return prior
 
     @staticmethod
     def _sync_durable_audit(durable_run: Any, report: RunReport) -> None:
@@ -4867,6 +4896,7 @@ class Replayer:
                         initial_verdict=verdict.verdict.value,
                         final_verdict=verdict.verdict.value,
                         observed_effect=verdict.observed_effect,
+                        endpoint_scope=effect_endpoint_scope(current_verifier),
                     )
                 )
             else:
@@ -7765,6 +7795,7 @@ class Replayer:
                 )
             try:
                 verdict = verify_effect_without_mutation(verifier, effect, before)
+                scope = effect_endpoint_scope(verifier)
                 selected_pre_state = getattr(before, "for_effect", None)
                 if callable(selected_pre_state):
                     # Candidate selection and its evidence strength are pinned
@@ -7773,6 +7804,7 @@ class Replayer:
                     binding = selected_pre_state(effect)
                     tier = binding.tier
                     identity = binding.verifier_identity
+                    scope = effect_endpoint_scope(binding.verifier)
                     if (
                         verifier_effect_tier(binding.verifier, effect) != tier
                         or effect_verifier_identity(binding.verifier) != identity
@@ -7814,6 +7846,7 @@ class Replayer:
                         initial_verdict=verdict.verdict.value,
                         final_verdict=verdict.verdict.value,
                         observed_effect=verdict.observed_effect,
+                        endpoint_scope=scope,
                     )
                 )
                 result.effect_results.append(
@@ -7847,6 +7880,7 @@ class Replayer:
                             initial_verdict=verdict.verdict.value,
                             final_verdict=final_verdict.verdict.value,
                             observed_effect=final_verdict.observed_effect,
+                            endpoint_scope=scope,
                             reconciliation_completed=True,
                             reconciliation_actions=comp.actions_taken,
                         )
@@ -7868,6 +7902,7 @@ class Replayer:
                         initial_verdict=verdict.verdict.value,
                         final_verdict=final_verdict.verdict.value,
                         observed_effect=final_verdict.observed_effect,
+                        endpoint_scope=scope,
                         reconciliation_actions=comp.actions_taken,
                     )
                 )
@@ -7895,6 +7930,7 @@ class Replayer:
                     initial_verdict=verdict.verdict.value,
                     final_verdict=verdict.verdict.value,
                     observed_effect=verdict.observed_effect,
+                    endpoint_scope=scope,
                 )
             )
             result.effect_results.append(

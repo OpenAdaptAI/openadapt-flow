@@ -3511,6 +3511,21 @@ class ManagedResultLossEvidence(BaseModel):
         )
 
 
+class LoopIterationBinding(BaseModel):
+    """The row values one loop iteration bound, for the run's audit trail.
+
+    ``params`` holds only the row's own fields, which override the run's base
+    parameters for that iteration. A loop that types a row field writes the
+    row value, never the recorded default in :attr:`RunReport.params`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    loop_state_id: str
+    row_index: int = Field(ge=0)
+    params: dict[str, Union[str, bool, int, float]] = Field(default_factory=dict)
+
+
 class RunReport(BaseModel):
     workflow_name: str
     started_at: str
@@ -3794,6 +3809,10 @@ class RunReport(BaseModel):
     # additive and empty/None on a linear run.
     terminal_outcome: Optional[str] = None
     visited_states: list[str] = Field(default_factory=list)
+    # Per-iteration row bindings of program loops, in execution order. A
+    # parameter a row binds is written with the row's value, so ``params``
+    # alone would misstate what a loop run typed. Empty on a run with no loop.
+    loop_iterations: list[LoopIterationBinding] = Field(default_factory=list)
     program_transition_evidence: list[ProgramTransitionEvidence] = Field(
         default_factory=list,
         description=(

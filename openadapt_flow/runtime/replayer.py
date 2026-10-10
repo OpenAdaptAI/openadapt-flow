@@ -97,6 +97,7 @@ from openadapt_flow.ir import (
     IdentitySignalEvidence,
     Interstitial,
     InterstitialActionResult,
+    LoopIterationBinding,
     LoopSpec,
     PixelIdentityEvidence,
     Point,
@@ -349,6 +350,61 @@ class _ProgramHalt(Exception):
         self.program_frames: list[GraphFrame] = []
         self.program_params: dict[str, RuntimeParamScalar] = {}
         self.program_history_hash: str = ""
+
+
+def _record_loop_iteration(
+    report: RunReport,
+    loop_state_id: str,
+    row_index: int,
+    row: Mapping[str, RuntimeParamScalar],
+) -> None:
+    """Record the row values one loop iteration binds, before it runs.
+
+    ``report.params`` is the run's base scope. A row field overrides it for
+    that iteration, so the audit report needs each row's own values to state
+    what the run typed.
+    """
+    report.loop_iterations.append(
+        LoopIterationBinding(
+            loop_state_id=loop_state_id,
+            row_index=row_index,
+            params=dict(row),
+        )
+    )
+
+
+def _loop_iterations_from_checkpoints(
+    checkpoints: list[ProgramCheckpoint],
+) -> list[LoopIterationBinding]:
+    """Rebuild the loop rows that earlier legs of a resumed run bound.
+
+    A resumed report carries the earlier legs' results, so it also needs the
+    row values those results typed. Each checkpoint's frame stack names the
+    loop row it ran in. A row is listed once, at its first checkpoint, keyed by
+    its position in the frame stack so a nested loop's rows under different
+    outer rows stay distinct.
+    """
+    seen: set[tuple[tuple[str, str, int], ...]] = set()
+    bindings: list[LoopIterationBinding] = []
+    for checkpoint in checkpoints:
+        path: tuple[tuple[str, str, int], ...] = ()
+        for frame in checkpoint.frames:
+            cursor = frame.loop
+            if cursor is None:
+                path = (*path, (frame.graph_id, "", -1))
+                continue
+            path = (*path, (frame.graph_id, cursor.loop_state_id, cursor.row_index))
+            if path in seen or not 0 <= cursor.row_index < len(cursor.rows):
+                continue
+            seen.add(path)
+            bindings.append(
+                LoopIterationBinding(
+                    loop_state_id=cursor.loop_state_id,
+                    row_index=cursor.row_index,
+                    params=dict(cursor.rows[cursor.row_index]),
+                )
+            )
+    return bindings
 
 
 def _all_workflow_steps(workflow: Workflow):
@@ -2448,6 +2504,9 @@ class Replayer:
                         report.attended_program_transition_evidence.append(
                             checkpoint.attended_transition_evidence
                         )
+                report.loop_iterations.extend(
+                    _loop_iterations_from_checkpoints(checkpoints)
+                )
                 self._program_history_boundary_index = len(successful_history)
                 self._program_durable_history = durable_base_history
                 self._program_history_parent_hash = _history_hash(durable_base_history)
@@ -3003,6 +3062,7 @@ class Replayer:
             )
         for i, row in enumerate(rows):
             iter_params = {**params, **row}
+            _record_loop_iteration(report, state.id, i, row)
             self._walk_graph(
                 body,
                 graph_id=loop.body,
@@ -5177,6 +5237,7 @@ class Replayer:
                 start_i = (cursor.row_index + 1) if cursor is not None else 0
                 for i in range(start_i, len(rows)):
                     iter_params = {**params, **rows[i]}
+                    _record_loop_iteration(report, state.id, i, rows[i])
                     self._walk_graph(
                         body,
                         graph_id=loop.body,

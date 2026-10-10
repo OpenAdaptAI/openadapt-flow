@@ -35,10 +35,17 @@ class PlaintextPHIWarning(UserWarning):
 def _report_has_identity_like_text(report: RunReport) -> bool:
     """True if the report carries free text that typically embeds PHI.
 
-    Params values and step intents are the identifier-bearing free-text fields
-    rendered into REPORT.md (patient name / DOB / MRN flow through here).
+    Params values, loop row values and step intents are the
+    identifier-bearing free-text fields rendered into REPORT.md (patient
+    name / DOB / MRN flow through here).
     """
     if any((v or "").strip() for v in report.params.values()):
+        return True
+    if any(
+        str(v).strip()
+        for binding in report.loop_iterations
+        for v in binding.params.values()
+    ):
         return True
     return any((r.intent or "").strip() for r in report.results)
 
@@ -358,16 +365,43 @@ def render_run_report(run_dir: Path | str) -> Path:
     lines.append("")
 
     # -- Parameters -----------------------------------------------------
+    # A loop row binds its own value for a parameter in each iteration, so the
+    # run-level value of that parameter is not what the run typed. Show the
+    # row values instead of a recorded default the run never wrote.
+    row_bound = {key for binding in report.loop_iterations for key in binding.params}
     lines.append("## Parameters")
     lines.append("")
     if report.params:
         lines.append("| Param | Value |")
         lines.append("| --- | --- |")
         for key, value in report.params.items():
-            lines.append(f"| `{_md_escape(key)}` | {_md_phi(value)} |")
+            shown = (
+                "_set per row, see Loop iterations_"
+                if key in row_bound
+                else _md_phi(str(value))
+            )
+            lines.append(f"| `{_md_escape(key)}` | {shown} |")
     else:
         lines.append("_No parameters._")
     lines.append("")
+
+    if report.loop_iterations:
+        lines.append("## Loop iterations")
+        lines.append("")
+        lines.append(
+            "Each row's values replace the run's parameters for that iteration."
+        )
+        lines.append("")
+        lines.append("| Loop | Row | Param | Value |")
+        lines.append("| --- | --- | --- | --- |")
+        for binding in report.loop_iterations:
+            for key, value in binding.params.items():
+                lines.append(
+                    f"| `{_md_escape(binding.loop_state_id)}` "
+                    f"| {binding.row_index + 1} "
+                    f"| `{_md_escape(key)}` | {_md_phi(str(value))} |"
+                )
+        lines.append("")
 
     # -- Identity-protection coverage ------------------------------------
     # Stated on every report: identity verification covers ONLY armed

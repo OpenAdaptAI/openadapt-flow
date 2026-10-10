@@ -235,27 +235,48 @@ def _request_break_it(request: ExecuteRequestV1) -> bool:
 
 
 def _map_outcome(coarse: str, txn: Any) -> ExecuteTerminalOutcomeV1:
+    """Map a run onto the Execute taxonomy from its transaction outcome only.
+
+    Fail closed. ``halted_before_effect``, ``rejected_policy`` and
+    ``failed_platform`` each assert that no business effect happened, so they
+    come only from a transaction outcome that the classifier stamped with
+    proof of absence. A missing, unknown or contradictory value can't prove
+    that, so it maps to ``reconciliation_required``. The coarse outcome never
+    stands in for a missing transaction outcome; it can only block VERIFIED.
+    """
     from openadapt_flow.transaction import TransactionOutcome
 
-    if txn is TransactionOutcome.VERIFIED or coarse == "VERIFIED":
-        return ExecuteTerminalOutcomeV1.VERIFIED
-    if txn is TransactionOutcome.RECONCILIATION_REQUIRED:
+    if not isinstance(txn, TransactionOutcome):
         return ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
-    if txn is TransactionOutcome.HALTED_BEFORE_EFFECT:
-        return ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT
-    if txn is TransactionOutcome.REJECTED_POLICY:
-        return ExecuteTerminalOutcomeV1.REJECTED_POLICY
-    if txn is TransactionOutcome.FAILED_PLATFORM:
-        return ExecuteTerminalOutcomeV1.FAILED_PLATFORM
-    if txn is TransactionOutcome.ROLLED_BACK:
-        return ExecuteTerminalOutcomeV1.ROLLED_BACK_VERIFIED
-    if coarse == "HALTED":
-        return ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT
-    if coarse == "COMPLETED_UNVERIFIED":
-        return ExecuteTerminalOutcomeV1.REJECTED_POLICY
-    # A coarse FAILED, or anything unclassifiable, cannot prove that no effect
-    # happened.
-    return ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+    if txn is TransactionOutcome.VERIFIED:
+        return (
+            ExecuteTerminalOutcomeV1.VERIFIED
+            if coarse == "VERIFIED"
+            else ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+        )
+    mapping = {
+        TransactionOutcome.HALTED_BEFORE_EFFECT: (
+            ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT
+        ),
+        # The classifier returns CANCELED only with proof that no effect
+        # happened, the same proof HALTED_BEFORE_EFFECT carries.
+        TransactionOutcome.CANCELED: ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT,
+        TransactionOutcome.REJECTED_POLICY: ExecuteTerminalOutcomeV1.REJECTED_POLICY,
+        TransactionOutcome.FAILED_PLATFORM: ExecuteTerminalOutcomeV1.FAILED_PLATFORM,
+        TransactionOutcome.ROLLED_BACK: ExecuteTerminalOutcomeV1.ROLLED_BACK_VERIFIED,
+        TransactionOutcome.RECONCILIATION_REQUIRED: (
+            ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+        ),
+        # The run executed but did not prove its effect. Execute has no
+        # "completed, not verified" outcome, and rejected_policy would misstate
+        # why the run stopped.
+        TransactionOutcome.COMPLETED_UNVERIFIED: (
+            ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+        ),
+    }
+    if txn not in mapping:
+        raise DispatchError(f"unmapped transaction outcome: {txn.value}")
+    return mapping[txn]
 
 
 def _contract_booleans(envelope: Any) -> tuple[bool, bool, bool, bool]:

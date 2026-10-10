@@ -32,7 +32,9 @@ frames have the same SHA-256 digest.
 stopped, 1 when the pair didn't show that difference (the page still reports
 each run as it ended), and 2 when the demo couldn't start or a stage lacked
 the evidence it needs. It never overwrites an earlier demo folder. With no
-`--out`, it uses `openadapt-demo`, then `openadapt-demo-2`, and so on.
+`--out`, it uses `openadapt-demo`, then `openadapt-demo-2`, and so on. The
+engine never reuses a run folder, even after you delete it, so the demo also
+skips a name that an earlier demo used.
 
 ## What `tutorial` does
 

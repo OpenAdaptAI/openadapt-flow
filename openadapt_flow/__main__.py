@@ -1531,6 +1531,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     import os
 
     from openadapt_flow import demo_proof
+    from openadapt_flow.runtime.durable.authority import DurableAuthorityBusy
     from openadapt_flow.tutorial import TutorialError, run_tutorial
 
     try:
@@ -1564,6 +1565,15 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     except TutorialError as exc:
         print(f"\nThe demo stopped before it could show a fair result: {exc}")
         print(f"Anything it wrote is in {out_dir}")
+        return 2
+    except DurableAuthorityBusy as exc:
+        # The engine reserves each run path for good. choose_output_dir skips
+        # reserved names it can see; this covers a registry it couldn't read.
+        print(f"\nThe demo didn't run: the engine refused {out_dir} ({exc}).")
+        print(
+            "OpenAdapt never reuses a run folder, even after it's deleted. Run "
+            "it again with --out and a new folder."
+        )
         return 2
     finally:
         if scrub is None:
@@ -5456,7 +5466,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Folder for the page and both runs' evidence (default: "
             "./openadapt-demo, then -2, -3, ... so an earlier demo is never "
-            "overwritten). An existing non-empty folder is refused."
+            "overwritten). An existing non-empty folder is refused, and so is "
+            "a folder an earlier demo used, even after it was deleted."
         ),
     )
     p.add_argument(

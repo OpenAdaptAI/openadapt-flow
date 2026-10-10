@@ -70,12 +70,54 @@ class DemoError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 
+#: The two run folders the tutorial writes inside the demo folder. The engine
+#: reserves each one as a durable run path.
+RUN_SUBDIRS = ("run", "run-broken")
+
+
+def run_paths_reserved(root: Path) -> bool:
+    """True when an earlier run already reserved one of the demo's run paths.
+
+    The engine reserves every durable run path for good, even after its
+    folder is deleted (``runtime/durable/authority.py``), and refuses a run
+    that reuses one. This reads that registry so the demo can pick a free name
+    up front. Read-only; when the registry can't be read, the answer is
+    ``False`` and the engine's own refusal still applies.
+    """
+
+    import sqlite3
+    from contextlib import closing
+
+    from openadapt_flow.runtime.durable.authority import (
+        _default_db_path,
+        _path_key,
+    )
+
+    db_path = _default_db_path()
+    if not db_path.is_file():
+        return False
+    keys = [_path_key(root / name) for name in RUN_SUBDIRS]
+    try:
+        with closing(
+            sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+        ) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM durable_authority WHERE path_key IN (?, ?) LIMIT 1",
+                keys,
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def choose_output_dir(out: Optional[str | Path], *, cwd: Optional[Path] = None) -> Path:
     """Pick the output directory. Never reuse a directory that has content.
 
     With no ``out``, use ``openadapt-demo`` in ``cwd`` and append ``-2``,
-    ``-3`` ... until the name is free. An explicit ``out`` that already holds
-    files is refused, so an earlier proof is never overwritten.
+    ``-3`` ... until the name is free: not on disk, and not reserved by an
+    earlier run whose folder was deleted. An explicit ``out`` that already
+    holds files, or that an earlier run reserved, is refused, so an earlier
+    proof is never overwritten and the engine never sees a reused run path.
     """
 
     if out is not None:
@@ -85,11 +127,17 @@ def choose_output_dir(out: Optional[str | Path], *, cwd: Optional[Path] = None) 
                 f"{root} already exists and isn't empty. Pass --out with a new "
                 "folder so the earlier demo stays as it is."
             )
+        if run_paths_reserved(root):
+            raise DemoError(
+                f"an earlier demo already ran in {root}. OpenAdapt never reuses "
+                "a run folder, even after it's deleted. Pass --out with a new "
+                "folder."
+            )
         return root
     base = (cwd or Path.cwd()).resolve()
     root = base / DEFAULT_DEMO_DIR
     suffix = 2
-    while root.exists():
+    while root.exists() or run_paths_reserved(root):
         root = base / f"{DEFAULT_DEMO_DIR}-{suffix}"
         suffix += 1
     return root
@@ -1121,6 +1169,7 @@ __all__ = [
     "plain_choice",
     "png_size",
     "render_demo_page",
+    "run_paths_reserved",
     "run_explanation",
     "run_headline",
     "summary_lines",

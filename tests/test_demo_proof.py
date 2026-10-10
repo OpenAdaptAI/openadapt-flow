@@ -337,6 +337,46 @@ class TestSummaryAndHelpers:
         second = demo_proof.choose_output_dir(None, cwd=tmp_path)
         assert second.name == "openadapt-demo-2"
 
+    def test_a_name_an_earlier_run_reserved_is_skipped(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A deleted demo folder's run paths stay reserved by the engine."""
+
+        import sqlite3
+
+        from openadapt_flow.runtime.durable.authority import _path_key
+
+        db = tmp_path / "authority.sqlite3"
+        monkeypatch.setenv("OPENADAPT_DURABLE_AUTHORITY_DB", str(db))
+        work = tmp_path / "work"
+        work.mkdir()
+        reserved = work.resolve() / "openadapt-demo"
+        with sqlite3.connect(db) as connection:
+            connection.execute(
+                "CREATE TABLE durable_authority (path_key TEXT PRIMARY KEY)"
+            )
+            connection.execute(
+                "INSERT INTO durable_authority VALUES (?)",
+                (_path_key(reserved / "run"),),
+            )
+        connection.close()
+
+        assert demo_proof.run_paths_reserved(reserved)
+        assert not demo_proof.run_paths_reserved(work.resolve() / "other")
+        # The folder doesn't exist, but its run path is taken: skip the name.
+        chosen = demo_proof.choose_output_dir(None, cwd=work)
+        assert chosen.name == "openadapt-demo-2"
+        with pytest.raises(demo_proof.DemoError, match="never reuses a run folder"):
+            demo_proof.choose_output_dir(reserved)
+
+    def test_no_registry_means_nothing_is_reserved(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "OPENADAPT_DURABLE_AUTHORITY_DB", str(tmp_path / "missing.sqlite3")
+        )
+        assert not demo_proof.run_paths_reserved(tmp_path / "openadapt-demo")
+
     def test_explicit_non_empty_output_dir_is_refused(self, tmp_path: Path) -> None:
         (tmp_path / "keep.txt").write_text("x", encoding="utf-8")
         with pytest.raises(demo_proof.DemoError, match="isn't empty"):
@@ -433,6 +473,26 @@ class TestDemoCommand:
         monkeypatch.setattr(tutorial_module, "run_tutorial", refuse)
         assert main(["demo", "--out", str(tmp_path / "p"), "--no-open"]) == 2
         assert "FAILED to catch the injected fault" in capsys.readouterr().out
+
+    def test_demo_exit_2_when_the_engine_refuses_the_run_folder(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        from openadapt_flow.runtime.durable.authority import DurableAuthorityBusy
+
+        def busy(work_dir, **kwargs):
+            raise DurableAuthorityBusy(
+                "this canonical run path already has durable authority; "
+                "use a new run directory"
+            )
+
+        monkeypatch.setattr(tutorial_module, "run_tutorial", busy)
+        assert main(["demo", "--out", str(tmp_path / "p"), "--no-open"]) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out
+        assert "Run it again with --out and a new folder." in out
 
     def test_demo_refuses_a_non_empty_out_before_running(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

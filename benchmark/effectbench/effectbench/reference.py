@@ -135,7 +135,7 @@ def main() -> None:
         "\nMeasured end-to-end result (real replayer, on-disk SQLite system of "
         "record):\n"
         "  screen-verify                          54/90 = 60.0%\n"
-        "  effect-verify, one out-of-band oracle    9/90 = 10.0%  <- ships\n"
+        "  effect-verify, one out-of-band oracle    9/90 = 10.0%  <- most realistic\n"
         "  effect-verify, complete SQL read path    0/90 =  0.0%\n"
         "  https://github.com/OpenAdaptAI/openadapt-flow/blob/main/"
         "benchmark/effect_e2e/EFFECT_E2E.md"

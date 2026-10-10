@@ -171,6 +171,7 @@ FIELD_RATE_PHRASES = (
     "number a real deployment ships",
     "what a real deployment ships",
     "expected field result",
+    "<- ships",
 )
 
 _BENCHMARK = Path(__file__).resolve().parents[1] / "benchmark"

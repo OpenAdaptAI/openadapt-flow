@@ -18,8 +18,9 @@ writes one self-contained page, `openadapt-demo/index.html`, and opens it when
 a display is available (`--no-open` skips that). The page puts the two final
 screens side by side, shows the record check under each run (1 note, then 0),
 lists the choices a person gets when the second run stops, and folds the
-engine's exact terms under "Technical details". The terminal prints at most
-eight lines.
+engine's exact terms under "Technical details". When the demo goes as
+expected, the terminal shows 8 lines. If the first run doesn't end "Done and
+checked", its next step adds a ninth.
 
 Each plain result on the page comes from the run's `transaction_outcome`.
 The second run ends `RECONCILIATION_REQUIRED`, so the page says "Check the

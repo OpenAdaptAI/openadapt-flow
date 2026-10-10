@@ -24,7 +24,7 @@ import tempfile
 from pathlib import Path
 
 #: CSS width of the page when it's captured. Wider than the demo page's
-#: one-column breakpoint (780 px) so both cards sit side by side, and close to
+#: one-column breakpoint (640 px) so both cards sit side by side, and close to
 #: the width GitHub gives a README image.
 VIEWPORT_WIDTH = 900
 #: Pixel density of the capture, so text stays sharp when GitHub scales it.

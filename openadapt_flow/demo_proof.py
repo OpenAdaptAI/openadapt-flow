@@ -453,7 +453,7 @@ def what_openadapt_did(run: RunEvidence, *, asked_a_person: bool = False) -> str
 # HTML
 # ---------------------------------------------------------------------------
 
-#: Styles for the proof page. Colour is a verdict: green appears only for a
+#: Styles for the proof page. Color is a verdict: green appears only for a
 #: run whose save was read back and matched, amber only for a run that stopped
 #: for a person, red only for a run that didn't finish; everything else is ink
 #: and hairlines. Every status also carries an icon and a word. The page loads
@@ -736,7 +736,7 @@ def _run_card(
     headline = run_headline(run)
     tone = run.plain.tone
     if headline == run.plain.label:
-        # The title is the result itself: give it the icon and the colour.
+        # The title is the result itself: give it the icon and the color.
         title = f'<h2 class="verdict">{_icon(tone)}{_e(headline)}</h2>'
         chip = ""
     else:
@@ -781,12 +781,18 @@ def _headline(evidence: DemoEvidence) -> tuple[str, str]:
         and both_screens_said_saved
         and evidence.clean.records == 1
     ):
+        # Say what the record check found, not that run 2 wrote nothing: the
+        # engine may leave that run at "Check the record".
         return (
-            "The screen said \u201csaved\u201d both times. Only one note was saved.",
+            "The screen said \u201csaved\u201d both times. The record check "
+            "found only one note.",
             lede,
         )
     if evidence.showed_the_difference:
-        return ("Only one of the two runs saved the note. OpenAdapt knew which.", lede)
+        return (
+            "The record check found a note after only one of the two runs.",
+            lede,
+        )
     return (
         "This demo didn't go the way it should have.",
         "The two runs below didn't show the expected difference. Each result is "

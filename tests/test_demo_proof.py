@@ -227,6 +227,10 @@ class TestProofPage:
         assert "nothing was written" not in visible
         assert "safe to" not in visible
         assert "didn't reach the record" not in visible
+        # The headline reports the record check's count, never that the
+        # second run saved nothing.
+        assert "the record check found only one note." in visible
+        assert "only one note was saved" not in visible
         assert "a person checks the record before anything is retried" in visible
 
     def test_halted_before_effect_may_say_nothing_was_written(
@@ -263,7 +267,7 @@ class TestProofPage:
         assert not evidence.showed_the_difference
         visible = _visible_text(demo_proof.render_demo_page(evidence))
         assert "This demo didn't go the way it should have." in visible
-        assert "Only one note was saved" not in visible
+        assert "found only one note" not in visible
 
     def test_page_is_self_contained_and_escaped(self, tmp_path: Path) -> None:
         evidence = demo_proof.collect_evidence(_tutorial_result(tmp_path), tmp_path)

@@ -92,17 +92,20 @@ def test_emit_skill(tmp_path: Path) -> None:
     assert "| `note` |" in md
     assert "## What it does" in md
     assert "click 'Sign In'" in md
+    assert "type <note>" in md
     invocation_lines = [
-        line for line in md.splitlines() if line.startswith("openadapt-flow replay ")
+        line for line in md.splitlines() if line.startswith("openadapt-flow run ")
     ]
     assert len(invocation_lines) == 1
     invocation = invocation_lines[0]
     # Portable: the invocation references the bundle COPY inside the skill
     # folder, never an absolute path on the emitting machine.
-    assert invocation.startswith("openadapt-flow replay bundle ")
+    assert invocation.startswith("openadapt-flow run bundle ")
     assert str(bundle.resolve()) not in invocation
     assert "--url <APP_URL>" in invocation
-    assert '--param note="Follow-up in 2 weeks; BP recheck."' in invocation
+    # A placeholder, never the recorded example value.
+    assert "--param note=<note>" in invocation
+    assert "Follow-up in 2 weeks" not in md
 
     # The bundle was copied into the skill folder (self-contained artifact).
     assert (skill_dir / "bundle" / "workflow.json").is_file()
@@ -120,13 +123,120 @@ def test_emit_skill_invocation_is_valid_cli(tmp_path: Path) -> None:
     skill_dir = emit_skill(bundle, tmp_path / "skills")
     md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
     invocation = next(
-        line for line in md.splitlines() if line.startswith("openadapt-flow replay ")
+        line for line in md.splitlines() if line.startswith("openadapt-flow run ")
     )
     argv = shlex.split(invocation)[1:]  # drop the program name
     argv = ["http://localhost:1" if a == "<APP_URL>" else a for a in argv]
     args = build_parser().parse_args(argv)  # must not SystemExit
-    assert args.command == "replay"
+    assert args.command == "run"
     assert args.bundle == "bundle"
+
+
+def _make_leaky_bundle(tmp_path: Path) -> Path:
+    """A bundle whose recorded literals must never reach SKILL.md or server.py.
+
+    It holds a constant (non-parameterized) typed password, a parameter whose
+    recorded example stands in for patient data, a typed example in
+    ``param_specs``, and a click whose on-screen label equals that example.
+    """
+    from openadapt_flow.ir import ParamSpec
+
+    bundle = tmp_path / "leaky"
+    workflow = Workflow(
+        name="Triage Note",
+        params={"note": "PHI-NOTE-XYZ"},
+        param_specs={
+            "mrn": ParamSpec(name="mrn", example="MRN-EXAMPLE-777"),
+        },
+        secret_params=["password"],
+        steps=[
+            Step(
+                id="step_0",
+                intent="type 'SECRET-PW-123'",
+                action="type",
+                text="SECRET-PW-123",
+            ),
+            Step(
+                id="step_1",
+                intent="type <password> (secret)",
+                action="type",
+                param="password",
+                secret=True,
+            ),
+            Step(
+                id="step_2",
+                intent="click 'PHI-NOTE-XYZ'",
+                action="click",
+                anchor=Anchor(
+                    template="templates/step_2.png",
+                    region=(10, 20, 160, 64),
+                    click_point=(90, 52),
+                    ocr_text="PHI-NOTE-XYZ",
+                ),
+            ),
+            Step(
+                id="step_3",
+                intent="type 'PHI-NOTE-XYZ'",
+                action="type",
+                param="note",
+            ),
+            Step(
+                id="step_4",
+                intent="type 'MRN-EXAMPLE-777'",
+                action="type",
+                param="mrn",
+            ),
+        ],
+    )
+    workflow.save(bundle)
+    Image.new("RGB", (8, 8), (120, 120, 120)).save(bundle / "templates" / "step_2.png")
+    return bundle
+
+
+_RECORDED_LITERALS = ("SECRET-PW-123", "PHI-NOTE-XYZ", "MRN-EXAMPLE-777")
+
+
+def test_emit_skill_contains_no_recorded_values(tmp_path: Path) -> None:
+    """SKILL.md is loaded into a model's context: it must carry no typed
+    text, no recorded parameter examples, and must route the agent to the
+    governed ``run`` path with every parameter supplied explicitly."""
+    bundle = _make_leaky_bundle(tmp_path)
+    skill_dir = emit_skill(bundle, tmp_path / "skills")
+    md = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
+
+    for literal in _RECORDED_LITERALS:
+        assert literal not in md, literal
+
+    invocation = next(
+        line for line in md.splitlines() if line.startswith("openadapt-flow ")
+    )
+    assert invocation.startswith("openadapt-flow run ")
+    assert "--param note=<note>" in invocation
+    assert "--param mrn=<mrn>" in invocation
+    # A secret is read from the environment, never passed on the command line.
+    assert "password" not in invocation
+    assert "OPENADAPT_FLOW_SECRET_PASSWORD" in md
+    assert "fall back to the recorded" not in md
+    assert "Example value" not in md
+
+
+def test_emit_mcp_server_has_no_recorded_defaults(tmp_path: Path) -> None:
+    """The generated MCP tool must require every parameter: a recorded example
+    as a default would both leak it and write it to the wrong record."""
+    bundle = _make_leaky_bundle(tmp_path)
+    out = emit_mcp_server(bundle, tmp_path / "mcp" / "server.py")
+    source = out.read_text(encoding="utf-8")
+
+    for literal in _RECORDED_LITERALS:
+        assert literal not in source, literal
+    tree = ast.parse(source)
+    tool = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "run_triage_note"
+    )
+    assert [a.arg for a in tool.args.args] == ["url", "note", "mrn"]
+    assert tool.args.defaults == []
 
 
 def test_emit_skill_no_params(tmp_path: Path) -> None:
@@ -163,8 +273,9 @@ def test_emit_mcp_server(tmp_path: Path) -> None:
         isinstance(a.annotation, ast.Name) and a.annotation.id == "str"
         for a in tool.args.args
     )
-    # note default is the recorded example value.
-    assert tool.args.defaults[-1].value == "Follow-up in 2 weeks; BP recheck."
+    # Every workflow parameter is required: no recorded example as default.
+    assert tool.args.defaults == []
+    assert "Follow-up in 2 weeks" not in source
     assert ast.get_docstring(tool)
 
     # Server wiring: the bundle is copied next to server.py and referenced

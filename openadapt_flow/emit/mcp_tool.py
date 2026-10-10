@@ -16,6 +16,7 @@ import re
 import shutil
 from pathlib import Path
 
+from openadapt_flow.emit.skill import declared_params
 from openadapt_flow.ir import Workflow
 
 _BUNDLE_SUBDIR = "bundle"
@@ -108,8 +109,10 @@ def emit_mcp_server(bundle_dir: Path | str, out_path: Path | str) -> Path:
     """Generate a standalone, portable FastMCP ``server.py`` for the bundle.
 
     The generated module defines one tool named after the workflow, with a
-    required ``url`` argument plus one typed ``str`` argument per workflow
-    parameter (defaulting to the recorded example value). The source is
+    required ``url`` argument plus one required ``str`` argument per
+    non-secret workflow parameter. A recorded example value is never a
+    default: it would leak the recorded value into the generated source and
+    write it to the wrong record when a caller omits the argument. The source is
     validated with :func:`ast.parse` before being written. The workflow
     bundle is copied to ``<out_path's directory>/bundle/`` and referenced
     relative to the generated file, so the directory can be shipped as-is.
@@ -126,12 +129,9 @@ def emit_mcp_server(bundle_dir: Path | str, out_path: Path | str) -> Path:
     out = Path(out_path)
 
     func_name = f"run_{_identifier(workflow.name)}"
-    param_names = {name: _identifier(name) for name in workflow.params}
+    param_names = {name: _identifier(name) for name in declared_params(workflow)}
 
-    param_sig = "".join(
-        f", {ident}: str = {workflow.params[name]!r}"
-        for name, ident in param_names.items()
-    )
+    param_sig = "".join(f", {ident}: str" for ident in param_names.values())
     if param_names:
         params_dict = (
             "{"

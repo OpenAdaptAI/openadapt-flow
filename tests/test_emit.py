@@ -302,6 +302,84 @@ def test_emit_mcp_server_odd_name(tmp_path: Path) -> None:
     assert any(f.startswith("run_") and f.isidentifier() for f in funcs)
 
 
+def _emitted_bundle_dir(server: Path) -> Path:
+    """Resolve the BUNDLE_DIR an emitted server.py would load at run time."""
+    tree = ast.parse(server.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "BUNDLE_DIR"
+        ):
+            subdir = node.value.right  # Path(__file__).resolve().parent / <name>
+            assert isinstance(subdir, ast.Constant)
+            return server.resolve().parent / subdir.value
+    raise AssertionError("emitted server defines no BUNDLE_DIR")
+
+
+def _named_bundle(root: Path, name: str, n_steps: int) -> Path:
+    bundle = root / name.lower().replace(" ", "-")
+    Workflow(
+        name=name,
+        params={},
+        steps=[
+            Step(id=f"s{i}", intent=f"press key {i}", action="key", text="a")
+            for i in range(n_steps)
+        ],
+    ).save(bundle)
+    return bundle
+
+
+def test_emit_mcp_two_servers_same_dir_keep_their_own_workflow(
+    tmp_path: Path,
+) -> None:
+    run_demo = _named_bundle(tmp_path / "src", "Run Demo", 2)
+    quickstart = _named_bundle(tmp_path / "src", "Local Quickstart", 5)
+    servers = tmp_path / "servers"
+
+    demo_server = emit_mcp_server(run_demo, servers / "run_demo.py")
+    quick_server = emit_mcp_server(quickstart, servers / "quickstart.py")
+
+    demo_dir = _emitted_bundle_dir(demo_server)
+    quick_dir = _emitted_bundle_dir(quick_server)
+    assert demo_dir != quick_dir
+    assert Workflow.load(demo_dir).name == "Run Demo"
+    assert len(Workflow.load(demo_dir).steps) == 2
+    assert Workflow.load(quick_dir).name == "Local Quickstart"
+    assert len(Workflow.load(quick_dir).steps) == 5
+
+
+def test_emit_mcp_reemit_removes_stale_templates(tmp_path: Path) -> None:
+    bundle = _make_bundle(tmp_path)
+    Image.new("RGB", (4, 4)).save(bundle / "templates" / "old.png")
+    out = emit_mcp_server(bundle, tmp_path / "mcp" / "server.py")
+    emitted = _emitted_bundle_dir(out)
+    assert (emitted / "templates" / "old.png").is_file()
+
+    (bundle / "templates" / "old.png").unlink()
+    emit_mcp_server(bundle, out)
+    assert not (emitted / "templates" / "old.png").exists()
+    assert (emitted / "templates" / "step_0.png").is_file()
+
+
+def test_emit_mcp_refuses_to_replace_a_different_workflow(tmp_path: Path) -> None:
+    mine = _named_bundle(tmp_path / "src", "Run Demo", 2)
+    servers = tmp_path / "servers"
+    # Someone else's bundle already sits where server.py keeps its copy.
+    foreign = _named_bundle(tmp_path / "src", "Local Quickstart", 5)
+    import shutil
+
+    shutil.copytree(foreign, servers / "bundle")
+    (servers / "bundle" / "templates").mkdir(exist_ok=True)
+    (servers / "bundle" / "templates" / "keep.png").write_bytes(b"x")
+
+    with pytest.raises(FileExistsError, match="Local Quickstart"):
+        emit_mcp_server(mine, servers / "server.py")
+    assert Workflow.load(servers / "bundle").name == "Local Quickstart"
+    assert (servers / "bundle" / "templates" / "keep.png").is_file()
+    assert not (servers / "server.py").exists()
+
+
 def _load_emitted_tool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report_fields: dict[str, object]
 ):

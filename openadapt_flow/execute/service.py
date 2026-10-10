@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,8 @@ from openadapt_flow.execute.registry import (
     lookup_admission,
     seed_mockmed_admissions,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ExecuteServiceError(Exception):
@@ -237,17 +240,33 @@ class ExecuteService:
         request: ExecuteRequestV1,
         fault: DispatchResult,
     ) -> None:
-        """Seal a fault receipt, or leave the run non-terminal if that fails."""
+        """Seal a fault receipt, or hand the run to a person if that fails.
+
+        Without a sealed receipt the run cannot be terminal. It must not stay
+        ``running`` either: nothing would ever move it on, and a client would
+        poll forever. ``waiting_for_reconciliation`` tells the caller that a
+        person has to check the record before anything is retried.
+        """
         try:
             self._finalize(execution_id, request, fault)
         except Exception:
-            self._write_status(
-                ExecuteStatusV1(
-                    execution_id=execution_id,
-                    state=ExecuteLifecycleStateV1.RUNNING,
-                    updated_at=_now(),
-                )
+            logger.exception(
+                "could not seal the fault receipt for %s; waiting for reconciliation",
+                execution_id,
             )
+            try:
+                self._write_status(
+                    ExecuteStatusV1(
+                        execution_id=execution_id,
+                        state=ExecuteLifecycleStateV1.WAITING_FOR_RECONCILIATION,
+                        updated_at=_now(),
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "could not record waiting_for_reconciliation for %s",
+                    execution_id,
+                )
 
     def _finalize(
         self,

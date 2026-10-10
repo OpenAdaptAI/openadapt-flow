@@ -172,3 +172,74 @@ def test_unclassified_coarse_outcome_requires_reconciliation(coarse: str) -> Non
     assert _map_outcome(coarse, None) is (
         ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
     )
+
+
+def _fail_every_finalize(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken_finalize(self: Any, *args: Any, **kwargs: Any) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ExecuteService, "_finalize", broken_finalize)
+
+
+def test_unsealable_fault_never_leaves_execution_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openadapt_types.execute import ExecuteLifecycleStateV1
+
+    from openadapt_flow.execute.service import ExecuteServiceError
+
+    _fail_every_finalize(monkeypatch)
+    store = ExecuteService(tmp_path, token="t", seed_mockmed=True)
+    accepted = store.create_execution(_request())
+
+    status = store.get_status(accepted.execution_id)
+    assert status.state is ExecuteLifecycleStateV1.WAITING_FOR_RECONCILIATION
+    assert status.terminal_outcome is None
+    assert status.evidence_receipt_id is None
+    with pytest.raises(ExecuteServiceError) as refused:
+        store.get_receipt(accepted.execution_id)
+    assert refused.value.status_code == 409
+
+    # Resubmitting the same key finds the same execution, which a client
+    # can now see is waiting for a person instead of still running.
+    again = store.create_execution(_request())
+    assert again.execution_id == accepted.execution_id
+    assert store.get_status(again.execution_id).state is (
+        ExecuteLifecycleStateV1.WAITING_FOR_RECONCILIATION
+    )
+
+
+def test_unsealable_pre_effect_fault_is_not_left_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from openadapt_types.execute import ExecuteLifecycleStateV1
+
+    def runner(admission: Any, request: Any, run_dir: Path) -> Any:
+        raise DispatchError("admitted bundle_dir is missing", pre_effect=True)
+
+    _fail_every_finalize(monkeypatch)
+    store = ExecuteService(tmp_path, token="t", runner=runner, seed_mockmed=True)
+    accepted = store.create_execution(_request())
+    assert store.get_status(accepted.execution_id).state is (
+        ExecuteLifecycleStateV1.WAITING_FOR_RECONCILIATION
+    )
+
+
+def test_finalize_failure_after_delivered_effect_requires_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_finalize = ExecuteService._finalize
+    calls: list[int] = []
+
+    def finalize_fails_once(self: Any, *args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError("disk full")
+        real_finalize(self, *args, **kwargs)
+
+    monkeypatch.setattr(ExecuteService, "_finalize", finalize_fails_once)
+    store = ExecuteService(tmp_path, token="t", seed_mockmed=True)
+    accepted = store.create_execution(_request())
+    receipt = store.get_receipt(accepted.execution_id)
+    assert receipt.outcome is ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+    assert receipt.delivery_uncertain is True

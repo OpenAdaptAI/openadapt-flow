@@ -62,7 +62,12 @@ from openadapt_flow.learning.halt_loop import (
     resolution_demonstration,
 )
 from openadapt_flow.learning.library import SkillLibrary
-from openadapt_flow.learning.loop import Inducer, LearnOutcome
+from openadapt_flow.learning.loop import (
+    CanaryContext,
+    Inducer,
+    LearnOutcome,
+    ProgramCanaryFn,
+)
 from openadapt_flow.learning.synth_stream import StructuralDiffInducer
 from openadapt_flow.learning.trace import ExecutionTrace, TraceStep
 from openadapt_flow.runtime.authorization import runtime_params_for_gui
@@ -344,9 +349,75 @@ class TeachResult(BaseModel):
                 lines.append(f"    - {failure}")
         if self.promoted and self.out_bundle is not None:
             lines.append(f"  updated bundle written to {self.out_bundle}")
+            lines.append(
+                "  the updated bundle is an unverified repair candidate. "
+                "Replay it on the screen where the run stopped before you "
+                "rely on it"
+            )
         else:
             lines.append("  bundle UNCHANGED -- the workflow stays halting here")
         return "\n".join(lines)
+
+
+_TARGETED_ACTIONS = frozenset(
+    {
+        ActionKind.CLICK,
+        ActionKind.DOUBLE_CLICK,
+        ActionKind.RIGHT_CLICK,
+        ActionKind.DRAG,
+    }
+)
+
+
+def _anchor_keys(graphs: list[ProgramGraph]) -> set[tuple[object, ...]]:
+    keys: set[tuple[object, ...]] = set()
+    for graph in graphs:
+        for state in graph.states.values():
+            step = state.step
+            if step is None:
+                continue
+            for anchor in (step.anchor, step.drag_end_anchor):
+                if anchor is not None:
+                    keys.add((anchor.template, anchor.region, anchor.click_point))
+    return keys
+
+
+def _real_target_canary(bundle_dir: Path) -> ProgramCanaryFn:
+    """Veto a candidate whose NEW on-screen target has no crop in the bundle.
+
+    A fix given only as intents carries no on-screen target, so the reference
+    inducer fills the spliced step with a placeholder anchor. Its template does
+    not exist in a real bundle, the step can never resolve, and the taught
+    bundle would halt exactly as before. Promoting it would report LEARNED for
+    a repair that cannot work, so it is refused instead.
+    """
+
+    def canary(ctx: CanaryContext) -> tuple[bool, str]:
+        known = _anchor_keys([ctx.active, *ctx.subflows.values()])
+        for graph in [ctx.candidate, *ctx.subflows.values()]:
+            for state in graph.states.values():
+                step = state.step
+                if step is None or step.action not in _TARGETED_ACTIONS:
+                    continue
+                anchors = [step.anchor]
+                if step.action is ActionKind.DRAG:
+                    anchors.append(step.drag_end_anchor)
+                for anchor in anchors:
+                    if anchor is not None and (
+                        (anchor.template, anchor.region, anchor.click_point) in known
+                    ):
+                        continue
+                    if anchor is None or not (bundle_dir / anchor.template).is_file():
+                        return False, (
+                            f"the fix step {step.intent!r} has no real on-screen "
+                            "target in this bundle, so a re-run would stop at "
+                            "the same place. teach can't add a new target yet; "
+                            "record the workflow again with this step included "
+                            "and compile it instead"
+                        )
+        return True, ""
+
+    return canary
 
 
 def _copy_templates(src_bundle: Path, out_bundle: Path) -> None:
@@ -422,6 +493,7 @@ def teach(
         correction=correction,
         inducer=inducer or StructuralDiffInducer(),
         baseline=[baseline],
+        canary=_real_target_canary(Path(bundle)),
     )
 
     if not outcome.promoted:

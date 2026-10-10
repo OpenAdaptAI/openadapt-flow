@@ -239,6 +239,52 @@ def test_teach_refuses_underdetermined_fix(tmp_path: Path) -> None:
     assert report.terminal_outcome == "halt"
 
 
+def test_teach_refuses_a_fix_without_a_real_on_screen_target(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A fix that names only an intent gives the dismiss step no real anchor.
+
+    The inducer then splices a placeholder anchor whose template crop does not
+    exist in the bundle. Promoting that would print LEARNED for a bundle that
+    halts exactly as before, so teach must refuse and write nothing.
+    """
+    # A real bundle has no crop for the inducer's placeholder target.
+    base_bundle = tmp_path / "base_bundle"
+    (base_bundle / "templates").mkdir(parents=True)
+    (base_bundle / "templates" / "verify.png").write_bytes(make_png((50, 20)))
+    _base_workflow().save(base_bundle)
+    run_dir = tmp_path / "run"
+    _halt_run(base_bundle, run_dir)
+
+    fix = tmp_path / "fix.json"
+    fix.write_text(
+        json.dumps(
+            {"resolution_steps": [{"intent": INTENT_DISMISS, "action": "click"}]}
+        )
+    )
+    out = tmp_path / "out_bundle"
+
+    rc = main(
+        [
+            "teach",
+            str(run_dir),
+            "--fix",
+            str(fix),
+            "--bundle",
+            str(base_bundle),
+            "--out",
+            str(out),
+        ]
+    )
+
+    printed = capsys.readouterr().out
+    assert rc != 0
+    assert not out.exists()
+    assert "REFUSED" in printed
+    assert "no longer halts" not in printed
+    assert "on-screen target" in printed
+
+
 # -- input guards ------------------------------------------------------------
 
 

@@ -2844,9 +2844,20 @@ class EffectVerificationEvidence(BaseModel):
     #: FHIR from counting as an external network call. The default is left out
     #: of the serialized record, so evidence written before this field existed
     #: keeps its exact bytes.
-    endpoint_scope: Literal["loopback", "external", "unknown"] = Field(
-        default="unknown", exclude_if=lambda value: value == "unknown"
-    )
+    endpoint_scope: Literal["loopback", "external", "unknown"] = "unknown"
+
+    @model_serializer(mode="wrap")
+    def _serialize_compatible(self, handler: Any) -> dict[str, Any]:
+        """Omit the additive ``endpoint_scope`` default from serialized evidence.
+
+        ``Field(exclude_if=...)`` would express this directly, but it is newer
+        than the package's declared Pydantic >=2.5 floor. A wrap serializer
+        works throughout Pydantic v2.
+        """
+        data: dict[str, Any] = handler(self)
+        if self.endpoint_scope == "unknown":
+            data.pop("endpoint_scope", None)
+        return data
 
 
 class QualifiedEffectRequirement(BaseModel):

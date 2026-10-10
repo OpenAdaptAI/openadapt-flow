@@ -636,9 +636,8 @@ def explain_run(run_dir: Path) -> str:
             quoted = shlex.quote(str(run_dir))
             lines.append(
                 f"A decision is waiting for a person: {pending_path}. After the "
-                f"record is checked, record it with "
-                f"{command('approve ' + quoted)}, then continue with "
-                f"{command('resume ' + quoted)}."
+                f"record is checked, approve with {command('approve ' + quoted)}, "
+                f"then continue with {command('resume ' + quoted)}."
             )
     if report_md.is_file():
         lines.append(f"Plain-language evidence: {report_md}")

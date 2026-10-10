@@ -1544,10 +1544,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
         "OpenAdapt demo: one task, run twice on a fake clinic app on this "
         "computer. No AI calls."
     )
-    print(
-        "It usually takes 1 to 3 minutes, longer the first time while the "
-        "browser downloads."
-    )
+    print("The first run can take a few minutes while the browser downloads.")
 
     # The bundled demo app holds only fixed synthetic data. Keep an installed
     # but unconfigured privacy provider from blocking it, exactly as the

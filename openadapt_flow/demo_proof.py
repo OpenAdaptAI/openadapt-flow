@@ -606,7 +606,8 @@ h1 {
   height: auto; }
 .shot figcaption { padding: 6px 20px; font-size: 13px; color: var(--ink-3); }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px;
-  margin: 0; padding: 16px 20px 20px; align-items: baseline; }
+  margin: 0; padding: 16px 20px 20px; align-items: baseline;
+  align-content: start; }
 .facts dt { color: var(--ink-3); font-size: 14px; }
 .facts dd { margin: 0; font-weight: 600; }
 .facts dd.count {
@@ -1054,9 +1055,9 @@ def render_demo_page(evidence: DemoEvidence) -> str:
     <ul class="means">
       <li>Someone on your team shows OpenAdapt a task once, in the app you
       already use, and it repeats the task the same way each time.</li>
-      <li>After each save it reads the record back through a separate path,
-      such as a report, an API, or a read-only login, so &ldquo;done&rdquo;
-      means the record changed.</li>
+      <li>After each save it reads the record back through a separate path
+      you set up once, such as a report, an API, or a read-only login, so
+      &ldquo;done&rdquo; means the record changed.</li>
       <li>When the screen and the record disagree, it stops and asks a person
       instead of guessing or retrying.</li>
     </ul>

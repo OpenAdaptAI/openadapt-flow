@@ -29,8 +29,8 @@ openadapt-flow demo
 The demo runs one task twice on a fake clinic app on your computer. The first
 run uses an honest app. The second uses an app that shows "Encounter saved"
 and then drops the note. When both runs finish, the demo opens one page with
-the two results side by side. It takes 1 to 3 minutes, longer the first time
-while the browser downloads. With the
+the two results side by side. The first run can take a few minutes while the
+browser downloads. With the
 [OpenAdapt launcher](https://github.com/OpenAdaptAI/OpenAdapt) installed,
 `openadapt flow demo` runs the same command.
 

@@ -302,6 +302,131 @@ def test_emit_mcp_server_odd_name(tmp_path: Path) -> None:
     assert any(f.startswith("run_") and f.isidentifier() for f in funcs)
 
 
+def _load_emitted_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, report_fields: dict[str, object]
+):
+    """Import an emitted server.py with the browser and replay stubbed out.
+
+    Returns the generated tool function. ``Replayer.run`` returns a RunReport
+    built from ``report_fields``, so the test checks only what the tool
+    reports for a given runtime outcome.
+    """
+    import importlib.util
+    import types
+    from contextlib import contextmanager
+
+    from openadapt_flow.ir import RunReport
+    from openadapt_flow.runtime.replayer import Replayer
+
+    fastmcp = types.ModuleType("mcp.server.fastmcp")
+
+    class _FakeFastMCP:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def tool(self):  # noqa: ANN202 - mirrors FastMCP's decorator factory
+            return lambda func: func
+
+        def run(self) -> None:  # pragma: no cover - never called
+            raise AssertionError("not used")
+
+    fastmcp.FastMCP = _FakeFastMCP  # type: ignore[attr-defined]
+    for name in ("mcp", "mcp.server"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp)
+
+    class _Page:
+        def goto(self, url: str) -> None:
+            pass
+
+    class _Browser:
+        def new_page(self, **kwargs: object) -> _Page:
+            return _Page()
+
+        def close(self) -> None:
+            pass
+
+    @contextmanager
+    def _fake_sync_playwright():
+        yield types.SimpleNamespace(
+            chromium=types.SimpleNamespace(launch=lambda **kwargs: _Browser())
+        )
+
+    sync_api = pytest.importorskip("playwright.sync_api")
+    import openadapt_flow._browser_setup as browser_setup
+    import openadapt_flow.backends.playwright_backend as playwright_backend
+
+    monkeypatch.setattr(browser_setup, "ensure_chromium_installed", lambda: None)
+    monkeypatch.setattr(sync_api, "sync_playwright", _fake_sync_playwright)
+    monkeypatch.setattr(playwright_backend, "PlaywrightBackend", lambda page: page)
+
+    def _fake_run(self, workflow, **kwargs):  # noqa: ANN001, ANN202
+        return RunReport(
+            workflow_name=workflow.name,
+            started_at="2026-10-10T00:00:00Z",
+            **report_fields,
+        )
+
+    monkeypatch.setattr(Replayer, "run", _fake_run)
+
+    out = emit_mcp_server(_make_bundle(tmp_path), tmp_path / "mcp" / "server.py")
+    spec = importlib.util.spec_from_file_location("emitted_server", out)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.run_triage_note
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected_success"),
+    [
+        (
+            {
+                "success": True,
+                "execution_profile": "demo",
+                "execution_outcome": "COMPLETED_UNVERIFIED",
+                "transaction_outcome": "COMPLETED_UNVERIFIED",
+            },
+            False,
+        ),
+        (
+            {
+                "success": False,
+                "execution_profile": "demo",
+                "execution_outcome": "HALTED",
+                "transaction_outcome": "RECONCILIATION_REQUIRED",
+            },
+            False,
+        ),
+        (
+            {
+                "success": True,
+                "execution_profile": "standard",
+                "execution_outcome": "VERIFIED",
+                "transaction_outcome": "VERIFIED",
+                "production_eligible": True,
+            },
+            True,
+        ),
+    ],
+)
+def test_emitted_mcp_tool_never_reports_success_for_unverified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fields: dict[str, object],
+    expected_success: bool,
+) -> None:
+    """A screen-only completion (no record check) must not come back to the
+    calling agent as success: only a VERIFIED outcome does."""
+    tool = _load_emitted_tool(tmp_path, monkeypatch, fields)
+    out = tool(url="http://127.0.0.1:1/", note="synthetic note")
+    assert out["success"] is expected_success
+    assert out["outcome"] == fields["execution_outcome"]
+    assert out["transaction_outcome"] == fields["transaction_outcome"]
+    assert out["production_eligible"] is bool(fields.get("production_eligible"))
+    assert out["run_dir"]
+
+
 # -- CLI ----------------------------------------------------------------------
 
 

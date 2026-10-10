@@ -49,7 +49,12 @@ def {func_name}(url: str{param_sig}) -> dict:
         url: URL of the running target application.
 {param_docs}
     Returns:
-        Dict with success flag, run directory, heal count, and total ms.
+        Dict with the run's evidence-qualified outcome. ``success`` is true
+        only when ``outcome`` is VERIFIED: the change was saved and read back
+        from the system of record. COMPLETED_UNVERIFIED means the steps ran
+        but the saved result was not confirmed. When ``transaction_outcome``
+        is RECONCILIATION_REQUIRED a write may have landed, so check the
+        record before you call this tool again.
     """
     from openadapt_flow._browser_setup import ensure_chromium_installed
     ensure_chromium_installed()
@@ -77,7 +82,10 @@ def {func_name}(url: str{param_sig}) -> dict:
         finally:
             browser.close()
     return {{
-        "success": report.success,
+        "success": report.execution_outcome == "VERIFIED",
+        "outcome": report.execution_outcome,
+        "transaction_outcome": report.transaction_outcome,
+        "production_eligible": report.production_eligible,
         "run_dir": str(run_dir),
         "heal_count": report.heal_count,
         "model_calls": report.model_calls,

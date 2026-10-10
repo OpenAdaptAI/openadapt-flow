@@ -25,7 +25,17 @@ Runner = Callable[["AdmittedBundle", "ExecuteRequestV1", Path], "DispatchResult"
 
 
 class DispatchError(RuntimeError):
-    """Local replay could not run or could not be classified."""
+    """Local replay could not run or could not be classified.
+
+    ``pre_effect`` is True only for an error raised before any browser or
+    replay started, when no business effect is possible. Every other dispatch
+    error may follow a write, so the service maps it to
+    ``reconciliation_required`` instead of ``failed_platform``.
+    """
+
+    def __init__(self, message: str, *, pre_effect: bool = False) -> None:
+        super().__init__(message)
+        self.pre_effect = pre_effect
 
 
 @dataclass(frozen=True)
@@ -108,7 +118,9 @@ def live_replay(
 
     bundle = Path(admission.bundle_dir or "")
     if not bundle.is_dir():
-        raise DispatchError(f"admitted bundle_dir is missing: {bundle}")
+        raise DispatchError(
+            f"admitted bundle_dir is missing: {bundle}", pre_effect=True
+        )
 
     from openadapt_flow.ir import Workflow
     from openadapt_flow.mockmed.fault_server import serve as serve_mockmed
@@ -118,8 +130,14 @@ def live_replay(
         run_tutorial_workflow,
     )
 
-    workflow = Workflow.load(bundle)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        workflow = Workflow.load(bundle)
+        run_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        raise DispatchError(
+            f"admitted bundle could not be loaded: {type(exc).__name__}",
+            pre_effect=True,
+        ) from exc
     stop: Optional[Callable[[], None]] = None
     try:
         if admission.target_url:
@@ -153,7 +171,8 @@ def live_replay(
                 entry_query=entry_query,
             )
     except Exception as exc:
-        raise DispatchError(f"local replay failed: {exc}") from exc
+        # The replay may have dispatched a write before it failed.
+        raise DispatchError(f"local replay failed: {exc}", pre_effect=False) from exc
     finally:
         if stop is not None:
             stop()
@@ -183,9 +202,12 @@ def project_run_report(report: Any, *, workflow_digest: str) -> DispatchResult:
     if outcome is ExecuteTerminalOutcomeV1.VERIFIED and not (
         auth_ok and ident_ok and post_ok and effect_ok and observed is not None
     ):
-        raise DispatchError(
-            "local run claimed VERIFIED without complete Execute contracts"
-        )
+        # The run reports that the effect landed but cannot prove it with
+        # complete contracts. A write may exist, so never claim "no effect".
+        outcome = ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
+        effect_ok = False
+        observed = None
+        delivery_uncertain = True
     return _result(
         outcome=outcome,
         authorization_passed=auth_ok,
@@ -223,7 +245,7 @@ def _map_outcome(coarse: str, txn: Any) -> ExecuteTerminalOutcomeV1:
         return ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT
     if txn is TransactionOutcome.REJECTED_POLICY:
         return ExecuteTerminalOutcomeV1.REJECTED_POLICY
-    if txn is TransactionOutcome.FAILED_PLATFORM or coarse == "FAILED":
+    if txn is TransactionOutcome.FAILED_PLATFORM:
         return ExecuteTerminalOutcomeV1.FAILED_PLATFORM
     if txn is TransactionOutcome.ROLLED_BACK:
         return ExecuteTerminalOutcomeV1.ROLLED_BACK_VERIFIED
@@ -231,7 +253,9 @@ def _map_outcome(coarse: str, txn: Any) -> ExecuteTerminalOutcomeV1:
         return ExecuteTerminalOutcomeV1.HALTED_BEFORE_EFFECT
     if coarse == "COMPLETED_UNVERIFIED":
         return ExecuteTerminalOutcomeV1.REJECTED_POLICY
-    return ExecuteTerminalOutcomeV1.FAILED_PLATFORM
+    # A coarse FAILED, or anything unclassifiable, cannot prove that no effect
+    # happened.
+    return ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED
 
 
 def _contract_booleans(envelope: Any) -> tuple[bool, bool, bool, bool]:

@@ -23,6 +23,7 @@ from openadapt_types.oracle import oracle_tier_from_effect_strength
 from pydantic import ValidationError
 
 from openadapt_flow.execute.dispatch import (
+    DispatchError,
     DispatchResult,
     Runner,
     default_runner,
@@ -178,6 +179,8 @@ class ExecuteService:
         thread.start()
 
     def _run(self, execution_id: str, request: ExecuteRequestV1) -> None:
+        # Before dispatch: no business effect is possible, so a fault here is
+        # failed_platform and the caller may safely resubmit.
         try:
             self._write_status(
                 ExecuteStatusV1(
@@ -194,21 +197,57 @@ class ExecuteService:
                 environment_id=request.environment_id,
                 minimum_effect_strength=request.minimum_effect_strength.value,
             )
-            run_dir = self._execution_path(execution_id) / "run"
+        except Exception as exc:
+            self._finalize_fault(
+                execution_id, request, _failed_platform_result(request, str(exc))
+            )
+            return
+        # After dispatch: a write may have landed. Only an error the runner
+        # marks as raised before any replay started keeps failed_platform.
+        run_dir = self._execution_path(execution_id) / "run"
+        try:
             result = self.runner(admission, request, run_dir)
+        except DispatchError as exc:
+            fault = (
+                _failed_platform_result(request, str(exc))
+                if exc.pre_effect
+                else _reconciliation_required_result(request, str(exc))
+            )
+            self._finalize_fault(execution_id, request, fault)
+            return
+        except Exception as exc:
+            self._finalize_fault(
+                execution_id,
+                request,
+                _reconciliation_required_result(request, str(exc)),
+            )
+            return
+        try:
             self._finalize(execution_id, request, result)
         except Exception as exc:
-            failed = _failed_platform_result(request, str(exc))
-            try:
-                self._finalize(execution_id, request, failed)
-            except Exception:
-                self._write_status(
-                    ExecuteStatusV1(
-                        execution_id=execution_id,
-                        state=ExecuteLifecycleStateV1.RUNNING,
-                        updated_at=_now(),
-                    )
+            self._finalize_fault(
+                execution_id,
+                request,
+                _reconciliation_required_result(request, str(exc)),
+            )
+
+    def _finalize_fault(
+        self,
+        execution_id: str,
+        request: ExecuteRequestV1,
+        fault: DispatchResult,
+    ) -> None:
+        """Seal a fault receipt, or leave the run non-terminal if that fails."""
+        try:
+            self._finalize(execution_id, request, fault)
+        except Exception:
+            self._write_status(
+                ExecuteStatusV1(
+                    execution_id=execution_id,
+                    state=ExecuteLifecycleStateV1.RUNNING,
+                    updated_at=_now(),
                 )
+            )
 
     def _finalize(
         self,
@@ -371,6 +410,26 @@ def _failed_platform_result(request: ExecuteRequestV1, tag: str) -> DispatchResu
         observed_effect_strength=None,
         workflow_digest=request.workflow_digest,
         evidence_tag=f"platform-fault:{tag[:64]}",
+    )
+
+
+def _reconciliation_required_result(
+    request: ExecuteRequestV1, tag: str
+) -> DispatchResult:
+    """A fault after dispatch: the effect is unknown, so never claim none."""
+    from openadapt_flow.execute.dispatch import _result
+
+    return _result(
+        outcome=ExecuteTerminalOutcomeV1.RECONCILIATION_REQUIRED,
+        authorization_passed=False,
+        identity_passed=False,
+        postcondition_passed=False,
+        effect_passed=False,
+        minimum_effect_strength=request.minimum_effect_strength,
+        observed_effect_strength=None,
+        workflow_digest=request.workflow_digest,
+        evidence_tag=f"post-dispatch-fault:{tag[:64]}",
+        delivery_uncertain=True,
     )
 
 

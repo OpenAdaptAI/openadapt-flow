@@ -16,11 +16,7 @@ import types
 import pytest
 
 from openadapt_flow.backends.macos_backend import MacOSBackend, MacOSBackendError
-from openadapt_flow.backends.remote_display import (
-    MacOSDependencyMissing,
-    MacWindowClient,
-    RemoteDisplayError,
-)
+from openadapt_flow.backends.remote_display import MacWindowClient, RemoteDisplayError
 
 _PYOBJC = ("Quartz", "ApplicationServices", "AppKit")
 
@@ -39,7 +35,19 @@ def _assert_names_the_dependency(message: str) -> None:
     assert "Accessibility" not in message
 
 
+def test_missing_pyobjc_is_not_reported_as_a_denied_permission(
+    no_pyobjc: None,
+) -> None:
+    """The reported symptom: a screenshot without pyobjc said "Screen
+    Recording is not granted". The error must name the missing install."""
+    with pytest.raises(RemoteDisplayError) as excinfo:
+        MacOSBackend(app="Finder").screenshot()
+    _assert_names_the_dependency(str(excinfo.value))
+
+
 def test_backend_construction_names_missing_pyobjc(no_pyobjc: None) -> None:
+    from openadapt_flow.backends.remote_display import MacOSDependencyMissing
+
     with pytest.raises(MacOSDependencyMissing) as excinfo:
         MacOSBackend(app="TextEdit")
     assert isinstance(excinfo.value, RemoteDisplayError)
@@ -58,6 +66,8 @@ def test_backend_construction_names_missing_pyobjc(no_pyobjc: None) -> None:
 def test_trust_checks_raise_instead_of_reporting_untrusted(
     no_pyobjc: None, method: str
 ) -> None:
+    from openadapt_flow.backends.remote_display import MacOSDependencyMissing
+
     with pytest.raises(MacOSDependencyMissing) as excinfo:
         getattr(MacWindowClient(), method)()
     _assert_names_the_dependency(str(excinfo.value))

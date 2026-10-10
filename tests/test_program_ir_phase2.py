@@ -680,18 +680,22 @@ def test_loop_report_shows_per_row_bound_values_not_recorded_default(
         wf, bundle_dir=bundle, run_dir=run_dir
     )
     assert backend.actions == [("type", "first note"), ("type", "second note")]
-    assert [
-        (b.loop_state_id, b.row_index, b.params["patient"])
-        for b in report.loop_iterations
-    ] == [("loop", 0, "first note"), ("loop", 1, "second note")]
 
+    # What a reader sees first: the rendered report, not the new field.
     md = _loop_report_md(run_dir)
     params_section = md.split("## Parameters", 1)[1].split("\n## ", 1)[0]
     assert "demo note" not in params_section
+    assert "first note" in md
+    assert "second note" in md
     assert "per row" in params_section
     loops_section = md.split("## Loop iterations", 1)[1].split("\n## ", 1)[0]
     assert "first note" in loops_section
     assert "second note" in loops_section
+
+    assert [
+        (b.loop_state_id, b.row_index, b.params["patient"])
+        for b in report.loop_iterations
+    ] == [("loop", 0, "first note"), ("loop", 1, "second note")]
 
 
 def test_loop_report_shows_rows_supplied_at_run_time(bundle, run_dir, monkeypatch):
@@ -704,13 +708,16 @@ def test_loop_report_shows_rows_supplied_at_run_time(bundle, run_dir, monkeypatc
         bundle_dir=bundle,
         run_dir=run_dir,
     )
+    md = _loop_report_md(run_dir)
+    assert "X note" in md
+    assert "Y note" in md
+    loops_section = md.split("## Loop iterations", 1)[1]
+    assert "X note" in loops_section
+    assert "Y note" in loops_section
     assert [(b.row_index, b.params) for b in report.loop_iterations] == [
         (0, {"patient": "X note"}),
         (1, {"patient": "Y note"}),
     ]
-    loops_section = _loop_report_md(run_dir).split("## Loop iterations", 1)[1]
-    assert "X note" in loops_section
-    assert "Y note" in loops_section
 
 
 def test_loop_row_values_count_as_identity_like_text() -> None:

@@ -453,127 +453,158 @@ def what_openadapt_did(run: RunEvidence, *, asked_a_person: bool = False) -> str
 # HTML
 # ---------------------------------------------------------------------------
 
+#: Styles for the proof page. Colour is a verdict: green appears only for a
+#: run whose save was read back and matched, amber only for a run that stopped
+#: for a person, red only for a run that didn't finish; everything else is ink
+#: and hairlines. Every status also carries an icon and a word. The page loads
+#: no fonts: the named families render where installed and fall back to
+#: Georgia and the system sans.
 _CSS = """
 :root {
-  --bg: #f5f6f8; --surface: #ffffff; --ink: #161a1f; --muted: #5a6370;
-  --line: #dde1e7; --code-bg: #12161b; --code-ink: #e9ecef;
-  --done: #0b7a3e; --done-bg: #e7f5ec; --check: #9a4a00; --check-bg: #fff1e3;
-  --stopped: #1f5fa8; --stopped-bg: #e8f0fa; --unchecked: #5a6370;
-  --unchecked-bg: #eef0f3; --failed: #a32020; --failed-bg: #fbeaea;
-  --accent: #1f5fa8;
+  color-scheme: light;
+  --ink: #0B1220; --ink-2: #414E63; --ink-3: #5A697F;
+  --paper: #FFFFFF; --ground: #F5F7FA; --sunken: #EDF1F6;
+  --rule: #DEE4EC; --rule-strong: #C6D0DC;
+  --done: #0B7A5A; --done-strong: #07553E; --done-tint: #E8F3EE;
+  --halt: #9A5B0A; --halt-strong: #7A4706; --halt-tint: #FCF3E6;
+  --failed: #B3261E; --failed-tint: #FBEAE8;
+  --focus: #2563EB;
+  --serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --sans: "Public Sans", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #101317; --surface: #181c22; --ink: #e8ebef; --muted: #9aa4b1;
-    --line: #2a313a; --code-bg: #0b0e12; --code-ink: #e9ecef;
-    --done: #5fd08f; --done-bg: #12291c; --check: #f0a65a; --check-bg: #2e2112;
-    --stopped: #7fb0ec; --stopped-bg: #142338; --unchecked: #aab3bf;
-    --unchecked-bg: #20252c; --failed: #f08a8a; --failed-bg: #321919;
-    --accent: #7fb0ec;
+    color-scheme: dark;
+    --ink: #E8EDF3; --ink-2: #B4BECB; --ink-3: #8A97A8;
+    --paper: #151B23; --ground: #0E1319; --sunken: #1C2430;
+    --rule: #262F3B; --rule-strong: #354152;
+    --done: #3AA97F; --done-strong: #86D6B4; --done-tint: #12302A;
+    --halt: #D29A48; --halt-strong: #EEC283; --halt-tint: #33260F;
+    --failed: #F2877E; --failed-tint: #3A1A18;
+    --focus: #7CA8FF;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #101317; --surface: #181c22; --ink: #e8ebef; --muted: #9aa4b1;
-  --line: #2a313a; --code-bg: #0b0e12; --code-ink: #e9ecef;
-  --done: #5fd08f; --done-bg: #12291c; --check: #f0a65a; --check-bg: #2e2112;
-  --stopped: #7fb0ec; --stopped-bg: #142338; --unchecked: #aab3bf;
-  --unchecked-bg: #20252c; --failed: #f08a8a; --failed-bg: #321919;
-  --accent: #7fb0ec;
+  color-scheme: dark;
+  --ink: #E8EDF3; --ink-2: #B4BECB; --ink-3: #8A97A8;
+  --paper: #151B23; --ground: #0E1319; --sunken: #1C2430;
+  --rule: #262F3B; --rule-strong: #354152;
+  --done: #3AA97F; --done-strong: #86D6B4; --done-tint: #12302A;
+  --halt: #D29A48; --halt-strong: #EEC283; --halt-tint: #33260F;
+  --failed: #F2877E; --failed-tint: #3A1A18;
+  --focus: #7CA8FF;
 }
-* { box-sizing: border-box; }
+*, *::before, *::after { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body {
-  margin: 0; background: var(--bg); color: var(--ink);
-  font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    Helvetica, Arial, sans-serif;
+  margin: 0; background: var(--ground); color: var(--ink);
+  font: 400 16px/1.55 var(--sans); -webkit-font-smoothing: antialiased;
 }
-main { max-width: 1080px; margin: 0 auto; padding: 40px 16px 72px; }
-.eyebrow {
-  margin: 0 0 12px; color: var(--muted); font-size: 13px;
-  letter-spacing: .04em;
+a { color: inherit; text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 4px;
 }
-.tag {
-  display: inline-block; padding: 1px 8px; margin-right: 6px;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
-}
+svg { flex: none; }
+main { max-width: 1000px; margin: 0 auto; padding: 40px 24px 72px; }
+@media (max-width: 760px) { main { padding: 28px 16px 56px; } }
+.provenance { margin: 0 0 14px; color: var(--ink-2); font-size: 14px; }
+.provenance strong { color: var(--ink); font-weight: 600; }
 h1 {
-  margin: 0 0 12px; font-size: clamp(28px, 4.2vw, 40px); line-height: 1.15;
-  letter-spacing: -.01em; max-width: 900px;
+  margin: 0 0 14px; font: 420 clamp(2rem, 1.3rem + 2.1vw, 2.95rem)/1.1 var(--serif);
+  letter-spacing: -0.016em; text-wrap: balance; max-width: 26ch;
 }
-.lede { margin: 0 0 32px; max-width: 760px; font-size: 18px; color: var(--muted); }
+.lede {
+  margin: 0 0 32px; max-width: 68ch; font-size: 19px; color: var(--ink-2);
+  text-wrap: pretty;
+}
 .runs { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
-@media (max-width: 780px) { .runs { grid-template-columns: 1fr; row-gap: 0; } }
+@media (max-width: 640px) { .runs { grid-template-columns: 1fr; } }
 .run {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 12px;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 12px;
   overflow: hidden; display: grid; grid-row: span 3; grid-template-rows: subgrid;
   row-gap: 0; margin-bottom: 20px;
 }
-.run header { padding: 16px 18px 14px; border-bottom: 1px solid var(--line); }
-.run .which { margin: 0 0 4px; font-size: 13px; color: var(--muted); }
-.run h2 { margin: 0; font-size: 21px; line-height: 1.25; }
-.run header p.why { margin: 8px 0 0; color: var(--ink); }
-.tone-done header { background: var(--done-bg); }
-.tone-done h2 { color: var(--done); }
-.tone-check header { background: var(--check-bg); }
-.tone-check h2 { color: var(--check); }
-.tone-stopped header { background: var(--stopped-bg); }
-.tone-stopped h2 { color: var(--stopped); }
-.tone-unchecked header { background: var(--unchecked-bg); }
-.tone-unchecked h2 { color: var(--unchecked); }
-.tone-failed header { background: var(--failed-bg); }
-.tone-failed h2 { color: var(--failed); }
-.badge {
-  display: inline-block; margin-top: 10px; padding: 2px 10px; font-size: 13px;
-  font-weight: 600; border-radius: 999px; border: 1px solid currentColor;
+.run.tone-done { border: 1.5px solid var(--done); }
+.run.tone-stopped, .run.tone-check { border: 2px solid var(--halt); }
+.run.tone-failed { border: 1.5px solid var(--failed); }
+.run header { padding: 18px 20px 16px; border-bottom: 1px solid var(--rule); }
+.run .which { margin: 0 0 6px; font-size: 14px; color: var(--ink-3); }
+.run h2 {
+  margin: 0; font: 450 24px/1.2 var(--serif); letter-spacing: -0.01em;
+  text-wrap: balance;
 }
-.badge.tone-done { color: var(--done); }
-.badge.tone-check { color: var(--check); }
-.badge.tone-stopped { color: var(--stopped); }
-.badge.tone-unchecked { color: var(--unchecked); }
-.badge.tone-failed { color: var(--failed); }
-.shot { margin: 0; background: var(--bg); border-bottom: 1px solid var(--line); }
+.run h2.verdict { display: flex; align-items: center; gap: 10px; }
+.run h2.verdict svg { width: 20px; height: 20px; }
+.tone-done h2.verdict { color: var(--done-strong); }
+.tone-stopped h2.verdict, .tone-check h2.verdict { color: var(--halt-strong); }
+.tone-failed h2.verdict { color: var(--failed); }
+.tone-unchecked h2.verdict { color: var(--ink-2); }
+.run header p.why { margin: 10px 0 0; color: var(--ink); text-wrap: pretty; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 26px;
+  margin-top: 12px; padding: 0 10px 0 8px; border-radius: 999px;
+  font: 600 13px/1 var(--sans); white-space: nowrap;
+}
+.chip.tone-done { background: var(--done-tint); color: var(--done-strong); }
+.chip.tone-stopped, .chip.tone-check {
+  background: var(--halt-tint); color: var(--halt-strong);
+}
+.chip.tone-failed { background: var(--failed-tint); color: var(--failed); }
+.chip.tone-unchecked { background: var(--sunken); color: var(--ink); }
+.shot { margin: 0; background: var(--ground); border-bottom: 1px solid var(--rule); }
 .shot .frame { position: relative; overflow: hidden; background: #fff; }
 .shot .frame img { position: absolute; top: 0; left: 0; max-width: none;
   height: auto; }
-.shot figcaption { padding: 6px 18px; font-size: 13px; color: var(--muted); }
-.shot figcaption a { color: var(--accent); }
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 8px 16px;
-  margin: 0; padding: 16px 18px 18px; align-items: baseline; }
-.facts dt { color: var(--muted); font-size: 14px; }
+.shot figcaption { padding: 6px 20px; font-size: 13px; color: var(--ink-3); }
+.facts { display: grid; grid-template-columns: auto 1fr; gap: 10px 16px;
+  margin: 0; padding: 16px 20px 20px; align-items: baseline; }
+.facts dt { color: var(--ink-3); font-size: 14px; }
 .facts dd { margin: 0; font-weight: 600; }
-.facts dd.count { font-size: 30px; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.facts dd.count small { font-size: 15px; font-weight: 600; color: var(--muted); }
+.facts dd.count {
+  font: 500 32px/1 var(--serif); letter-spacing: -0.015em;
+  font-feature-settings: "tnum";
+}
+.facts dd.count small {
+  font: 600 15px/1 var(--sans); letter-spacing: 0; color: var(--ink-2);
+}
 .callout {
-  margin: 20px 0 0; padding: 14px 18px; background: var(--surface);
-  border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  margin: 20px 0 0; padding: 14px 18px; max-width: none; background: var(--paper);
+  border: 1px solid var(--rule); border-left: 3px solid var(--ink);
   border-radius: 8px;
 }
-section { margin-top: 44px; }
-section > h2 { font-size: 22px; margin: 0 0 12px; }
-.person { background: var(--surface); border: 1px solid var(--line);
-  border-radius: 12px; padding: 18px; }
-.person p { margin: 0 0 8px; }
-.person ol { margin: 8px 0 0; padding-left: 22px; }
-.person li { margin: 6px 0; }
-.means { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
-  margin: 0; padding: 0; list-style: none; }
-@media (max-width: 780px) { .means { grid-template-columns: 1fr; } }
-.means li { background: var(--surface); border: 1px solid var(--line);
-  border-radius: 12px; padding: 16px; }
-pre.cmd {
-  margin: 0; padding: 14px 16px; overflow-x: auto; background: var(--code-bg);
-  color: var(--code-ink); border-radius: 10px; font-size: 14px;
-  user-select: all; -webkit-user-select: all;
+section { margin-top: 48px; }
+section > h2 {
+  margin: 0 0 12px; font: 450 clamp(1.5rem, 1.2rem + 1vw, 1.875rem)/1.15 var(--serif);
+  letter-spacing: -0.012em;
 }
-code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.hint { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
-details { margin-top: 44px; background: var(--surface); border: 1px solid var(--line);
-  border-radius: 12px; padding: 14px 18px; }
+.person {
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 12px;
+  padding: 18px 20px;
+}
+.person .chip { margin: 0 0 10px; }
+.person p { margin: 0 0 8px; max-width: 68ch; }
+.person ol { margin: 8px 0 0; padding-left: 22px; max-width: 68ch; }
+.person li { margin: 6px 0; }
+.means { margin: 0; padding-left: 22px; max-width: 68ch; }
+.means li { margin: 0 0 10px; }
+pre.cmd {
+  margin: 0; padding: 14px 16px; overflow-x: auto; background: var(--sunken);
+  color: var(--ink); border: 1px solid var(--rule); border-radius: 8px;
+  font-size: 14px; user-select: all; -webkit-user-select: all;
+}
+code { font-family: var(--mono); }
+.hint { margin: 10px 0 0; color: var(--ink-2); font-size: 14px; }
+details {
+  margin-top: 48px; background: var(--paper); border: 1px solid var(--rule);
+  border-radius: 12px; padding: 14px 20px;
+}
 summary { cursor: pointer; font-weight: 600; }
+details p { max-width: 68ch; }
 details h3 { font-size: 15px; margin: 18px 0 6px; }
 .kv { display: grid; grid-template-columns: minmax(140px, 220px) 1fr; gap: 4px 14px;
   margin: 0; font-size: 14px; }
-.kv dt { color: var(--muted); }
+.kv dt { color: var(--ink-3); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
 .kv dd code { font-size: 13px; }
 @media (max-width: 640px) {
@@ -581,8 +612,57 @@ details h3 { font-size: 15px; margin: 18px 0 6px; }
   .kv dt { margin-top: 10px; }
 }
 details ul { margin: 4px 0; padding-left: 20px; font-size: 14px; }
-footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
+footer { margin-top: 32px; color: var(--ink-3); font-size: 13px; }
+@media print {
+  body { background: #fff; }
+  .run, .person { break-inside: avoid; }
+}
 """
+
+#: Status icons on a 12-unit grid, drawn in ``currentColor`` and always shown
+#: next to their word: a check for a checked save, pause bars for a stop
+#: before saving, a triangle when a save may have gone through, a dashed
+#: circle for a run nobody checked, an X for a run that didn't finish, and a
+#: person for a decision waiting on someone.
+_ICON_PATHS = {
+    "done": (
+        '<path d="M2.2 6.3l2.4 2.4 5.2-5.4" fill="none" stroke="currentColor" '
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+    ),
+    "stopped": (
+        '<rect x="2.5" y="2" width="2.3" height="8" rx=".6" fill="currentColor"/>'
+        '<rect x="7.2" y="2" width="2.3" height="8" rx=".6" fill="currentColor"/>'
+    ),
+    "check": (
+        '<path d="M6 1.6l4.9 8.6H1.1z" fill="none" stroke="currentColor" '
+        'stroke-width="1.5" stroke-linejoin="round"/>'
+        '<path d="M6 5v2.3" stroke="currentColor" stroke-width="1.5" '
+        'stroke-linecap="round"/><circle cx="6" cy="8.8" r=".8" fill="currentColor"/>'
+    ),
+    "unchecked": (
+        '<circle cx="6" cy="6" r="4.4" fill="none" stroke="currentColor" '
+        'stroke-width="1.5" stroke-dasharray="2.2 1.7"/>'
+    ),
+    "failed": (
+        '<circle cx="6" cy="6" r="4.8" fill="none" stroke="currentColor" '
+        'stroke-width="1.5"/><path d="M4.2 4.2l3.6 3.6M7.8 4.2L4.2 7.8" '
+        'stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'
+    ),
+    "person": (
+        '<circle cx="6" cy="3.7" r="2.2" fill="currentColor"/>'
+        '<path d="M1.7 11c.4-2.5 2.1-3.9 4.3-3.9s3.9 1.4 4.3 3.9z" '
+        'fill="currentColor"/>'
+    ),
+}
+
+
+def _icon(kind: str, size: int = 14) -> str:
+    """An inline status icon; decorative, because its word sits beside it."""
+
+    return (
+        f'<svg width="{size}" height="{size}" viewBox="0 0 12 12" '
+        f'aria-hidden="true" focusable="false">{_ICON_PATHS[kind]}</svg>'
+    )
 
 
 def _e(text: object) -> str:
@@ -654,10 +734,16 @@ def _run_card(
     run: RunEvidence, which: str, alt: str, root: Path, *, asked_a_person: bool
 ) -> str:
     headline = run_headline(run)
-    badge = ""
-    if headline != run.plain.label:
-        badge = (
-            f'<span class="badge tone-{_e(run.plain.tone)}">'
+    tone = run.plain.tone
+    if headline == run.plain.label:
+        # The title is the result itself: give it the icon and the colour.
+        title = f'<h2 class="verdict">{_icon(tone)}{_e(headline)}</h2>'
+        chip = ""
+    else:
+        # A longer title in ink, with the result as a chip beneath it.
+        title = f"<h2>{_e(headline)}</h2>"
+        chip = (
+            f'<span class="chip tone-{_e(tone)}">{_icon(tone)}'
             f"{_e(run.plain.label)}</span>"
         )
     unit = "note" if run.records == 1 else "notes"
@@ -665,11 +751,11 @@ def _run_card(
     figure = _frame_figure(run, alt, root)
     did = _e(what_openadapt_did(run, asked_a_person=asked_a_person))
     return f"""
-    <article class="run tone-{_e(run.plain.tone)}">
+    <article class="run tone-{_e(tone)}">
       <header>
-        <p class="which">{_e(run.title)} · {_e(which)}</p>
-        <h2>{_e(headline)}</h2>
-        {badge}
+        <p class="which">{_e(run.title)}: {_e(which)}</p>
+        {title}
+        {chip}
         <p class="why">{_e(run_explanation(run))}</p>
       </header>
       {figure}
@@ -724,6 +810,7 @@ def _choices_section(evidence: DemoEvidence) -> str:
   <section>
     <h2>What a person sees when a run stops</h2>
     <div class="person">
+      <span class="chip tone-check">{_icon("person")}Waiting for a person</span>
       <p><strong>{lead}</strong>OpenAdapt waits for a person to choose:</p>
       <ol>{items}</ol>
       <p class="hint">It doesn't guess, and it doesn't retry the save on its own.</p>
@@ -880,9 +967,9 @@ def render_demo_page(evidence: DemoEvidence) -> str:
     )
     choices = _choices_section(evidence)
     details = _technical_details(evidence)
-    eyebrow = "Fake clinic data · ran on this computer"
+    provenance = "Fake clinic data, run on this computer."
     if evidence.clean.model_calls == 0 and evidence.broken.model_calls == 0:
-        eyebrow += " · no AI calls"
+        provenance += " No AI calls."
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -894,7 +981,7 @@ def render_demo_page(evidence: DemoEvidence) -> str:
 </head>
 <body>
 <main>
-  <p class="eyebrow"><span class="tag">Synthetic recording</span>{_e(eyebrow)}</p>
+  <p class="provenance"><strong>Synthetic recording.</strong> {_e(provenance)}</p>
   <h1>{_e(title)}</h1>
   <p class="lede">{_e(lede)} Both runs used the same automation, built from one
   recorded example of filing a follow-up note in a fake clinic app. For the

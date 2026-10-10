@@ -240,10 +240,47 @@ def render_run_report(run_dir: Path | str) -> Path:
         else "❌"
     )
 
+    # The coarse outcome reads the same for "stopped before saving" and "a
+    # save may have gone through". The transaction outcome, stamped by the
+    # runtime, says which; the renderer only reports it, never reclassifies.
+    transaction = report.transaction_outcome
+    headline = outcome
+    if transaction and transaction != outcome:
+        headline = f"{outcome} (transaction {transaction})"
+
     lines: list[str] = []
-    lines.append(f"# {icon} {_md_phi(report.workflow_name)} — {outcome}")
+    lines.append(f"# {icon} {_md_phi(report.workflow_name)} — {headline}")
     lines.append("")
+    if transaction == "RECONCILIATION_REQUIRED":
+        from openadapt_flow.transaction import steps_requiring_reconciliation
+
+        step_ids = steps_requiring_reconciliation(report)
+        where = (
+            "for step(s) "
+            + ", ".join(f"`{_md_escape(step_id)}`" for step_id in step_ids)
+            if step_ids
+            else "for every consequential step in this run"
+        )
+        lines.append(
+            "> ⚠️ **Reconciliation required.** A consequential write may have "
+            "landed. Don't re-run or retry this workflow. Check the system of "
+            f"record {where} and reconcile it before you resume."
+        )
+        lines.append("")
     lines.append(f"- **Started:** {report.started_at}")
+    if transaction:
+        note = {
+            "HALTED_BEFORE_EFFECT": (
+                " (stopped before any business effect; nothing was written)"
+            ),
+            "RECONCILIATION_REQUIRED": (
+                " (a write may have landed; check the record before any retry)"
+            ),
+            "COMPLETED_UNVERIFIED": (
+                " (the steps ran, but the saved result was not checked)"
+            ),
+        }.get(transaction, "")
+        lines.append(f"- **Transaction outcome:** `{transaction}`{note}")
     if report.execution_profile:
         production = (
             "production-eligible"

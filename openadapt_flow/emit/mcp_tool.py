@@ -53,8 +53,8 @@ def {func_name}(url: str{param_sig}) -> dict:
 {param_docs}
     Returns:
         Dict with the run's evidence-qualified outcome. ``success`` is true
-        only when ``outcome`` is VERIFIED: the change was saved and read back
-        from the system of record. COMPLETED_UNVERIFIED means the steps ran
+        only when ``outcome`` and ``transaction_outcome`` are both VERIFIED:
+        the change was saved and read back from the system of record. COMPLETED_UNVERIFIED means the steps ran
         but the saved result was not confirmed. When ``transaction_outcome``
         is RECONCILIATION_REQUIRED a write may have landed, so check the
         record before you call this tool again.
@@ -85,7 +85,10 @@ def {func_name}(url: str{param_sig}) -> dict:
         finally:
             browser.close()
     return {{
-        "success": report.execution_outcome == "VERIFIED",
+        "success": (
+            report.execution_outcome == "VERIFIED"
+            and report.transaction_outcome == "VERIFIED"
+        ),
         "outcome": report.execution_outcome,
         "transaction_outcome": report.transaction_outcome,
         "production_eligible": report.production_eligible,

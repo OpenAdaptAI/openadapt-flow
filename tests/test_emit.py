@@ -486,6 +486,17 @@ def _load_emitted_tool(
             },
             True,
         ),
+        (
+            # A coarse VERIFIED whose transaction still needs reconciliation
+            # (for example a lost managed result) is not a success.
+            {
+                "success": True,
+                "execution_profile": "standard",
+                "execution_outcome": "VERIFIED",
+                "transaction_outcome": "RECONCILIATION_REQUIRED",
+            },
+            False,
+        ),
     ],
 )
 def test_emitted_mcp_tool_never_reports_success_for_unverified(

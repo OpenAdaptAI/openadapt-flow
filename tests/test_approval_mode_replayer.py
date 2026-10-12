@@ -30,8 +30,11 @@ from openadapt_flow.execution_profiles import ExecutionProfile
 from openadapt_flow.ir import ParamSpec
 from openadapt_flow.run_gate import build_runtime_authorization
 from openadapt_flow.runtime.effects import (
+    Effect,
+    EffectKind,
     EffectState,
     EffectVerdict,
+    ValueExpr,
     Verdict,
 )
 from openadapt_flow.runtime.effects.adapter import (
@@ -114,6 +117,25 @@ class RecordSystem:
         )
 
 
+def _create_workflow(name: str = "referral-item"):
+    """The one-save item workflow, with a create effect.
+
+    Only a create, whose added record set is compared with the state before
+    the save, can finish without a person until the field-delta check exists.
+    """
+
+    workflow = _key_workflow(name, with_effect=True)
+    workflow.steps[0].effects = [
+        Effect(
+            kind=EffectKind.EXACT_NEW_SET,
+            new_records=[{"record_id": ValueExpr(literal="synthetic-1")}],
+            idempotency_key="profile-test-run",
+            risk="irreversible",
+        )
+    ]
+    return workflow
+
+
 def _save_delivered(backend: FakeBackend) -> bool:
     return any(action[0] in {"press", "key"} for action in backend.actions)
 
@@ -132,7 +154,7 @@ class Item:
         **gate_overrides,
     ):
         self.tmp_path = tmp_path
-        workflow = workflow or _key_workflow("referral-item", with_effect=True)
+        workflow = workflow or _create_workflow()
         self.workflow, self.bundle = _sealed(tmp_path, workflow, encrypted=True)
         gate_result = _gate(
             self.workflow,
@@ -345,7 +367,7 @@ def test_a_changed_screen_rung_pauses_and_switches_off(tmp_path):
 
 
 def test_an_input_from_the_recording_is_refused_before_any_step(tmp_path):
-    workflow = _key_workflow("referral-item", with_effect=True)
+    workflow = _create_workflow()
     workflow.param_specs = {
         "note": ParamSpec(name="note", example="recorded example note")
     }

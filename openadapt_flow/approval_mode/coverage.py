@@ -7,11 +7,27 @@ the item entered. This module answers that statically, from the workflow:
 - every typing or selection step before a save must take its value from a
   declared input (``Step.param``). A literal typed from the recording, or a
   secret, is never covered;
+- every input an API binding sends (a ``{param}`` placeholder in its URL,
+  query, headers or body) counts as entered on that path, like a typed value;
 - every such input must be bound in that save's effects, as a ``field_equals``
   value or a ``match`` / ``exact_new_set`` selector read from the system of
   record. An idempotency key alone doesn't cover an input;
 - every executable actuation path of the save declares at least one effect,
-  and no effect is an unbound placeholder or an on-screen read-back.
+  and no effect is an unbound placeholder or an on-screen read-back;
+- nothing is typed or selected after the last save. No record check names a
+  value entered after the last save, yet an application that saves each field
+  on entry writes it anyway;
+- no save can be skipped (a guard with ``on_unmet="skip"``). The windows
+  above assume every save runs: a skipped save leaves its values in the form
+  for the next save to write, under a record check that doesn't name them.
+
+:func:`save_contract_problems` holds the two contract rules E2 sets for every
+save, so the pre-save gate enforces them at run time too: every executable
+path declares an ``exact_new_set`` (a create; updates need the field-delta
+check, which isn't built), and carries an idempotency key. ``field_equals``
+and ``record_written`` judge the record after the save without its state
+before, so on their own they confirm an update whose value was already there,
+or a record that already existed.
 
 Program-graph workflows aren't covered in phase 1: their order of steps isn't
 linear, so every save in them fails coverage and goes to a person.
@@ -59,6 +75,53 @@ def _effect_read_params(effect: "Effect") -> set[str]:
     return names
 
 
+def _api_template_params(step: "Step") -> Optional[set[str]]:
+    """Inputs an API binding substitutes into its request, or None if unreadable.
+
+    The actuator fills templates with ``str.format_map``, so a placeholder's
+    input is the root of its field name (``{note}``, ``{note[0]}``,
+    ``{note.upper}``), including fields nested in a format spec.
+    """
+
+    import string
+
+    binding = step.api_binding
+    if binding is None:
+        return set()
+    names: set[str] = set()
+    formatter = string.Formatter()
+
+    def scan(template: str) -> None:
+        for _literal, field, spec, _conversion in formatter.parse(template):
+            if field:
+                root = field.split(".", 1)[0].split("[", 1)[0]
+                if root and not root.isdigit():
+                    names.add(root)
+            if spec:
+                scan(spec)
+
+    def walk(node: object) -> None:
+        if isinstance(node, str):
+            scan(node)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    try:
+        scan(binding.url_template)
+        for value in binding.query.values():
+            scan(value)
+        for value in binding.headers.values():
+            scan(value)
+        walk(binding.body_template)
+    except ValueError:
+        return None
+    return names
+
+
 def _entry_steps(step: "Step") -> bool:
     from openadapt_flow.ir import ActionKind
 
@@ -98,7 +161,8 @@ def save_coverage(
     if not paths or any(not effects for _path, effects in paths):
         problems.append("no_record_check")
     path_reads: list[set[str]] = []
-    for _path, effects in paths:
+    uncovered: set[str] = set()
+    for path, effects in paths:
         reads: set[str] = set()
         for effect in effects:
             if effect.needs_operator_confirmation:
@@ -107,6 +171,20 @@ def save_coverage(
                 problems.append("onscreen_readback")
             reads |= _effect_read_params(effect)
         path_reads.append(reads)
+        if path == "api":
+            # The API path enters its values through the request, not the
+            # screen: each one must be read back on that path.
+            sent = _api_template_params(save)
+            if sent is None:
+                problems.append("api_template_unreadable")
+            else:
+                uncovered |= sent - reads
+
+    if any(
+        is_save(step) and step.guard is not None and step.guard.on_unmet == "skip"
+        for step in workflow.steps
+    ):
+        problems.append("save_can_be_skipped")
 
     entered: list[str] = []
     window_start = 0
@@ -125,19 +203,53 @@ def save_coverage(
             continue
         entered.append(step.param)
 
-    uncovered = sorted(
-        {name for name in entered for reads in path_reads if name not in reads}
-    )
+    uncovered |= {name for name in entered for reads in path_reads if name not in reads}
     if uncovered:
         problems.append("input_not_read_back")
+    if not any(is_save(later) for later in workflow.steps[index + 1 :]):
+        # The last save: anything typed or selected after it is saved, if at
+        # all, by something no record check reads.
+        for later in workflow.steps[index + 1 :]:
+            if _entry_steps(later):
+                problems.append("entry_after_last_save")
+                if later.param is not None and not later.secret:
+                    uncovered.add(later.param)
     # Stable, de-duplicated reason codes.
     seen: list[str] = []
     for problem in problems:
         if problem not in seen:
             seen.append(problem)
     return SaveCoverage(
-        step_id=save.id, problems=tuple(seen), uncovered_inputs=tuple(uncovered)
+        step_id=save.id,
+        problems=tuple(seen),
+        uncovered_inputs=tuple(sorted(uncovered)),
     )
+
+
+def save_contract_problems(save: "Step") -> tuple[str, ...]:
+    """E2's contract rules for one save, as closed reason codes.
+
+    - ``update_needs_field_delta_check``: an executable path declares no
+      ``exact_new_set``. Until the field-delta check exists, only a create
+      whose added record set is compared with the state before the save can
+      finish without a person.
+    - ``write_without_idempotency_key``: an executable path carries no
+      idempotency key (the ``clinical-write`` rule).
+    """
+
+    from openadapt_flow.policy import effect_has_idempotency_key, iter_effect_paths
+    from openadapt_flow.runtime.effects.effect import EffectKind
+
+    problems: list[str] = []
+    paths = list(iter_effect_paths(save))
+    if not paths or not all(
+        any(effect.kind is EffectKind.EXACT_NEW_SET for effect in effects)
+        for _path, effects in paths
+    ):
+        problems.append("update_needs_field_delta_check")
+    if not effect_has_idempotency_key(save):
+        problems.append("write_without_idempotency_key")
+    return tuple(problems)
 
 
 def workflow_coverage(workflow: "Workflow") -> list[SaveCoverage]:

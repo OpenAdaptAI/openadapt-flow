@@ -84,8 +84,8 @@ def _anchor(text: str) -> Anchor:
 def _effects(*, cover_note: bool = True) -> list[Effect]:
     effects = [
         Effect(
-            kind=EffectKind.RECORD_WRITTEN,
-            match={"patient_id": ValueExpr(param="patient_id")},
+            kind=EffectKind.EXACT_NEW_SET,
+            new_records=[{"patient_id": ValueExpr(param="patient_id")}],
             idempotency_key=ValueExpr(param="__run_id__"),
             risk="irreversible",
         )
@@ -728,11 +728,22 @@ def test_workflow_coverage_lists_every_save():
 # -- finishing an item ------------------------------------------------------------------
 
 
+def _gated_save(**overrides) -> StepResult:
+    """A save result as the replayer hands it to the gate, then to the report.
+
+    R1 checks that every consequential result in the report is one the gate
+    passed, so the same object goes through ``before_save`` and the report.
+    """
+
+    return _save(identity=IdentityCheck(status="verified"), **overrides)
+
+
 def test_a_verified_clean_item_is_saved_without_a_person_and_logged(tmp_path):
     h = Harness(tmp_path)
     h.begin()
-    assert h.before_save().proceed
-    evidence = h.gate.finish_item(_verified_report())
+    saved = _gated_save()
+    assert h.before_save(current=saved).proceed
+    evidence = h.gate.finish_item(_verified_report(saved))
     assert evidence.decision is ItemDecisionKind.NO_PERSON
     assert not evidence.needs_person
     assert evidence.switch_log_recorded
@@ -742,8 +753,19 @@ def test_a_verified_clean_item_is_saved_without_a_person_and_logged(tmp_path):
     assert state.finished[-1].decision is ItemDecisionKind.NO_PERSON
     # Finishing again with the same result writes nothing new.
     events = len(h.log.read())
-    h.gate.finish_item(_verified_report())
+    h.gate.finish_item(_verified_report(saved))
     assert len(h.log.read()) == events
+
+
+def test_a_verified_save_the_gate_never_passed_goes_to_a_person(tmp_path):
+    h = Harness(tmp_path)
+    h.begin()
+    assert h.before_save(current=_gated_save()).proceed
+    # The report's save is another result object: the gate never checked it.
+    evidence = h.gate.finish_item(_verified_report(_gated_save()))
+    assert evidence.decision is not ItemDecisionKind.NO_PERSON
+    assert evidence.needs_person
+    assert evidence.post_checks[0].detail == "save_not_gated"
 
 
 def test_a_save_the_read_back_contradicts_goes_to_a_person_and_switches_off(
@@ -765,8 +787,11 @@ def test_a_save_the_read_back_contradicts_goes_to_a_person_and_switches_off(
 def test_a_workaround_after_a_verified_save_goes_to_a_person(tmp_path):
     h = Harness(tmp_path)
     h.begin()
-    assert h.before_save().proceed
-    report = _verified_report(_save(postcondition_drift_rescues=["Saved"]))
+    saved = _gated_save()
+    assert h.before_save(current=saved).proceed
+    # A vision rescue of the save's postcondition happens after delivery.
+    saved.postcondition_drift_rescues = ["Saved"]
+    report = _verified_report(saved)
     evidence = h.gate.finish_item(report)
     assert report.transaction_outcome == "VERIFIED"  # the word never changes
     assert evidence.decision is ItemDecisionKind.PROBLEM
@@ -811,9 +836,10 @@ def test_items_sent_to_approval_by_a_stale_status_never_switch_off(tmp_path):
 def test_an_unloggable_result_is_never_counted_as_no_person(tmp_path):
     h = Harness(tmp_path)
     h.begin()
-    assert h.before_save().proceed
+    saved = _gated_save()
+    assert h.before_save(current=saved).proceed
     h.log.path.write_bytes(h.log.path.read_bytes() + b"garbage\n")
-    evidence = h.gate.finish_item(_verified_report())
+    evidence = h.gate.finish_item(_verified_report(saved))
     assert evidence.decision is ItemDecisionKind.PROBLEM
     assert evidence.decision_reason == "switch_log"
     assert evidence.needs_person

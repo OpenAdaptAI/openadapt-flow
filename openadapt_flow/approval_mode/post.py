@@ -19,6 +19,7 @@ turns the switch off with ``screen_changed``.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
@@ -89,8 +90,15 @@ def check_verified(
     record: "SwitchRecord",
     *,
     saves_without_person: int,
+    gated_results: Optional[Sequence["StepResult"]] = None,
 ) -> CheckOutcome:
-    """R1: a first-read system-of-record confirmation of every save."""
+    """R1: a first-read system-of-record confirmation of every save.
+
+    ``gated_results`` are the save results the pre-save gate passed. When
+    given, every consequential result in the report must be one of them: a
+    save delivered without the gate's checks (its record-check coverage among
+    them) never counts as checked, even when its own read-back confirmed.
+    """
 
     def fail(detail: str) -> CheckOutcome:
         return CheckOutcome(code="verified", passed=False, detail=detail)
@@ -114,6 +122,10 @@ def check_verified(
             return fail("approved_unverified_write")
         if not _consequential(result) or result.skipped:
             continue
+        if gated_results is not None and not any(
+            result is gated for gated in gated_results
+        ):
+            return fail("save_not_gated")
         if result.delivery_uncertainty is not None:
             return fail("delivery_uncertain")
         if not result.effect_evidence:
@@ -248,10 +260,21 @@ def decide_problems_only(
     r1: CheckOutcome,
     r2: CheckOutcome,
     gate_decision: Optional[ItemDecision],
+    save_delivered: bool = False,
 ) -> ItemDecision:
-    """Combine the gate's pre-save decision with R1, R2 and the outcome."""
+    """Combine the gate's pre-save decision with R1, R2 and the outcome.
 
-    uncertain = outcome_is_uncertain(report)
+    ``save_delivered`` says the gate let a save through and its input was
+    delivered. Then an outcome that reads "nothing was written" contradicts
+    the delivery: the read-back can show only that the expected record is
+    absent, not that nothing else was written. The outcome word stays the
+    engine's; the item goes to a person and the switch turns off
+    (``uncertain_result``).
+    """
+
+    uncertain = outcome_is_uncertain(report) or (
+        save_delivered and report.transaction_outcome in NOTHING_WRITTEN
+    )
     if gate_decision is not None:
         # The gate sent the item to a person before a save. An earlier save in
         # the same item may already have landed; Flow's outcome rules decide

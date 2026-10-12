@@ -47,7 +47,11 @@ report are unchanged.
 
 The gate runs at the last point before the save's input is delivered, after
 the target, the right-record check and the record check's pre-state
-resolved. In `problems_only` it checks, in order:
+resolved. A save is a step the run gate's classifier calls consequential.
+The runtime also asks before an identity-checked navigation click, such as
+opening the patient's chart; that click isn't a save, so the gate lets it
+through, and the engine's own identity check still applies. In
+`problems_only` the gate checks, in order:
 
 1. **Item checks.** The item came from a Desktop list with a header row,
    its values were parsed strictly, it isn't a retry, repeat or resumed run,
@@ -71,7 +75,12 @@ resolved. In `problems_only` it checks, in order:
 6. **P5 `record_check_ready`.** The verifier is reachable, reads at
    `INDEPENDENT_SYSTEM`, has an identity the switch record names, and its
    effects read back every input the item typed or selected since the
-   previous save.
+   previous save, and every input an API binding puts in its request. The
+   last save also refuses when anything is typed or selected after it. Every
+   executable path declares an `exact_new_set` and an idempotency key, as E2
+   requires: `field_equals` and `record_written` don't compare with the
+   record's state before the save, so they would confirm an update whose
+   value was already there, or a record that already existed.
 
 Any failure stops before the save. P2, P3 and P5 failures read "stopped
 before saving"; the others wait for a person to approve the item. In
@@ -81,9 +90,9 @@ input would come from the recording is refused before any step.
 ## After the run
 
 - **R1 `verified`.** The transaction outcome is `VERIFIED` and agrees with
-  the execution outcome and the outcome envelope. Every save was confirmed
-  on the first read, with no reconciliation, by a bound system-of-record
-  verifier at `INDEPENDENT_SYSTEM`.
+  the execution outcome and the outcome envelope. Every save is one the gate
+  passed, and was confirmed on the first read, with no reconciliation, by a
+  bound system-of-record verifier at `INDEPENDENT_SYSTEM`.
 - **R2 `whole_run_clean`.** The whole run used no repair, model call,
   rescue, `grounder` rung, lower rung or undeclared dialog.
 
@@ -100,7 +109,7 @@ and a missing or broken log also reads as off.
 
 | Reason | Trigger in Flow |
 | --- | --- |
-| `uncertain_result` | The item ended "Check the record", "Finished, not checked", rolled back, had an unknown or inconsistent outcome, or an earlier item was interrupted. |
+| `uncertain_result` | The item ended "Check the record", "Finished, not checked", rolled back, had an unknown or inconsistent outcome, or an earlier item was interrupted. Also when the gate let a save through and its input was delivered, but the outcome says nothing was written: the read-back showed only that the expected record is absent. |
 | `too_many_problems` | 3 counted problems in a row, or 5 in the last 20 counted items. Items sent to approval by the item checks or by a stale status don't count. |
 | `screen_changed` | P4 or R2 failed. |
 | `record_check_lost` | P5 failed, or the engine's own record-check preflight refused the save. |
@@ -118,6 +127,19 @@ decisions people record, such as the readiness sign-off and the runner
 setup attestations, and never makes them. Two requirements can't be met by
 any workflow yet: E2 needs a field-delta check for updates, and E4 needs
 three drills that don't exist yet.
+
+## What the record check doesn't see
+
+The checks above confirm the values the record check names. They don't see:
+
+- a field on the new record that no input reaches, such as a recorded choice
+  that landed on the wrong option;
+- a change to another, existing record;
+- a second field that the same input was typed into.
+
+The field-delta check and the whole-item snapshot in the design are meant to
+close these. Until then, `tests/test_approval_mode_adversarial.py` keeps
+strict expected-failure tests for them.
 
 ## Not built yet
 

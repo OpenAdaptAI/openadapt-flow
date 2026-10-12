@@ -231,7 +231,10 @@ class ApprovalGate:
         self._decision: Optional[ItemDecision] = None
         self._gated_step_id: Optional[str] = None
         self._saves_without_person = 0
-        self._passed_results: set[int] = set()
+        # Saves that passed every pre-check, keyed by id() and holding the
+        # result itself: the reference keeps the id from being reused by a
+        # later result object, and the step id must match too.
+        self._passed_results: dict[int, tuple[str, "StepResult"]] = {}
         self._item_started_logged = False
         self._off_logged: Optional[OffReason] = None
         self._status: Optional[SwitchStatus] = None
@@ -425,6 +428,13 @@ class ApprovalGate:
             raise RuntimeError("begin_item was not called for this run")
         if self.mode is ApprovalMode.NOT_GATED:
             return GateVerdict(proceed=True, decision=None, checks=())
+        if not self._is_save(ctx):
+            # The runtime also asks before an identity-checked navigation
+            # click (opening the patient's chart). That isn't a save: no record
+            # check names it and nothing is gated on it. The engine's own
+            # identity check still applies to it.
+            return GateVerdict(proceed=True, decision=None, checks=())
+
         if self._decision is not None:
             # A gate that already sent the item to a person never reopens.
             return GateVerdict(proceed=False, decision=self._decision, checks=())
@@ -452,7 +462,8 @@ class ApprovalGate:
             self._halt(ctx, decision, [check])
             return GateVerdict(proceed=False, decision=decision, checks=(check,))
 
-        if id(ctx.result) in self._passed_results:
+        passed = self._passed_results.get(id(ctx.result))
+        if passed is not None and passed[1] is ctx.result and passed[0] == ctx.step.id:
             # Another input edge of a save that already passed (for example a
             # focus click before typing). Re-read the switch log, which must
             # hold before every input edge, and re-check the screens.
@@ -512,9 +523,21 @@ class ApprovalGate:
                 )
             self._item_started_logged = True
         self._pre_checks.extend(checks)
-        self._passed_results.add(id(ctx.result))
+        self._passed_results[id(ctx.result)] = (ctx.step.id, ctx.result)
         self._saves_without_person += 1
         return GateVerdict(proceed=True, decision=None, checks=tuple(checks))
+
+    @staticmethod
+    def _is_save(ctx: SaveContext) -> bool:
+        """Whether this step is a consequential save (the static classifier).
+
+        The same fail-closed classifier the record-check coverage uses for its
+        windows, so the gate and coverage agree on which steps are saves.
+        """
+
+        from openadapt_flow.run_gate import is_consequential
+
+        return is_consequential(ctx.step, ctx.workflow)
 
     # -- P1 --------------------------------------------------------------------
     def _check_switch_on(
@@ -550,7 +573,13 @@ class ApprovalGate:
             return fail("switch_log_for_other_record")
         if state.is_off:
             return fail("switched_off")
-        if any(ref != self._run_ref for ref in state.open_items):
+        if any(
+            ref != self._run_ref or not self._item_started_logged
+            for ref in state.open_items
+        ):
+            # An item started without a person and never finished. Only this
+            # gate's own ``item_started`` may be open: a run that reuses an
+            # interrupted run's id must not hide it.
             return fail("interrupted_item", OffReason.UNCERTAIN_RESULT)
         if self._runner_id is None:
             # A caller that didn't say which runner this is proves nothing.
@@ -793,7 +822,10 @@ class ApprovalGate:
     def _check_record_check_ready(
         self, ctx: SaveContext
     ) -> tuple[CheckOutcome, Optional[ItemDecision]]:
-        from openadapt_flow.approval_mode.coverage import save_coverage
+        from openadapt_flow.approval_mode.coverage import (
+            save_contract_problems,
+            save_coverage,
+        )
         from openadapt_flow.policy import iter_effect_paths
         from openadapt_flow.runtime.effects.adapter import (
             _probe_adapter_connection,
@@ -831,6 +863,9 @@ class ApprovalGate:
         coverage = save_coverage(ctx.workflow, ctx.step)
         if not coverage.covered:
             return fail(coverage.problems[0])
+        contract = save_contract_problems(ctx.step)
+        if contract:
+            return fail(contract[0])
         for _path, effects in iter_effect_paths(ctx.step):
             for effect in effects:
                 tier = verifier_effect_tier(verifier, effect)
@@ -912,14 +947,23 @@ class ApprovalGate:
             )
         else:
             r1 = check_verified(
-                report, record, saves_without_person=self._saves_without_person
+                report,
+                record,
+                saves_without_person=self._saves_without_person,
+                gated_results=[result for _, result in self._passed_results.values()],
             )
             r2 = check_whole_run_clean(report, record)
         gate_decision = self._decision
         if gate_decision is None and self._item_fallback is not None:
             gate_decision = self._item_fallback
         decision = decide_problems_only(
-            report, r1=r1, r2=r2, gate_decision=gate_decision
+            report,
+            r1=r1,
+            r2=r2,
+            gate_decision=gate_decision,
+            save_delivered=any(
+                result.delivery_attempted for _, result in self._passed_results.values()
+            ),
         )
         previous = self._finished
         if (

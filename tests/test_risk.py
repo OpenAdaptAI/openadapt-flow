@@ -649,3 +649,110 @@ def test_compiled_icon_save_is_a_consequential_write_that_needs_a_record_check(
     assert QualificationRefusalCode.ACTION_CLASSIFICATION_UNCONFIRMED in save_refusals
     assert report.consequential_action_count >= 1
     assert report.passed is False
+
+
+# --- Adversarial: no saving step is ever drafted "read-only" -----------------
+#
+# Check it calls a task read-only only when every step carries an
+# operator-confirmed read-only classification. Flow drafts that classification
+# on its own for exactly one shape: a wait or scroll with nothing that can
+# write. These tests try every other actuating shape, label, and override.
+
+
+def _actuating_step(kind: ActionKind, label: str | None) -> Step:
+    anchor = Anchor(
+        template="t.png", region=(0, 0, 10, 10), click_point=(5, 5), ocr_text=label
+    )
+    extra: dict[str, object] = {}
+    if kind is ActionKind.TYPE:
+        extra = {"text": "610420233"}
+    elif kind is ActionKind.KEY:
+        extra = {"key": "enter"}
+    elif kind is ActionKind.HOTKEY:
+        extra = {"key": "enter", "modifiers": ["ctrl"], "anchor": None}
+    elif kind is ActionKind.SELECT_OPTION:
+        extra = {
+            "text": "Approved",
+            "selection_commit_key": "Enter",
+            "selection_region": (0, 0, 10, 10),
+        }
+    fields: dict[str, object] = {"anchor": anchor, **extra}
+    return Step(id="s", intent=f"{kind.value} {label or ''}", action=kind, **fields)
+
+
+def _drafted(step: Step):
+    from openadapt_flow.ir import Workflow
+    from openadapt_flow.qualification import EnvironmentBoundary, init_project
+
+    workflow = Workflow(name="adversarial", steps=[step])
+    project = init_project(
+        workflow,
+        environment=EnvironmentBoundary(
+            target_kind="web",
+            application="Test app",
+            application_version="1",
+            environment_digest="c" * 64,
+            runtime_version="1.35.1",
+        ),
+    )
+    return project.action_classifications[step.id]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [kind for kind in ActionKind if kind not in {ActionKind.WAIT, ActionKind.SCROLL}],
+)
+@pytest.mark.parametrize("label", [None, "日", "日日", "OK", "Close", "Save"])
+@pytest.mark.parametrize("operator_override", [False, True])
+def test_no_actuating_step_is_drafted_read_only(
+    kind: ActionKind, label: str | None, operator_override: bool
+) -> None:
+    from openadapt_flow.qualification import ActionRiskClass
+
+    step = _actuating_step(kind, label)
+    if operator_override:
+        # What a compile-time risk_overrides "reversible" leaves behind.
+        step.risk = "reversible"
+        step.risk_review_required = False
+        step.risk_explanation = "operator-qualified override: reversible"
+
+    drafted = _drafted(step)
+
+    assert drafted.classification is not ActionRiskClass.READ_ONLY
+    assert not (
+        drafted.operator_confirmed
+        and drafted.classification is not ActionRiskClass.IRREVERSIBLE
+    )
+
+
+@pytest.mark.parametrize("kind", [ActionKind.WAIT, ActionKind.SCROLL])
+def test_a_wait_or_scroll_that_can_write_is_never_drafted_read_only(
+    kind: ActionKind,
+) -> None:
+    from openadapt_flow.qualification import ActionRiskClass
+    from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
+
+    api_write = Step(
+        id="s",
+        intent="Wait",
+        action=kind,
+        api_binding=ApiBinding(url_template="/claims"),
+    )
+    declared_effect = Step(
+        id="s",
+        intent="Wait",
+        action=kind,
+        effects=[
+            Effect(
+                kind=EffectKind.RECORD_WRITTEN,
+                match={"record_id": ValueExpr(param="record_id")},
+            )
+        ],
+    )
+    forced = Step(id="s", intent="Wait", action=kind, risk="irreversible")
+
+    for step in (api_write, declared_effect, forced):
+        assert _drafted(step).classification is not ActionRiskClass.READ_ONLY
+    # The one shape Flow drafts read-only by itself.
+    plain = _drafted(Step(id="s", intent="Wait", action=kind))
+    assert plain.classification is ActionRiskClass.READ_ONLY

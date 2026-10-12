@@ -188,10 +188,13 @@ class Harness:
             "monotonic": self.clock,
         }
         kwargs.update(gate_kw)
+        self.item = kwargs["item"]
         self.gate = ApprovalGate(mode, **kwargs)
         self.workflow = _workflow()
 
-    def begin(self, run_id="run-0001", **overrides):
+    def begin(self, run_id="run-0001", *, fresh_item=True, **overrides):
+        if fresh_item and self.item is not None:
+            self.gate.next_item(self.item)
         fields = {
             "run_id": run_id,
             "bundle_content_digest": BUNDLE_DIGEST,
@@ -825,3 +828,29 @@ def test_each_item_finish_always_needs_a_person(tmp_path):
     assert evidence.decision is ItemDecisionKind.APPROVAL_REQUIRED
     assert evidence.needs_person
     assert evidence.saves_without_person == 0
+
+
+def test_a_reused_gate_never_carries_one_items_context_to_the_next(tmp_path):
+    h = Harness(tmp_path)
+    h.begin(run_id="run-a")
+    assert h.before_save().proceed
+    h.gate.finish_item(_verified_report())
+    # The next item without a fresh context gets the fail-safe default.
+    h.begin(run_id="run-b", fresh_item=False)
+    verdict = h.before_save()
+    assert not verdict.proceed
+    assert verdict.decision.kind is ItemDecisionKind.APPROVAL_REQUIRED
+    # With its own context it may proceed.
+    h.begin(run_id="run-c")
+    assert h.before_save().proceed
+
+
+def test_an_unknown_runner_or_unsealed_bundle_pauses_without_switching_off(tmp_path):
+    h = Harness(tmp_path, runner_id=None)
+    h.begin()
+    assert h.before_save().checks[0].detail == "runner_unknown"
+    assert not h.log.state().is_off
+    h2 = Harness(tmp_path / "b")
+    h2.begin(bundle_content_digest=None)
+    assert h2.before_save().checks[0].detail == "bundle_unsealed"
+    assert not h2.log.state().is_off

@@ -166,10 +166,13 @@ class Item:
             "item": good_item(),
         }
         gate_kwargs.update(gate_overrides)
+        self.item_context = gate_kwargs["item"]
         self.gate = ApprovalGate(mode, **gate_kwargs)
         self.backend = FakeBackend()
 
     def run(self, name: str = "run", *, gate=True):
+        # Each item brings its own list context, as Desktop's queue would.
+        self.gate.next_item(self.item_context)
         replayer = Replayer(
             self.backend,
             vision=_ReadyVision(),

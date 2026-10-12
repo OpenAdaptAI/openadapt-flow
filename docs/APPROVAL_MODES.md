@@ -38,7 +38,10 @@ report = Replayer(backend, approval_gate=gate, ...).run(workflow, ...)
 report.approval  # the item's decision and checks, as closed codes
 ```
 
-Without a gate, replay and the run report are unchanged.
+The item context is single-use. To reuse a gate for the next item, call
+`gate.next_item(context)` first; otherwise the next item gets a default
+context that fails every item check. Without a gate, replay and the run
+report are unchanged.
 
 ## Before each save
 

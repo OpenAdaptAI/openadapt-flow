@@ -208,13 +208,21 @@ class ApprovalGate:
         self._runner_id = runner_id
         self._signed_in_user = signed_in_user
         self._dedicated_user_key = dedicated_user_key
-        self._item = item if item is not None else ItemContext()
+        # The item context is single-use: begin_item consumes it, so a reused
+        # gate never applies one item's list facts to the next item.
+        self._item_pending: Optional[ItemContext] = item
         self._monotonic = monotonic
         self._nonce_factory = nonce_factory
         self._reset_item_state()
 
     # -- per-item state --------------------------------------------------------
+    def next_item(self, item: ItemContext) -> None:
+        """Load the context for the next item when one gate is reused."""
+
+        self._item_pending = item
+
     def _reset_item_state(self) -> None:
+        self._item: ItemContext = ItemContext()
         self._run_ref: Optional[str] = None
         self._bundle_digest: Optional[str] = None
         self._item_checks: list[CheckOutcome] = []
@@ -248,6 +256,9 @@ class ApprovalGate:
         """
 
         self._reset_item_state()
+        if self._item_pending is not None:
+            self._item = self._item_pending
+        self._item_pending = None
         self._began = True
         self._run_ref = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
         self._bundle_digest = bundle_content_digest
@@ -477,9 +488,10 @@ class ApprovalGate:
         # to start, so an interrupted item is found by the next one.
         if not self._item_started_logged:
             try:
-                assert self.log is not None and self._run_ref is not None
+                if self.log is None or self._run_ref is None:
+                    raise SwitchLogError("no switch log for this item")
                 self.log.append("item_started", run_ref=self._run_ref)
-            except (SwitchLogError, OSError, AssertionError):
+            except (SwitchLogError, OSError):
                 check = CheckOutcome(
                     code="switch_log",
                     passed=False,
@@ -540,8 +552,13 @@ class ApprovalGate:
             return fail("switched_off")
         if any(ref != self._run_ref for ref in state.open_items):
             return fail("interrupted_item", OffReason.UNCERTAIN_RESULT)
+        if self._runner_id is None:
+            # A caller that didn't say which runner this is proves nothing.
+            return fail("runner_unknown")
         if self._runner_id != record.runner_id:
             return fail("runner_changed", OffReason.ENVIRONMENT_CHANGED)
+        if self._bundle_digest is None:
+            return fail("bundle_unsealed")
         if self._bundle_digest != record.bundle_content_digest:
             return fail("version_changed", OffReason.VERSION_CHANGED)
         environment: Optional[str]

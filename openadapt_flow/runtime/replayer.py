@@ -208,6 +208,7 @@ _MAX_FRESH_ACTUATION_REACQUISITIONS = 2
 _DURABLE_RESUME_AUTHORITY = object()
 
 if TYPE_CHECKING:
+    from openadapt_flow.approval_mode.gate import ApprovalGate
     from openadapt_flow.production_qualification import ProductionQualificationGuard
     from openadapt_flow.qualification_campaign_authority import (
         QualificationCampaignGuard,
@@ -516,6 +517,13 @@ class Replayer:
             It has no execution authority. Sink/schema errors are retained on
             ``control_overlay_error`` and disable later presentation events;
             they never change actuation or the evidence-qualified run outcome.
+        approval_gate: Optional per-item approval gate
+            (:class:`openadapt_flow.approval_mode.gate.ApprovalGate`). When
+            set, it is asked before every consequential save, at the last
+            point before input delivery, and a refusal stops the item before
+            the save so a person handles it. Its post-run decision is stamped
+            on the report as ``approval``. It can only add refusals; it never
+            changes an outcome word. None (default) leaves replay unchanged.
     """
 
     def __init__(
@@ -553,6 +561,7 @@ class Replayer:
         qualification_environment_observer: Optional[
             QualificationEnvironmentObserver
         ] = None,
+        approval_gate: Optional["ApprovalGate"] = None,
     ) -> None:
         if vision is None:
             import openadapt_flow.vision as vision  # lazy: heavy OCR deps
@@ -816,6 +825,15 @@ class Replayer:
         self.idempotency_ledger = idempotency_ledger
         self.qualification_fault_driver = qualification_fault_driver
         self.qualification_environment_observer = qualification_environment_observer
+        if approval_gate is not None:
+            from openadapt_flow.approval_mode.gate import ApprovalGate
+
+            if not isinstance(approval_gate, ApprovalGate):
+                raise ValueError("approval_gate must be an approval_mode ApprovalGate")
+        self.approval_gate = approval_gate
+        self._approval_report: Optional[RunReport] = None
+        self._approval_run_dir: Optional[Path] = None
+        self._approval_refusal: Optional[str] = None
         self._qualification_fault_mutations: list[FaultMutationReceipt] = []
         self._qualification_fault_public_key: Optional[str] = None
         self._qualification_case_action_paths: dict[str, Literal["gui", "api"]] = {}
@@ -1238,6 +1256,7 @@ class Replayer:
         prior_external_network_calls = self._initial_external_network_calls(
             prior_external_network_calls
         )
+        caller_param_names = frozenset(params or {})
         merged: dict[str, RuntimeParamScalar] = {**workflow.params}
         for pname, spec in workflow.param_specs.items():
             if spec.example is not None:
@@ -1395,6 +1414,13 @@ class Replayer:
                 self._screenshots_may_leave_box or prior_screenshots_may_leave_box
             ),
             idempotency_key=idempotency_key,
+        )
+        self._begin_approval_item(
+            report,
+            run_dir,
+            inputs_from_recording=sorted(set(params) - caller_param_names),
+            durable_resume=durable_resume,
+            prior_screenshots_may_leave_box=prior_screenshots_may_leave_box,
         )
         snapshot_refusal = self._workflow_snapshot_refusal(workflow)
         if snapshot_refusal is None:
@@ -1666,6 +1692,22 @@ class Replayer:
                         + ", ".join(missing)
                         + " — refusing to run; run aborted"
                     ),
+                )
+            )
+            report.success = False
+            report.total_ms = (time.monotonic() - t_run) * 1000.0
+            return self._finalize_report(report, workflow, run_dir)
+
+        if self._approval_refusal is not None:
+            # Approval modes take values only from the caller: an input the
+            # run would fill from the recording is refused before any step.
+            report.results.append(
+                StepResult(
+                    step_id="<params>",
+                    intent="validate approval-mode inputs",
+                    ok=False,
+                    failure_category="governed_refusal",
+                    error=self._approval_refusal,
                 )
             )
             report.success = False
@@ -2030,6 +2072,7 @@ class Replayer:
 
         report.qualification_fault_mutations = list(self._qualification_fault_mutations)
         self._stamp_execution_outcome(report, workflow, run_dir)
+        self._stamp_approval(report)
         if persist:
             persisted_path = report.save(run_dir)
             # The evidence file must exist before the terminal projection.  A
@@ -2141,6 +2184,7 @@ class Replayer:
         report.success = False
         report.execution_completed = False
         self._stamp_execution_outcome(report, workflow, run_dir)
+        self._stamp_approval(report)
 
     def _record_idempotency_outcome(self, report: RunReport) -> None:
         """Commit a terminal outcome only into this run's owned reservation."""
@@ -9493,8 +9537,16 @@ class Replayer:
         params: Mapping[str, RuntimeParamScalar],
         step: Step,
         result: StepResult,
+        *,
+        interstitial: bool = False,
     ) -> Optional[str]:
-        """Recheck exact authority at the last point before input delivery."""
+        """Recheck exact authority at the last point before input delivery.
+
+        ``interstitial`` marks a declared, reversible dialog dismissal at step
+        entry. The approval gate is consulted only for the step's own input
+        edges, after its target and right-record check resolved; a dismissal
+        is still audited on the result and judged by the gate's screen check.
+        """
 
         self._active_delivery_acknowledgers = ()
         acknowledgers: list[Any] = []
@@ -9543,6 +9595,13 @@ class Replayer:
             refusal = self._fresh_actuation_authorization_refusal(
                 workflow, params, step
             )
+        if (
+            refusal is None
+            and not interstitial
+            and self.approval_gate is not None
+            and self._step_is_consequential(step, workflow)
+        ):
+            refusal = self._approval_gate_refusal(workflow, step, result)
         initial_guard = getattr(self, "_durable_initial_delivery_guard", None)
         if refusal is None and initial_guard is not None:
             try:
@@ -9573,6 +9632,107 @@ class Replayer:
         else:
             self._active_delivery_acknowledgers = tuple(acknowledgers)
         return refusal
+
+    def _begin_approval_item(
+        self,
+        report: RunReport,
+        run_dir: Path,
+        *,
+        inputs_from_recording: list[str],
+        durable_resume: bool,
+        prior_screenshots_may_leave_box: bool,
+    ) -> None:
+        """Start the approval gate's item before any check or step runs."""
+
+        self._approval_report = report
+        self._approval_run_dir = Path(run_dir)
+        self._approval_refusal = None
+        gate = self.approval_gate
+        if gate is None:
+            return
+        try:
+            self._approval_refusal = gate.begin_item(
+                run_id=self._run_id,
+                bundle_content_digest=report.bundle_content_digest,
+                profile=report.execution_profile,
+                inputs_from_recording=inputs_from_recording,
+                durable_resume=durable_resume,
+                model_egress_possible=(
+                    self.allow_model_grounding
+                    or self._screenshots_may_leave_box
+                    or prior_screenshots_may_leave_box
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken gate goes to a person
+            self._approval_refusal = (
+                "Approval mode: the item could not be started "
+                f"({type(exc).__name__}); nothing was typed or saved."
+            )
+
+    def _approval_gate_refusal(
+        self, workflow: Workflow, step: Step, result: StepResult
+    ) -> Optional[str]:
+        """Ask the approval gate whether this consequential save may proceed."""
+
+        gate = self.approval_gate
+        assert gate is not None
+        report = self._approval_report
+        run_dir = self._approval_run_dir
+
+        def frame() -> Optional[bytes]:
+            if run_dir is None or not result.before_png:
+                return None
+            try:
+                return (run_dir / result.before_png).read_bytes()
+            except OSError:
+                return None
+
+        try:
+            from openadapt_flow.approval_mode.gate import SaveContext
+
+            verdict = gate.before_save(
+                SaveContext(
+                    step=step,
+                    workflow=workflow,
+                    result=result,
+                    prior_results=list(report.results) if report is not None else [],
+                    effect_verifier=self.effect_verifier,
+                    governed_authorization=self.governed_authorization,
+                    model_calls=report.model_calls if report is not None else 0,
+                    frame=frame,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken gate goes to a person
+            return (
+                "Approval mode: the pre-save gate failed "
+                f"({type(exc).__name__}); this item stopped before saving."
+            )
+        if verdict.proceed:
+            return None
+        return verdict.refusal_message() or (
+            "Approval mode: this item stopped before saving."
+        )
+
+    def _stamp_approval(self, report: RunReport) -> None:
+        """Stamp the approval gate's post-run decision on the report."""
+
+        gate = self.approval_gate
+        if gate is None:
+            return
+        try:
+            report.approval = gate.finish_item(report)
+        except Exception:  # noqa: BLE001 - an unknown decision goes to a person
+            from openadapt_flow.approval_mode.model import (
+                ApprovalModeItemEvidence,
+                ItemDecisionKind,
+            )
+
+            report.approval = ApprovalModeItemEvidence(
+                mode=gate.mode,
+                decision=ItemDecisionKind.PROBLEM,
+                decision_reason="gate_error",
+                needs_person=True,
+            )
 
     def _act(
         self,
@@ -11040,7 +11200,7 @@ class Replayer:
             handled_indices.add(active_index)
             if workflow is not None:
                 authorization_error = self._delivery_authorization_refusal(
-                    workflow, params, step, result
+                    workflow, params, step, result, interstitial=True
                 )
                 if authorization_error is not None:
                     event.error = authorization_error

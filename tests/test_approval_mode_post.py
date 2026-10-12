@@ -527,3 +527,38 @@ def test_five_problems_in_the_last_twenty_switch_off():
     # The oldest problem falls out of the window after one more clean item.
     events.append(_finished(21, NO, False))
     assert not too_many_problems(events, SwitchThresholds())
+
+
+def test_engine_refusals_map_to_the_gate_codes():
+    from openadapt_flow.approval_mode.post import engine_refusal_decision
+    from openadapt_flow.ir import SafetyRefusalEvidence
+
+    def refused(stage, code):
+        return _halted_report("HALTED_BEFORE_EFFECT").model_copy(
+            update={
+                "results": [
+                    _save(
+                        ok=False,
+                        effect_verified=False,
+                        safety_refusal_evidence=SafetyRefusalEvidence(
+                            stage=stage, code=code, detector_input_sha256="0" * 64
+                        ),
+                    )
+                ]
+            }
+        )
+
+    lost = engine_refusal_decision(
+        refused("effect_strength", "effect_strength_insufficient"), uncertain=False
+    )
+    assert lost.kind is ItemDecisionKind.STOP_BEFORE_SAVING
+    assert lost.switch_off is OffReason.RECORD_CHECK_LOST
+    identity = engine_refusal_decision(
+        refused("identity_verification", "identity_unverifiable"), uncertain=False
+    )
+    assert identity.reason == "right_record"
+    assert identity.switch_off is None
+    assert (
+        engine_refusal_decision(_halted_report("HALTED_BEFORE_EFFECT"), uncertain=False)
+        is None
+    )

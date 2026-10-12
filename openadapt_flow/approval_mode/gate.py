@@ -442,14 +442,21 @@ class ApprovalGate:
             return GateVerdict(proceed=False, decision=decision, checks=(check,))
 
         if id(ctx.result) in self._passed_results:
-            # Another delivery edge of a save that already passed (for example
-            # a focus click before typing). Re-read the switch log, which is
-            # what must hold before every input edge.
-            check, failure = self._check_switch_on(ctx, refresh_status=False)
-            if failure is not None:
-                self._halt(ctx, failure, [check])
-                return GateVerdict(proceed=False, decision=failure, checks=(check,))
-            return GateVerdict(proceed=True, decision=None, checks=(check,))
+            # Another input edge of a save that already passed (for example a
+            # focus click before typing). Re-read the switch log, which must
+            # hold before every input edge, and re-check the screens.
+            repeat: list[CheckOutcome] = []
+            for check, failure in (
+                self._check_switch_on(ctx, refresh_status=False),
+                self._check_same_screens(ctx),
+            ):
+                repeat.append(check)
+                if failure is not None:
+                    self._halt(ctx, failure, repeat)
+                    return GateVerdict(
+                        proceed=False, decision=failure, checks=tuple(repeat)
+                    )
+            return GateVerdict(proceed=True, decision=None, checks=tuple(repeat))
 
         checks: list[CheckOutcome] = []
         for evaluate in (

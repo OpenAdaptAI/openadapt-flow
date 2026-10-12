@@ -207,6 +207,41 @@ class ItemDecision:
     switch_off: Optional[OffReason]
 
 
+def engine_refusal_decision(
+    report: "RunReport", *, uncertain: bool
+) -> Optional[ItemDecision]:
+    """Map the engine's own pre-delivery refusals onto the gate's codes.
+
+    The runtime already refuses some saves before the approval gate is asked:
+    an identity check that didn't verify, or a record-check verifier that
+    failed its preflight or pre-state read. Those are the same problems P3
+    and P5 catch, so they get the same decision and switch-off. Returns None
+    for any other result.
+    """
+
+    for result in report.results:
+        evidence = result.safety_refusal_evidence
+        if evidence is None:
+            continue
+        if evidence.stage in {"effect_verifier", "effect_strength"}:
+            return ItemDecision(
+                kind=ItemDecisionKind.STOP_BEFORE_SAVING,
+                reason="record_check_ready",
+                needs_person=True,
+                counts_toward_problems=True,
+                switch_off=OffReason.RECORD_CHECK_LOST,
+            )
+        if evidence.stage == "identity_verification":
+            return ItemDecision(
+                kind=ItemDecisionKind.STOP_BEFORE_SAVING,
+                reason="right_record",
+                needs_person=True,
+                counts_toward_problems=True,
+                switch_off=OffReason.UNCERTAIN_RESULT if uncertain else None,
+            )
+    return None
+
+
 def decide_problems_only(
     report: "RunReport",
     *,
@@ -232,6 +267,10 @@ def decide_problems_only(
             or off is OffReason.UNCERTAIN_RESULT,
             switch_off=off,
         )
+    if not (r1.passed and r2.passed):
+        engine = engine_refusal_decision(report, uncertain=uncertain)
+        if engine is not None:
+            return engine
     if r1.passed and r2.passed:
         return ItemDecision(
             kind=ItemDecisionKind.NO_PERSON,

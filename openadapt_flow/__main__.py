@@ -1756,6 +1756,37 @@ def _attached_web_page(backend_cfg, *, url: Optional[str], workflow=None):
     # browser, its tabs, and its signed-in session stay as they are.
 
 
+def _attached_entry_url(page, url: Optional[str]) -> Optional[str]:
+    """The entry URL an attached run may report: ``url`` only if the tab is on it.
+
+    A launched browser loads ``url`` before replay, so its report names that
+    entry. An attached run loads nothing: it starts from whatever the
+    signed-in tab shows. Reporting the configured URL for a tab on another
+    page would let hosted validation, which binds the report's entry URL to
+    the attested one, accept a run that never started there. Any difference
+    other than the fragment reports no entry URL, which that validation
+    refuses.
+    """
+
+    if not url:
+        return None
+    try:
+        current = urlsplit(str(page.url))
+        wanted = urlsplit(url)
+    except Exception:
+        return None
+
+    def comparable(parts) -> tuple[str, str, str, str]:
+        return (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path or "/",
+            parts.query,
+        )
+
+    return url if comparable(current) == comparable(wanted) else None
+
+
 def _default_run_dir() -> Path:
     """Timestamped default run directory under ``runs/``."""
     from datetime import datetime, timezone
@@ -1861,7 +1892,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             "omit --url to use it (drift your own app for real)."
         )
 
-    def run_on_page(page, *, entry_url: str):
+    def run_on_page(page, *, entry_url: Optional[str]):
         # The browser backend is built through the same factory as the
         # desktop backends; the grounding / identity / deployment wiring and
         # the run are shared (see _build_and_run_replayer). ``--drift`` (a
@@ -1914,7 +1945,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                 "Nothing was executed."
             )
         with _attached_web_page(backend_cfg, url=url, workflow=workflow) as page:
-            report = run_on_page(page, entry_url=url)
+            report = run_on_page(page, entry_url=_attached_entry_url(page, url))
         return _finish_replay(
             run_dir, report, args, backend_kind=_report_backend_kind(backend_cfg.kind)
         )

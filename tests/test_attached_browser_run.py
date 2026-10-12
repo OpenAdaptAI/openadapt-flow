@@ -359,3 +359,124 @@ def test_attached_browser_keeps_css_pixel_frames() -> None:
     launched = build_backend(BackendConfig(), page=page)
     assert attached._screenshot_scale == "css"
     assert launched._screenshot_scale == "device"
+
+
+def test_attended_actions_refuse_a_signed_in_browser_they_would_not_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attended service launches its own visible browser. Given a config
+    that names the person's signed-in browser, it must refuse rather than act
+    in a new, signed-out session while the operator believes it is attached."""
+
+    from contextlib import nullcontext
+
+    from openadapt_flow.__main__ import _attended_service_from_args
+    from openadapt_flow.runtime.durable import attended_service
+
+    launched: list[str] = []
+
+    def executor(*_args, **_kwargs):
+        launched.append("browser")
+        return nullcontext(None)
+
+    monkeypatch.setattr(attended_service, "_deployment_executor", executor)
+    backend = {
+        "kind": "web",
+        "url": "http://127.0.0.1:9301/work",
+        "headed": True,
+        "browser_cdp_endpoint": "http://127.0.0.1:9222",
+    }
+    with pytest.raises(ValueError, match="signed-in browser"):
+        attended_service.AttendedActionService(
+            DeploymentConfig.model_validate({"backend": backend})
+        )
+    page_only = {
+        key: value for key, value in backend.items() if key != "browser_cdp_endpoint"
+    }
+    page_only["browser_page_url"] = "http://127.0.0.1:9301/work"
+    with pytest.raises(ValueError, match="signed-in browser"):
+        attended_service.AttendedActionService(
+            DeploymentConfig.model_validate({"backend": page_only})
+        )
+
+    config = tmp_path / "deployment.yaml"
+    config.write_text(
+        "backend:\n"
+        "  kind: web\n"
+        "  url: http://127.0.0.1:9301/work\n"
+        "  headed: true\n"
+        "  browser_cdp_endpoint: http://127.0.0.1:9222\n"
+    )
+    args = build_parser().parse_args(
+        ["console", "--attend", "--allow-actions", "--config", str(config)]
+    )
+    with pytest.raises(SystemExit, match="signed-in browser"):
+        with _attended_service_from_args(args):
+            pytest.fail("a refused attended service must not open")
+    assert launched == []
+
+
+@pytest.mark.parametrize(
+    ("tab_url", "claimed"),
+    [
+        ("http://127.0.0.1:9301/work", "http://127.0.0.1:9301/work"),
+        ("http://127.0.0.1:9301/work#top", "http://127.0.0.1:9301/work"),
+        ("http://127.0.0.1:9301/patients/42", None),
+        ("http://127.0.0.1:9301/work?patient=42", None),
+    ],
+)
+def test_attached_run_claims_only_an_entry_url_its_tab_shows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tab_url: str,
+    claimed: str | None,
+) -> None:
+    """An attached run requests no URL: it starts from whatever the signed-in
+    tab shows. Its report may name the configured entry URL only when the tab
+    is on it, so hosted validation never accepts a run as having started at
+    the attested URL when it started on another page."""
+
+    from contextlib import contextmanager
+
+    import openadapt_flow.__main__ as cli
+    from openadapt_flow.ir import ActionKind, Step, Workflow
+
+    bundle = tmp_path / "bundle"
+    Workflow(
+        name="attached-entry",
+        steps=[Step(id="settle", intent="Wait", action=ActionKind.WAIT)],
+    ).save(bundle)
+    page = SimpleNamespace(url=tab_url, on=lambda *_args: None)
+
+    @contextmanager
+    def attached(_backend_cfg, *, url, workflow=None):
+        yield page
+
+    class Captured(Exception):
+        pass
+
+    seen: dict[str, object] = {}
+
+    def run(_backend, **kwargs):
+        seen.update(kwargs)
+        raise Captured
+
+    monkeypatch.setattr(cli, "_attached_web_page", attached)
+    monkeypatch.setattr(cli, "_build_and_run_replayer", run)
+    args = build_parser().parse_args(
+        [
+            "replay",
+            str(bundle),
+            "--url",
+            "http://127.0.0.1:9301/work",
+            "--browser-cdp-endpoint",
+            "http://127.0.0.1:9222",
+            "--run-dir",
+            str(tmp_path / "run"),
+        ]
+    )
+    with pytest.raises(Captured):
+        args.func(args)
+
+    assert seen["execution_origin"] == "http://127.0.0.1:9301"
+    assert seen["execution_entry_url"] == claimed

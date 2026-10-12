@@ -113,9 +113,15 @@ and `backend.browser_page_url`. The run uses the recorder's attach contract: a
 loopback endpoint with an explicit port, exactly one open tab on the `--url`
 origin (or the exact `--browser-page-url`), and no launch, navigation, or
 close. It starts from the screen the tab shows, so open the task's first
-screen before each run; any other screen fails step 1's checks before input.
+screen before each run. Step 1's checks stop a run on a screen where they
+don't find step 1's target, but they don't check which page the tab is on. The
+run's report names the `--url` entry only when the tab is on that exact URL.
 The tab must show the application at the recorded viewport size, or the run
 refuses. No credential enters the program, the recording, or the config.
+
+Attended actions (`console --attend --allow-actions`) open their own visible
+browser. They refuse a config that names a signed-in browser instead of
+silently acting in a new, signed-out one.
 
 ## Safety and privacy contract
 

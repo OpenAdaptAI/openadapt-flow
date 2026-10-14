@@ -93,7 +93,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "94ae0b4008bbc2ea38d0a9629e2d778c001ac0710b6187b2163c542faefbd6dc"
+      "sha256": "1ed88dc558cbe4526d4aac47f7c1413a34780873e7ffb163cf68d2bd715c19cb"
     },
     {
       "path": ".github/workflows/citrix-workspace-standin.yml",
@@ -580,6 +580,10 @@
       "sha256": "23505c38b6acd963c9ff647ca753a10b61a8981e31b9032eef032e1ad63d850c"
     },
     {
+      "path": "benchmark/ui_readback/results.json",
+      "sha256": "7f7a1ef83fef7ecab6f3bb990e6cd257a12e0af0b49be83aca6a16bfd25a2060"
+    },
+    {
       "path": "benchmark/vision_hardening/corpus.json",
       "sha256": "c64e45ce996f6b13b2e1a3f234d2931e10b5090163215a1185c639a019820e35"
     },
@@ -617,7 +621,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "8450f326dbc965e53061f0e2b7011b7c3521517615a74809f0ee08d8a9a61bc9"
+      "sha256": "c5bbe02ecfcb530d0cfd80a35ce729fbcb738175bc5e6769376be55bf58ee484"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -657,7 +661,7 @@
     },
     {
       "path": "docs/deployment.example.yaml",
-      "sha256": "f6dac74406cfecdffae86d40be9e96737466132a27ebbaffb53c340184c321e5"
+      "sha256": "ac89697f29b492c5c4c01fb713b301dbbbcf1e9b450d4da0a52db245774699e4"
     },
     {
       "path": "docs/program-workbench.png",
@@ -1849,7 +1853,7 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "36785c46f94786ad878a9c4eb3953f6342de9e7f08d2b9b57ca2cc7dd00eb6b2"
+      "sha256": "f85210c1056fbd5b1d9d6b4994a32f26e898dfc8db03dcf9c77922b7bb79aa9e"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

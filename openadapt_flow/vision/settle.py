@@ -108,9 +108,12 @@ def _poll_settled(
         streak = seed.stable_frames + 1
     while streak < stable_frames and time.monotonic() < deadline:
         time.sleep(interval_s)
+        previous_png = png
         png = backend.screenshot()
         captured_at = time.monotonic()
-        current = phash_png(png)
+        # Byte-identical PNGs have identical perceptual hashes; skip the
+        # decode + DCT for the common unchanged frame.
+        current = last_hash if png == previous_png else phash_png(png)
         if phash_distance(current, last_hash) == 0:
             streak += 1
         else:

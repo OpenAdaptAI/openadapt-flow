@@ -70,6 +70,12 @@ def _icon_button(cls: str, path: str, action: str) -> str:
     )
 
 
+def _fab(side: str, button: str) -> str:
+    """openIMIS wraps each floating button as ``div > div > span > button``."""
+
+    return f'<div class="fab {side}"><div><span>{button}</span></div></div>'
+
+
 def claims_page(
     *,
     save_at: str = "fab-right",
@@ -95,18 +101,13 @@ def claims_page(
         else ""
     )
     if replace_icon:
-        fabs = (
-            f'<div class="fab right">{_icon_button("savefab", TRASH_ICON, "discard")}'
-            "</div>"
-        )
+        fabs = _fab("right", _icon_button("savefab", TRASH_ICON, "discard"))
     elif swap_icons:
-        fabs = (
-            f'<div class="fab right">{_icon_button("savefab", TRASH_ICON, "discard")}'
-            f'</div><div class="fab left">{save}</div>'
+        fabs = _fab("right", _icon_button("savefab", TRASH_ICON, "discard")) + _fab(
+            "left", save
         )
     elif save_at in ("fab-right", "fab-left"):
-        side = save_at.split("-")[1]
-        fabs = f'<div class="fab {side}">{save}</div>'
+        fabs = _fab(save_at.split("-")[1], save)
     else:
         fabs = ""
     return f"""<!doctype html><html><head><meta charset="utf-8">{STYLE}</head>
@@ -272,6 +273,8 @@ def test_floating_icon_save_is_bound_to_the_form_and_clicked(
     assert binding.form_owner == "fields_only"
     assert binding.submit_role == "detached"
     assert binding.scope_kind == "container"
+    # The same path a live probe observed on openIMIS 25.10.
+    assert binding.scope_path == "div>div>span>button"
     assert binding.filled_fields == 3
     assert binding.fixed_position is True
     assert (binding.vertical, binding.horizontal) == ("below", "right")

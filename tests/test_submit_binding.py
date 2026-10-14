@@ -38,7 +38,12 @@ ICON = "s0 0 24 24|pM17 3H5c-1.11 0-2 .9-2 2v14"
 
 
 def _raw(**changes: Any) -> dict[str, Any]:
-    """A page observation of openIMIS's floating Save after three fields."""
+    """A page observation of openIMIS's floating Save after three fields.
+
+    The structure is the one a live probe observed on openIMIS 25.10's claim
+    form (``scripts/openimis_submit_binding_probe.py``): the Save is a fixed
+    ``<button>`` inside ``div > div > span``, a sibling of the ``<form>``.
+    """
 
     raw: dict[str, Any] = {
         "v": 1,
@@ -52,7 +57,7 @@ def _raw(**changes: Any) -> dict[str, Any]:
         "form_owner": "fields_only",
         "submit_role": "detached",
         "scope_kind": "container",
-        "scope_path": "div>button",
+        "scope_path": "div>div>span>button",
         "fields_in_scope": True,
         "field_local": False,
         "order": "after",
@@ -124,7 +129,7 @@ def test_floating_save_after_the_fields_is_bound_with_its_evidence() -> None:
     assert binding.form_owner == "fields_only"
     assert binding.submit_role == "detached"
     assert binding.scope_kind == "container"
-    assert binding.scope_path == "div>button"
+    assert binding.scope_path == "div>div>span>button"
     assert binding.filled_fields == 3
     assert (binding.order, binding.vertical, binding.horizontal) == (
         "after",

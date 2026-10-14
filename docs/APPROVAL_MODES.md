@@ -5,14 +5,107 @@ workflow saves it. Flow has three modes:
 
 | Mode | What happens before each consequential save |
 | --- | --- |
-| `each_item` | The item stops before the save and waits for a person. This is the mode for a missing or unknown value. |
+| `each_item` | The run waits before the save until a person approves it in Desktop's Run it, then saves exactly what the person saw. This is the mode for a missing or unknown value. |
 | `problems_only` | "Only ask a person about problems." The save proceeds without a person only when every check below passes. Any other result goes to a person. |
 | `not_gated` | No per-item pause, as before approval modes existed. The run report records `not_gated` so the absence of a pause is visible. |
 
-This page describes the engine part in `openadapt_flow/approval_mode/`. Cloud
-switch records, the Desktop list queue, spot checks and the approve-and-save
-path aren't part of Flow yet, so a customer can't turn `problems_only` on
-today. The requirements report (below) says so for every workflow.
+This page describes the engine part in `openadapt_flow/approval_mode/`, the
+commands Desktop calls, and how readiness drills run from Desktop. Cloud
+switch records, the Desktop list queue and spot checks aren't part of Flow
+yet, so a customer can't turn `problems_only` on today. The requirements
+report (below) says so for every workflow.
+
+## Which mode a run uses
+
+| Command | Mode |
+| --- | --- |
+| `openadapt-flow run` | `--approval-mode`, else `runtime.approval_mode` in the deployment file. Under the Standard and Regulated profiles a missing value means `each_item`. Demo and runs without a profile have no gate unless a mode is named, so Desktop's Run it passes `--approval-mode each_item` itself. |
+| `openadapt-flow qualify run-case` | The same flags. It always runs under Standard, so the default is `each_item`: the practice item waits for a person. A drill never asks (see below). |
+| `openadapt-flow resume` | The mode the run was admitted with. Asking for another mode is refused. |
+| Cloud-dispatched runs (`runner/commands.py`, the connector) | `not_gated`, passed explicitly, so the report records it. |
+
+The resolved mode is bound into the run's `GovernedRunAuthorization`. A
+run whose gate doesn't match its authorization is refused before any step.
+The mode isn't part of Cloud's dispatch binding digest: the runner binds it.
+
+## Per-item approval (`each_item`)
+
+Before a save step resolves its target, the run writes an approval request
+in its run directory and waits:
+
+- `item-approval/request-<id>.json`: the run, the save step, the bundle and
+  input digests, a digest of the form's field state, and when it expires
+  (at most 4 hours).
+- `item-approval/<id>.png`: the filled form the person is shown.
+
+Desktop reads the requests and answers one of them:
+
+```bash
+openadapt-flow item-approval show RUN_DIR            # JSON; waiting requests
+openadapt-flow item-approval approve RUN_DIR \
+  --request-id ID --request-sha256 SHA256 \
+  --decided-by human --route desktop_run_it \
+  --approver-id CLOUD_USER_ID --auth-method cloud_aal2   # or --unauthenticated
+openadapt-flow item-approval decline RUN_DIR ... --reason wrong_values
+```
+
+- An answer names the request digest the person saw. Only
+  `--decided-by human` from the `desktop_run_it` route is accepted. A
+  decline carries one closed reason: `wrong_values`, `wrong_record` or
+  `screen_problem`.
+- Answers are created once and never replaced. The run checks every answer
+  itself, so an answer file written around the command is held to the same
+  rules. An approval is used for exactly one save; a loop that reaches the
+  same save again asks again.
+- After an approval the step takes a fresh frame and resolves its target
+  and right-record check again. At the last point before the input, the run
+  reads the form again; a field that changed while waiting stops the item
+  before the save. In a browser the run reads the page's form controls;
+  elsewhere it reads the words on the screen.
+- A decline stops the item before that save. Earlier saves of the same
+  item stay as they are.
+- `--approval-wait SECONDS` (default 900, at most 14,400) sets how long the
+  run waits. With no answer by then, it stops before the save. In a durable
+  run that leaves an `item_approval` pause: an approval given later through
+  `item-approval approve` prints `"resume_required": true`, and
+  `openadapt-flow resume RUN_DIR` then makes that save. Continue, Skip and
+  the generic `approve` command can't answer this pause.
+
+The report's `approval` block lists every answer as codes and digests: no
+values, no screenshot and no form state. An item is `approved` only when a
+person approved every save that was delivered and the engine's own outcome
+is `VERIFIED`. It never counts as saved without a person.
+
+## Readiness drills from Desktop
+
+Check it's drills (wrong record, two matches, record changed mid-task, save
+didn't land, weak record check) are fault qualification cases. A fault case
+needs a fault driver: something outside the detector that changes the real
+input at one gate, so the engine's ordinary check must refuse it. A local
+campaign lets Desktop run them without a separately configured one:
+
+1. `openadapt-flow qualify drills BUNDLE --json` gives the project's five
+   drills the practice case's exact inputs and action scope, with the
+   practice case's first save as the fault step (`--from-case`,
+   `--save-step` choose others), and makes the project trust this
+   computer's drill key. The private key stays in
+   `$OPENADAPT_HOME/qualification-drills/` (default `~/.openadapt`). This
+   changes the project, so run it before recording any case result.
+2. `openadapt-flow qualify run-case BUNDLE --case-id DRILL ...` runs a
+   drill with that driver (`--fault-driver NAME` loads a configured driver
+   instead). The signed receipt and the mutation record are kept in
+   `RUN_DIR/qualification-fault/` as the case result's `fault_receipt` and
+   `fault_mutation` evidence; `status.json` says whether the drill was
+   staged.
+
+What a drill proves doesn't change. The driver only changes the real page,
+or the verifier it is handed, and never returns a verdict. A drill passes
+only when the engine's own detector refused the exact changed input before
+any input was delivered, with the stage and code its kind requires. At a
+drill's fault step nothing is ever delivered, in any mode and on the screen
+or the API path, and nobody is asked to approve it: a drill whose fault
+wasn't staged or wasn't caught saves nothing and doesn't pass. The driver
+holds the case's values in memory only; its records hold counts and digests.
 
 ## How a caller uses it
 
@@ -83,9 +176,9 @@ through, and the engine's own identity check still applies. In
    value was already there, or a record that already existed.
 
 Any failure stops before the save. P2, P3 and P5 failures read "stopped
-before saving"; the others wait for a person to approve the item. In
-`each_item` every save stops this way. In a gated mode, a run in which any
-input would come from the recording is refused before any step.
+before saving"; the others wait for a person to approve the item, as in
+`each_item`. In a gated mode, a run in which any input would come from the
+recording is refused before any step.
 
 ## After the run
 
@@ -126,7 +219,9 @@ returns E1 to E8 in order with a closed reason for each unmet one. It reads
 decisions people record, such as the readiness sign-off and the runner
 setup attestations, and never makes them. Two requirements can't be met by
 any workflow yet: E2 needs a field-delta check for updates, and E4 needs
-three drills that don't exist yet.
+three more drills (typed into the wrong field, another field changed, and a
+record read at the first gate) that don't exist yet. The five existing
+drills run from Desktop, as described above.
 
 ## What the record check doesn't see
 
@@ -143,9 +238,11 @@ strict expected-failure tests for them.
 
 ## Not built yet
 
-- The approve-and-save path for an item that waits for approval.
-- Binding the mode into `GovernedRunAuthorization` and the deployment file.
 - The field-delta effect check, the three new drills and the `customer_stop`
   case kind.
 - A Cloud status client, switch records, spot checks, incidents and the
   Desktop list queue.
+- Desktop's screens for the approval request, and openadapt-agent passing
+  `not_gated` explicitly. Until the agent does, an agent run under the
+  Standard or Regulated profile waits for a person and then stops before
+  saving.

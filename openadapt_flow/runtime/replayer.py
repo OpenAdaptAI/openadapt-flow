@@ -9672,6 +9672,19 @@ class Replayer:
         if (
             refusal is None
             and not interstitial
+            and self._is_qualification_fault_step(step)
+        ):
+            # Every path (screen or API, any approval mode, or none): a drill
+            # whose detector didn't refuse its changed input still saves
+            # nothing. The drill then hasn't passed: its contract requires the
+            # detector's own refusal, never this one.
+            refusal = (
+                "the bound qualification fault case did not produce its "
+                "required detector refusal; refusing to cross the input boundary"
+            )
+        if (
+            refusal is None
+            and not interstitial
             and self.approval_gate is not None
             and self._step_is_consequential(step, workflow)
         ):
@@ -9815,6 +9828,23 @@ class Replayer:
         except Exception:  # noqa: BLE001 - unreadable is never "unchanged"
             return None
 
+    def _is_qualification_fault_step(self, step: Step) -> bool:
+        """Whether ``step`` is the fault step of the fault case this run is.
+
+        A readiness drill (a fault qualification case) passes only when the
+        engine's own detector refuses its changed input before delivery, so
+        nothing is ever delivered at its fault step.
+        """
+
+        authorization = self.governed_authorization
+        return bool(
+            authorization is not None
+            and authorization.qualification_case_kind not in {None, "representative"}
+            and authorization.qualification_fault_step_id_sha256 is not None
+            and authorization.qualification_fault_step_id_sha256
+            == sha256_bytes(step.id.encode("utf-8"))
+        )
+
     def _approval_step_refusal(
         self,
         workflow: Workflow,
@@ -9827,12 +9857,7 @@ class Replayer:
         gate = self.approval_gate
         assert gate is not None
         authorization = self.governed_authorization
-        drill_fault_step = bool(
-            authorization is not None
-            and authorization.qualification_case_kind not in {None, "representative"}
-            and authorization.qualification_fault_step_id_sha256
-            == sha256_bytes(step.id.encode("utf-8"))
-        )
+        drill_fault_step = self._is_qualification_fault_step(step)
 
         def frame() -> Optional[bytes]:
             try:

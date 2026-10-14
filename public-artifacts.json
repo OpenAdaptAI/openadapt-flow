@@ -621,7 +621,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "c5bbe02ecfcb530d0cfd80a35ce729fbcb738175bc5e6769376be55bf58ee484"
+      "sha256": "18bbd20323ebc03dbd324281abff0341665eb922f78683235872055b56a02124"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -1853,7 +1853,23 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "f85210c1056fbd5b1d9d6b4994a32f26e898dfc8db03dcf9c77922b7bb79aa9e"
+      "sha256": "3180937cfabea39634fabb5afc51f0e8f003a4042f076be94d65e495de4ce6c7"
+    },
+    {
+      "path": "examples/claude-code-demo/demo.gif",
+      "sha256": "b4dcdf941ec450d54c287bd852993341e47bd9f99e485da69a5e4905df1f1e13"
+    },
+    {
+      "path": "examples/claude-code-demo/effect_contract.yaml",
+      "sha256": "d3272056e1d6bac6f78e57aa5c12e63c6eba055ab79196ad5da46dce88879d31"
+    },
+    {
+      "path": "examples/claude-code-demo/halt.gif",
+      "sha256": "91139d82dcff23a314b3097b9830223d2f01587bc2d8cc07cf24ab6ceed64276"
+    },
+    {
+      "path": "examples/claude-code-demo/policy.yaml",
+      "sha256": "831387f3481c7ea2d064b713361cc7650e46d30caf7ab54f72608e011676973b"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

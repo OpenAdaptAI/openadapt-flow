@@ -30,6 +30,7 @@ from openadapt_flow.execution_profiles import ExecutionProfile
 from openadapt_flow.ir import ActionKind, Step, StepResult, Workflow
 from openadapt_flow.run_gate import build_runtime_authorization
 from openadapt_flow.runtime.durable import resume
+from openadapt_flow.runtime.durable.approval import ApprovalRequired
 from openadapt_flow.runtime.durable.checkpoint import CheckpointStore
 from openadapt_flow.runtime.effects import Effect, EffectKind, ValueExpr
 from tests.test_approval_mode_replayer import RecordSystem, _create_workflow
@@ -288,6 +289,77 @@ def test_no_answer_in_time_stops_before_the_save_and_a_later_approval_resumes(
     ]
     assert item.store.status(request) == "used"
     assert len(item.store.requests()) == 1
+
+
+def test_an_approval_that_raced_the_timeout_is_carried_to_the_pause_by_resume(
+    tmp_path, monkeypatch
+):
+    """The person approved while the run was giving up waiting.
+
+    ``item-approval approve`` found no pause yet, so it couldn't answer it
+    (``resume_required`` false). ``resume`` carries that approval to the
+    pause itself, then makes the save exactly once.
+    """
+
+    from openadapt_flow.__main__ import _carry_item_approval_to_pause
+
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    item = Item(tmp_path, person=Person([None]), wait_s=5)
+    item.run()
+    assert item.pending().status == "pending"
+    request = item.store.requests()[0]
+    answer = make_answer(request, **APPROVE)
+    item.store.write_answer(answer)
+
+    store = CheckpointStore(item.run_dir, key=_KEY)
+    carried = _carry_item_approval_to_pause(item.run_dir, store, store.read_pending())
+    assert carried.status == "approved"
+
+    resumed_backend = FormBackend()
+    item.person = Person([])
+    item.person.store = ItemApprovalStore(item.run_dir)
+    resumed = resume(item.run_dir, item.replayer(backend=resumed_backend), key=_KEY)
+    assert _save_delivered(resumed_backend)
+    assert resumed.transaction_outcome == "VERIFIED"
+    assert item.store.status(request) == "used"
+
+
+@pytest.mark.parametrize("answer_kind", ["none", "decline", "not_a_person"])
+def test_resume_carries_only_a_persons_approval(tmp_path, monkeypatch, answer_kind):
+    from openadapt_flow.__main__ import _carry_item_approval_to_pause
+    from openadapt_flow.approval_mode.item_approval import ItemApprovalAnswer
+
+    monkeypatch.setenv("OPENADAPT_BUNDLE_KEY", _KEY)
+    item = Item(tmp_path, person=Person([None]), wait_s=5)
+    item.run()
+    request = item.store.requests()[0]
+    if answer_kind == "decline":
+        item.store.write_answer(
+            make_answer(
+                request,
+                decision="decline",
+                decided_by="human",
+                route="desktop_run_it",
+                approver_id=APPROVER,
+                auth_method="cloud_aal2",
+                decline_reason="wrong_values",
+            )
+        )
+    elif answer_kind == "not_a_person":
+        # Written around the command, so nothing checked it on the way in.
+        good = make_answer(request, **APPROVE)
+        item.store.write_answer(
+            ItemApprovalAnswer.model_validate(
+                {**good.model_dump(mode="json"), "decided_by": "automation"}
+            )
+        )
+    store = CheckpointStore(item.run_dir, key=_KEY)
+    carried = _carry_item_approval_to_pause(item.run_dir, store, store.read_pending())
+    assert carried.status == "pending"
+    backend = FormBackend()
+    with pytest.raises(ApprovalRequired):
+        resume(item.run_dir, item.replayer(backend=backend), key=_KEY)
+    assert not _save_delivered(backend)
 
 
 # -- what the run refuses on its own --------------------------------------------------------

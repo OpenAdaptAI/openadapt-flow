@@ -366,6 +366,9 @@ def check_it(tmp_path_factory: pytest.TempPathFactory):
             inputs=inputs,
             params=params,
             runner_private=runner_private,
+            base_url=base_url,
+            entry_url=entry_url,
+            env=env,
         )
     finally:
         observer_patch.undo()
@@ -510,3 +513,107 @@ def test_flow_accepts_every_case_result_desktop_records(check_it):
         results.append(sign_case_result(result, private_key=check_it.runner_private))
     record_case_results(workflow, results, evidence_root=root)
     assert all(len(case.results) == 1 for case in workflow.qualification.cases)
+
+
+def test_run_it_saves_once_after_approval_and_never_saves_a_form_nobody_sees(
+    check_it,
+):
+    """Run it: ``run --approval-mode each_item``, through the CLI.
+
+    1. Nobody answers in time: the run stops before the save, with nothing
+       written, and leaves a pause.
+    2. Desktop approves late. ``item-approval approve`` says a resume is
+       required. This run launched its own browser, which closed with it, so
+       ``resume`` opens a new one where the filled form the person approved
+       isn't on screen: it can't find the save and writes nothing. The
+       approval is then spent, and a second resume can't use it.
+    3. Desktop runs the item again and the person answers in time: it saves
+       exactly once.
+
+    The run has no profile (a Standard ``run`` needs a signed production
+    admission this test doesn't have), so its report carries no transaction
+    outcome: MockMed's record store is the check here.
+    """
+
+    base_url = check_it.base_url
+    demo._http_json(f"{base_url}api/reset", method="POST", body={})
+    params_file = check_it.work / "run-it-params.json"
+    params_file.write_text(json.dumps(check_it.params), encoding="utf-8")
+    params_file.chmod(0o600)
+    target = [
+        "--backend",
+        "web",
+        "--url",
+        check_it.entry_url,
+        "--effects-kind",
+        "rest",
+        "--effects-base-url",
+        base_url,
+        "--params-file",
+        str(params_file),
+    ]
+
+    def run(run_dir: Path, wait_s: str) -> int:
+        return main.main(
+            [
+                "run",
+                str(check_it.bundle),
+                "--run-dir",
+                str(run_dir),
+                "--durable",
+                "--approval-mode",
+                "each_item",
+                "--approval-wait",
+                wait_s,
+                *target,
+            ]
+        )
+
+    # 1. Nobody answers in time.
+    late = check_it.work / "runs" / "run-it-late"
+    assert run(late, "1") != 0
+    stopped = RunReport.model_validate_json((late / "report.json").read_text())
+    assert stopped.approval.decision.value == "approval_required"
+    (save,) = [result for result in stopped.results if not result.ok]
+    assert "waiting for a person to approve" in (save.error or "")
+    assert save.delivery_attempted is not True
+    assert _records(base_url) == []
+
+    # 2. A late approval, then a resume in a new browser.
+    shown = _flow("item-approval", "show", str(late), env=check_it.env)
+    (request,) = json.loads(shown.stdout)["requests"]
+    assert request["status"] == "waiting"
+    approved = _flow(
+        "item-approval",
+        "approve",
+        str(late),
+        "--request-id",
+        request["request_id"],
+        "--request-sha256",
+        request["request_sha256"],
+        "--decided-by",
+        "human",
+        "--route",
+        "desktop_run_it",
+        "--unauthenticated",
+        env=check_it.env,
+    )
+    assert approved.returncode == 0, approved.stdout + approved.stderr
+    assert json.loads(approved.stdout)["resume_required"] is True
+    assert main.main(["resume", str(late), *target]) != 0
+    assert _records(base_url) == []
+    assert main.main(["resume", str(late), *target]) != 0
+    assert _records(base_url) == []
+
+    # 3. The item again, answered in time.
+    again = check_it.work / "runs" / "run-it-again"
+    with DesktopRunIt(again, check_it.env) as person:
+        assert run(again, "120") == 0
+    assert person.errors == []
+    assert len(person.answers) == 1
+    saved = RunReport.model_validate_json((again / "report.json").read_text())
+    (approval,) = saved.approval.approvals
+    assert approval.decision == "approved"
+    assert saved.approval.saves_without_person == 0
+    records = _records(base_url)
+    assert len(records) == 1 and records[0]["note"] == TUTORIAL_NOTE

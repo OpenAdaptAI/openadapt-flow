@@ -2676,6 +2676,36 @@ def _resume_approval_mode(args: argparse.Namespace, authorization):
     return None
 
 
+def _carry_item_approval_to_pause(run_dir: Path, store, pending):
+    """Answer a waiting ``item_approval`` pause from an unused approval, if any.
+
+    Returns the pause as it now stands (unchanged when there's no approval).
+    """
+    from openadapt_flow.approval_mode.item_approval import (
+        ItemApprovalRefused,
+        ItemApprovalStore,
+    )
+
+    try:
+        manifest = store.read_manifest()
+        found = (
+            ItemApprovalStore(run_dir).find_unused_approval(
+                run_id=manifest.run_id,
+                step_id=pending.step_id,
+                step_index=pending.step_index,
+            )
+            if manifest is not None
+            else None
+        )
+    except (OSError, ValueError, ItemApprovalRefused):
+        found = None
+    if found is None:
+        return pending
+    request, answer = found
+    _answer_durable_item_pause(run_dir, request, answer)
+    return store.read_pending() or pending
+
+
 def _resume_approval_gate(args: argparse.Namespace, mode, run_dir: Path):
     if mode is None:
         return None
@@ -2715,9 +2745,17 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "Nothing was executed."
         )
         return 3
+    if pending.category == "item_approval" and pending.status == "pending":
+        # The person may have approved while the run was giving up waiting,
+        # before this pause existed for `item-approval approve` to answer.
+        # Carry that approval to the pause now; the resumed run still checks
+        # the answer itself and uses it once.
+        pending = _carry_item_approval_to_pause(run_dir, store, pending)
     if args.require_approval and pending.status != "approved":
+        from openadapt_flow.cli_hints import command
+
         approve_command = (
-            "openadapt-flow item-approval approve"
+            command("item-approval approve")
             if pending.category == "item_approval"
             else "openadapt flow approve"
         )
@@ -2746,9 +2784,11 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             )
             is None
         ):
+            from openadapt_flow.cli_hints import command
+
             print(
                 "Resume REFUSED: this item waits for a person to approve the "
-                "save in Desktop's Run it (openadapt-flow item-approval approve). "
+                f"save in Desktop's Run it ({command('item-approval approve')}). "
                 "Nothing was executed."
             )
             return 3
@@ -3078,9 +3118,11 @@ def _cmd_approve(args: argparse.Namespace) -> int:
         print("This durable pause was rejected and cannot be approved or resumed.")
         return 1
     if pending.category in {"item_approval", "item_declined"}:
+        from openadapt_flow.cli_hints import command
+
         print(
             "This item waits for a person's approval before a save. Only "
-            "Desktop's Run it can answer it (openadapt-flow item-approval "
+            f"Desktop's Run it can answer it ({command('item-approval')} "
             "approve|decline); a generic approval can't save an item."
         )
         return 1
@@ -3966,9 +4008,11 @@ def _qualification_drill_driver(args: argparse.Namespace, workflow, params):
     except LocalDrillError as exc:
         raise ValueError(str(exc)) from exc
     if key is None or not project_trusts_local_key(workflow, key):
+        from openadapt_flow.cli_hints import command
+
         raise ValueError(
-            "readiness drills need a fault driver: run `openadapt-flow qualify "
-            "drills BUNDLE` on this computer to create the local drill campaign, "
+            f"readiness drills need a fault driver: run `{command('qualify drills')} "
+            "BUNDLE` on this computer to create the local drill campaign, "
             "or pass --fault-driver for a configured campaign"
         )
     return LocalDrillDriver(key, workflow=workflow, params=params)
@@ -4046,9 +4090,11 @@ def _cmd_qualify_drills(args: argparse.Namespace) -> int:
             print(f"  {drill.case_id}: {drill.name} ({labels[drill.state]})")
         for kind, reason in campaign.skipped:
             print(f"  {kind}: not applicable ({reason})")
+        from openadapt_flow.cli_hints import command
+
         print(
             "Each drill uses the practice case's inputs. Run each with "
-            "`openadapt-flow qualify run-case`."
+            f"`{command('qualify run-case')}`."
         )
     return 0
 

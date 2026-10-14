@@ -68,8 +68,15 @@ openadapt-flow item-approval decline RUN_DIR ... --reason wrong_values
   run waits. With no answer by then, it stops before the save. In a durable
   run that leaves an `item_approval` pause: an approval given later through
   `item-approval approve` prints `"resume_required": true`, and
-  `openadapt-flow resume RUN_DIR` then makes that save. Continue, Skip and
-  the generic `approve` command can't answer this pause.
+  `openadapt-flow resume RUN_DIR` can then make that save. `resume` also
+  picks up an approval given while the run was giving up waiting. Continue,
+  Skip and the generic `approve` command can't answer this pause.
+- A resume saves only the form the person approved, on screen. When the run
+  launched its own browser, that browser closed with the run, so a resume
+  opens a new one without the filled form: it can't find the save, writes
+  nothing, and the approval is spent. Start the item again instead. A resume
+  in a signed-in browser the run attached to, where the form is still open,
+  checks the form against the approved request before the save.
 
 The report's `approval` block lists every answer as codes and digests: no
 values, no screenshot and no form state. An item is `approved` only when a

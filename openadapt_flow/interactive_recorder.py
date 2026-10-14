@@ -2165,6 +2165,13 @@ _INIT_JS = r"""
   });
 })();
 """
+# Static, session-independent parts of the closure: the submit-binding
+# observer shared with the Playwright backend (openadapt_flow.submit_binding).
+_INIT_JS = (
+    _INIT_JS.replace("__SUBMIT_ACTIONABLE__", json.dumps(GUARDED_ACTIONABLE_SELECTOR))
+    .replace("__SUBMIT_FIELD__", json.dumps(SUBMIT_BINDING_FIELD_SELECTOR))
+    .replace("__OBSERVE_SUBMIT_BINDING__", OBSERVE_SUBMIT_BINDING_JS)
+)
 
 
 class InteractiveRecorder:
@@ -2363,12 +2370,6 @@ class InteractiveRecorder:
                     json.dumps(sorted(self._identifier_fields)),
                 )
                 .replace("__SPECIAL_KEYS__", json.dumps(list(_SPECIAL_KEYS)))
-                .replace(
-                    "__SUBMIT_ACTIONABLE__",
-                    json.dumps(GUARDED_ACTIONABLE_SELECTOR),
-                )
-                .replace("__SUBMIT_FIELD__", json.dumps(SUBMIT_BINDING_FIELD_SELECTOR))
-                .replace("__OBSERVE_SUBMIT_BINDING__", OBSERVE_SUBMIT_BINDING_JS)
             )
             self.page.add_init_script(init_js)
             if self._owns_browser:

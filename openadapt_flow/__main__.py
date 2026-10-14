@@ -2611,6 +2611,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 campaign_id=qualification_case["campaign_id"],
                 run_id=qualification_case["run_id"],
                 campaign_permit_binding=campaign_permit_binding,
+                fault_driver=qualification_case.get("fault_driver"),
             )
         except ValueError:
             print(
@@ -2618,6 +2619,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "case. Nothing was executed."
             )
             return 2
+        args._qualification_fault_driver = qualification_case.get("fault_driver")
         args._governed_run_authorization = authorization
         args._delivery_authority_kind = "customer_local"
         args._remote_delivery_run_id = None
@@ -3885,10 +3887,6 @@ def _cmd_qualify_run_case(args: argparse.Namespace) -> int:
         )
         if case is None:
             raise ValueError("qualification case is not declared by this project")
-        if case.kind.value != "representative":
-            raise ValueError(
-                "fault qualification cases require the configured fault-driver campaign"
-            )
         if not case.action_targets or case.runtime_input_sha256 is None:
             raise ValueError(
                 "qualification case has no exact approved action/input scope"
@@ -3899,6 +3897,9 @@ def _cmd_qualify_run_case(args: argparse.Namespace) -> int:
         input_sha256 = runtime_inputs_digest(workflow, params, worklists)
         if input_sha256 != case.runtime_input_sha256:
             raise ValueError("qualification case inputs do not match the approved case")
+        fault_driver = None
+        if case.kind.value != "representative":
+            fault_driver = _qualification_drill_driver(args, workflow, params)
         campaign_id_sha256 = qualification_campaign_id_sha256(args.campaign_id)
         run_id_sha256 = qualification_run_id_sha256(args.run_id)
     except (OSError, ValueError) as exc:
@@ -3915,6 +3916,7 @@ def _cmd_qualify_run_case(args: argparse.Namespace) -> int:
         "campaign_id_sha256": campaign_id_sha256,
         "run_id": args.run_id,
         "run_id_sha256": run_id_sha256,
+        "fault_driver": fault_driver,
     }
     args.profile = "standard"
     args.policy = None
@@ -3931,7 +3933,124 @@ def _cmd_qualify_run_case(args: argparse.Namespace) -> int:
     args.dry_run = bool(getattr(args, "dry_run", False))
     if args.dry_run:
         return _cmd_run(args)
-    return _cmd_run(args)
+    exit_code = _cmd_run(args)
+    if fault_driver is not None:
+        _retain_drill_evidence(Path(args.run_dir), fault_driver)
+    return exit_code
+
+
+def _qualification_drill_driver(args: argparse.Namespace, workflow, params):
+    """The fault driver for one readiness drill (a fault qualification case).
+
+    ``--fault-driver NAME`` loads a configured campaign's driver from the
+    ``openadapt_flow.qualification_fault_drivers`` entry point. Otherwise the
+    drill uses this computer's local campaign, which the project must already
+    trust (``openadapt-flow qualify drills``). Raises ``ValueError``.
+    """
+    name = getattr(args, "fault_driver", None)
+    if name:
+        from openadapt_flow.qualification_faults import (
+            load_qualification_fault_driver,
+        )
+
+        return load_qualification_fault_driver(name)
+    from openadapt_flow.qualification_drills import (
+        LocalDrillDriver,
+        LocalDrillError,
+        local_drill_key,
+        project_trusts_local_key,
+    )
+
+    try:
+        key = local_drill_key(create=False)
+    except LocalDrillError as exc:
+        raise ValueError(str(exc)) from exc
+    if key is None or not project_trusts_local_key(workflow, key):
+        raise ValueError(
+            "readiness drills need a fault driver: run `openadapt-flow qualify "
+            "drills BUNDLE` on this computer to create the local drill campaign, "
+            "or pass --fault-driver for a configured campaign"
+        )
+    return LocalDrillDriver(key, workflow=workflow, params=params)
+
+
+def _retain_drill_evidence(run_dir: Path, driver) -> None:
+    """Keep the drill's receipt and mutation record next to its report."""
+    from openadapt_flow.ir import RunReport
+    from openadapt_flow.qualification_drills import write_drill_evidence
+
+    try:
+        report = RunReport.model_validate_json(
+            (run_dir / "report.json").read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        report = None
+    try:
+        summary = write_drill_evidence(run_dir, driver, report)
+    except OSError:
+        print("The drill's fault receipt could not be retained.")
+        return
+    if summary.get("staged"):
+        print(
+            "Drill fault receipt retained: "
+            f"{run_dir / 'qualification-fault' / 'receipt.json'}"
+        )
+    else:
+        declined = summary.get("declined") or "not_staged"
+        print(
+            f"This drill couldn't be staged here ({declined}), so it hasn't "
+            "passed. Nothing was saved."
+        )
+
+
+def _cmd_qualify_drills(args: argparse.Namespace) -> int:
+    """Create or refresh this computer's local readiness-drill campaign."""
+    import json
+
+    from openadapt_flow.qualification import QualificationError, save_qualified_workflow
+    from openadapt_flow.qualification_drills import (
+        LocalDrillError,
+        local_drill_key,
+        prepare_local_drill_campaign,
+    )
+
+    try:
+        workflow = _qualification_workflow(args)
+        if workflow.manifest is None or workflow.qualification is None:
+            raise LocalDrillError("drills need a sealed bundle with Check it set up")
+        key = local_drill_key(create=True)
+        assert key is not None
+        campaign = prepare_local_drill_campaign(
+            workflow,
+            key=key,
+            from_case_id=args.from_case,
+            save_step_id=args.save_step,
+        )
+        save_qualified_workflow(workflow, args.bundle)
+    except (LocalDrillError, QualificationError, OSError, ValueError) as exc:
+        print(f"qualify drills REFUSED: {exc}. Nothing was changed.")
+        return 2
+    if args.json:
+        print(json.dumps(campaign.as_json(), indent=2, sort_keys=True))
+    else:
+        print(
+            f"Readiness drills for step {campaign.save_step_id!r} of practice case "
+            f"{campaign.from_case_id!r}:"
+        )
+        labels = {
+            "added": "added",
+            "scoped": "now runs the practice case's inputs",
+            "kept": "already set up, unchanged",
+        }
+        for drill in campaign.drills:
+            print(f"  {drill.case_id}: {drill.name} ({labels[drill.state]})")
+        for kind, reason in campaign.skipped:
+            print(f"  {kind}: not applicable ({reason})")
+        print(
+            "Each drill uses the practice case's inputs. Run each with "
+            "`openadapt-flow qualify run-case`."
+        )
+    return 0
 
 
 def _cmd_qualify(args: argparse.Namespace) -> int:
@@ -3977,6 +4096,8 @@ def _cmd_qualify(args: argparse.Namespace) -> int:
     verb = args.qualify_cmd
     if verb == "run-case":
         return _cmd_qualify_run_case(args)
+    if verb == "drills":
+        return _cmd_qualify_drills(args)
     if verb == "schema":
         print(json.dumps(project_schema(), indent=2, sort_keys=True))
         return 0
@@ -7541,12 +7662,14 @@ def build_parser() -> argparse.ArgumentParser:
     q = qsub.add_parser(
         "run-case",
         help=(
-            "Run one current representative qualification case with Flow-owned "
-            "Standard authorization"
+            "Run one current qualification case (the practice item or a "
+            "readiness drill) with Flow-owned Standard authorization"
         ),
     )
     q.add_argument("bundle", help="Sealed workflow bundle directory")
-    q.add_argument("--case-id", required=True, help="Declared representative case")
+    q.add_argument(
+        "--case-id", required=True, help="Declared practice case or readiness drill"
+    )
     q.add_argument(
         "--inputs",
         required=True,
@@ -7574,9 +7697,42 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--headed", action="store_true", help="Run browser headed")
     q.add_argument("--dry-run", action="store_true", help="Validate without input")
     q.add_argument("--save-healed-to", default=None, help=argparse.SUPPRESS)
+    q.add_argument(
+        "--fault-driver",
+        default=None,
+        metavar="NAME",
+        help=(
+            "A drill's fault driver from the openadapt_flow."
+            "qualification_fault_drivers entry point (a configured campaign). "
+            "Without it, a drill uses this computer's local drill campaign "
+            "(see `qualify drills`)."
+        ),
+    )
     _add_backend_flags(q)
     _add_browser_session_flags(q)
     _add_deployment_flags(q)
+    _add_approval_flags(q)
+    q.set_defaults(func=_cmd_qualify)
+
+    q = qsub.add_parser(
+        "drills",
+        help=(
+            "Add the five readiness drills for the practice case's save and "
+            "trust this computer's local drill key (a local campaign)"
+        ),
+    )
+    q.add_argument("bundle", help="Sealed workflow bundle directory")
+    q.add_argument(
+        "--from-case",
+        default=None,
+        help="The practice (representative) case to drill from",
+    )
+    q.add_argument(
+        "--save-step",
+        default=None,
+        help="The save to drill (default: the practice case's first save)",
+    )
+    q.add_argument("--json", action="store_true", help="Print the campaign as JSON")
     q.set_defaults(func=_cmd_qualify)
 
     q = qsub.add_parser(

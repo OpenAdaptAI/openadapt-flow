@@ -5475,6 +5475,7 @@ class Replayer:
         before_input_sha256: str,
         effect_verifier: Any,
         effects: tuple[Any, ...] = (),
+        capture_frame: Any = None,
     ) -> Optional[QualificationFaultContext]:
         authorization = self.governed_authorization
         if authorization is None or authorization.qualification_case_kind in {
@@ -5519,6 +5520,7 @@ class Replayer:
             vision=self.vision,
             effect_verifier=effect_verifier,
             effects=effects,
+            capture_frame=capture_frame,
         )
 
     def _require_current_fault_driver_binding(self) -> QualificationFaultDriver:
@@ -5599,15 +5601,21 @@ class Replayer:
         step: Step,
         before_png: bytes,
         effect_verifier: Any,
+        capture: Optional[Callable[[], bytes]] = None,
     ) -> bytes:
         if self._qualification_fault_mutations:
             return before_png
+        # The receipt binds the frame the detector reads. ``capture`` is the
+        # detector's own capture path (see _revalidation_frame_capture): two
+        # paths can encode identical pixels as different PNG bytes.
+        capture_frame = capture or self.backend.screenshot
         context = self._qualification_fault_context(
             gate=gate,
             step=step,
             actuation_path="gui",
             before_input_sha256=sha256_bytes(before_png),
             effect_verifier=effect_verifier,
+            capture_frame=capture_frame,
         )
         if context is None:
             return before_png
@@ -5617,7 +5625,7 @@ class Replayer:
             return before_png
         if mutation.replace_effect_verifier:
             raise RuntimeError("qualification_screen_fault_replaced_verifier")
-        after_png = self.backend.screenshot()
+        after_png = capture_frame()
         self._validate_fault_mutation(
             context,
             mutation.receipt,
@@ -6169,6 +6177,11 @@ class Replayer:
                     step=step,
                     before_png=before_png,
                     effect_verifier=active_verifier,
+                    capture=self._revalidation_frame_capture(
+                        step,
+                        workflow,
+                        arm_keyboard=step.action in (ActionKind.KEY, ActionKind.HOTKEY),
+                    ),
                 )
                 (
                     resolution,
@@ -8590,6 +8603,67 @@ class Replayer:
             )
         return None
 
+    def _guarded_keyboard_revalidation(
+        self, step: Step, workflow: Workflow, *, arm_keyboard: bool
+    ) -> bool:
+        return bool(
+            arm_keyboard
+            and self._requires_atomic_identity_keyboard(step, workflow)
+            and not isinstance(self.backend, RemoteActuationBackend)
+            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        )
+
+    def _guarded_type_pointer_revalidation(
+        self, step: Step, workflow: Workflow
+    ) -> bool:
+        return bool(
+            step.action in (ActionKind.TYPE, ActionKind.SELECT_OPTION)
+            and self._requires_atomic_identity_pointer(step, workflow)
+            and not isinstance(self.backend, RemoteActuationBackend)
+            and isinstance(self.backend, GuardedCoordinateActionBackend)
+            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        )
+
+    def _guarded_click_pointer_revalidation(
+        self, step: Step, workflow: Workflow
+    ) -> bool:
+        return bool(
+            step.action
+            in (
+                ActionKind.CLICK,
+                ActionKind.DOUBLE_CLICK,
+                ActionKind.RIGHT_CLICK,
+                ActionKind.DRAG,
+            )
+            and self._requires_atomic_identity_pointer(step, workflow)
+            and not isinstance(self.backend, RemoteActuationBackend)
+            and isinstance(self.backend, GuardedCoordinateActionBackend)
+            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        )
+
+    def _revalidation_frame_capture(
+        self, step: Step, workflow: Workflow, *, arm_keyboard: bool
+    ) -> Optional[Callable[[], bytes]]:
+        """The capture a local revalidation takes its fresh frame with.
+
+        ``None`` means the ordinary screenshot. A remote backend's actuation
+        frame arms a lease, so it is never taken outside the revalidation.
+        """
+
+        if isinstance(self.backend, RemoteActuationBackend):
+            return None
+        if (
+            self._guarded_keyboard_revalidation(
+                step, workflow, arm_keyboard=arm_keyboard
+            )
+            or self._guarded_type_pointer_revalidation(step, workflow)
+            or self._guarded_click_pointer_revalidation(step, workflow)
+        ):
+            return cast(
+                GuardedKeyboardActionBackend, self.backend
+            ).guarded_keyboard_frame
+        return None
+
     def _revalidate_consequential_actuation(
         self,
         step: Step,
@@ -8646,11 +8720,8 @@ class Replayer:
         if callable(cancel_stale_structural):
             cancel_stale_structural()
 
-        guarded_keyboard_backend = (
-            arm_keyboard
-            and self._requires_atomic_identity_keyboard(step, workflow)
-            and not isinstance(self.backend, RemoteActuationBackend)
-            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        guarded_keyboard_backend = self._guarded_keyboard_revalidation(
+            step, workflow, arm_keyboard=arm_keyboard
         )
         focused_element_backend = (
             arm_keyboard
@@ -8661,25 +8732,11 @@ class Replayer:
             and isinstance(self.backend, RemoteActuationBackend)
             and isinstance(self.backend, FocusedElementActuationLeaseBackend)
         )
-        guarded_type_pointer_backend = (
-            step.action in (ActionKind.TYPE, ActionKind.SELECT_OPTION)
-            and self._requires_atomic_identity_pointer(step, workflow)
-            and not isinstance(self.backend, RemoteActuationBackend)
-            and isinstance(self.backend, GuardedCoordinateActionBackend)
-            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        guarded_type_pointer_backend = self._guarded_type_pointer_revalidation(
+            step, workflow
         )
-        guarded_click_pointer_backend = (
-            step.action
-            in (
-                ActionKind.CLICK,
-                ActionKind.DOUBLE_CLICK,
-                ActionKind.RIGHT_CLICK,
-                ActionKind.DRAG,
-            )
-            and self._requires_atomic_identity_pointer(step, workflow)
-            and not isinstance(self.backend, RemoteActuationBackend)
-            and isinstance(self.backend, GuardedCoordinateActionBackend)
-            and isinstance(self.backend, GuardedKeyboardActionBackend)
+        guarded_click_pointer_backend = self._guarded_click_pointer_revalidation(
+            step, workflow
         )
         prepared_pointer: Optional[Point] = None
         pointer_edge_pending = step.action in (

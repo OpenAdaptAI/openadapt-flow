@@ -5728,6 +5728,23 @@ class Replayer:
                 )
                 result.elapsed_ms = (time.monotonic() - t0) * 1000.0
                 return result
+        if self.approval_gate is not None and self._step_is_consequential(
+            step, workflow
+        ):
+            # Per-item approval happens before the save step resolves, so an
+            # approved step then takes a fresh frame and resolves its target
+            # and right-record check again. The last-point gate still re-reads
+            # the form before the input is delivered.
+            approval_refusal = self._approval_step_refusal(
+                workflow, step, step_index, result
+            )
+            if approval_refusal is not None:
+                result.ok = False
+                result.safety_halt = True
+                result.failure_category = "governed_refusal"
+                result.error = approval_refusal
+                result.elapsed_ms = (time.monotonic() - t0) * 1000.0
+                return result
         if (
             qualification_path != "gui"
             and step.api_binding is not None
@@ -9648,10 +9665,23 @@ class Replayer:
         self._approval_run_dir = Path(run_dir)
         self._approval_refusal = None
         gate = self.approval_gate
+        authorization = self.governed_authorization
+        bound_mode = getattr(authorization, "approval_mode", None)
+        if bound_mode is not None and (gate is None or gate.mode.value != bound_mode):
+            # The admitted authorization names the approval mode. A run with
+            # another mode, or with no gate at all, is not that authorization.
+            self._approval_refusal = (
+                "Approval mode: this run's authorization requires the "
+                f"{bound_mode} approval mode, but the run was started "
+                f"{'without an approval gate' if gate is None else 'in ' + gate.mode.value}."
+                " Nothing was typed or saved."
+            )
+            if gate is None:
+                return
         if gate is None:
             return
         try:
-            self._approval_refusal = gate.begin_item(
+            begin_refusal = gate.begin_item(
                 run_id=self._run_id,
                 bundle_content_digest=report.bundle_content_digest,
                 profile=report.execution_profile,
@@ -9664,10 +9694,12 @@ class Replayer:
                 ),
             )
         except Exception as exc:  # noqa: BLE001 - a broken gate goes to a person
-            self._approval_refusal = (
+            begin_refusal = (
                 "Approval mode: the item could not be started "
                 f"({type(exc).__name__}); nothing was typed or saved."
             )
+        if self._approval_refusal is None:
+            self._approval_refusal = begin_refusal
 
     def _approval_gate_refusal(
         self, workflow: Workflow, step: Step, result: StepResult
@@ -9700,11 +9732,85 @@ class Replayer:
                     governed_authorization=self.governed_authorization,
                     model_calls=report.model_calls if report is not None else 0,
                     frame=frame,
+                    form_state=self._approval_form_state,
                 )
             )
         except Exception as exc:  # noqa: BLE001 - a broken gate goes to a person
             return (
                 "Approval mode: the pre-save gate failed "
+                f"({type(exc).__name__}); this item stopped before saving."
+            )
+        if verdict.proceed:
+            return None
+        return verdict.refusal_message() or (
+            "Approval mode: this item stopped before saving."
+        )
+
+    def _approval_form_state(
+        self, frame_png: Optional[bytes]
+    ) -> Optional[tuple[str, str]]:
+        """The form's current field state digest, for the approval gate."""
+
+        from openadapt_flow.approval_mode.form_state import capture_form_state
+
+        try:
+            return capture_form_state(self.backend, self.vision, frame_png)
+        except Exception:  # noqa: BLE001 - unreadable is never "unchanged"
+            return None
+
+    def _approval_step_refusal(
+        self,
+        workflow: Workflow,
+        step: Step,
+        step_index: int,
+        result: StepResult,
+    ) -> Optional[str]:
+        """Ask the approval gate before a save step resolves its target."""
+
+        gate = self.approval_gate
+        assert gate is not None
+        authorization = self.governed_authorization
+        drill_fault_step = bool(
+            authorization is not None
+            and authorization.qualification_case_kind not in {None, "representative"}
+            and authorization.qualification_fault_step_id_sha256
+            == sha256_bytes(step.id.encode("utf-8"))
+        )
+
+        def frame() -> Optional[bytes]:
+            try:
+                return self.vision.wait_settled(self.backend)
+            except Exception:  # noqa: BLE001 - no frame means no approval
+                return None
+
+        try:
+            from openadapt_flow.approval_mode.gate import StepContext
+
+            verdict = gate.before_step(
+                StepContext(
+                    step=step,
+                    workflow=workflow,
+                    result=result,
+                    step_index=step_index,
+                    run_id=self._run_id or "",
+                    frame=frame,
+                    form_state=self._approval_form_state,
+                    drill_fault_step=drill_fault_step,
+                    qualification_case_kind=(
+                        authorization.qualification_case_kind
+                        if authorization is not None
+                        else None
+                    ),
+                    runtime_inputs_digest=(
+                        authorization.runtime_inputs_digest
+                        if authorization is not None
+                        else None
+                    ),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - a broken gate goes to a person
+            return (
+                "Approval mode: the approval step failed "
                 f"({type(exc).__name__}); this item stopped before saving."
             )
         if verdict.proceed:

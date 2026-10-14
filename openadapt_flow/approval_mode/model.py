@@ -138,6 +138,62 @@ class ItemDecisionKind(str, Enum):
     PROBLEM = "problem"
     #: ``not_gated``: no per-item pause, recorded as such.
     NOT_GATED = "not_gated"
+    #: A person approved every save of the item, and the item reached
+    #: ``VERIFIED``. Never counted as saved without a person.
+    APPROVED = "approved"
+    #: A person declined a save ("Don't save"). The item stopped before that
+    #: save; earlier saves of the same item, if any, stay as they are.
+    DECLINED = "declined"
+
+
+#: The message prefix the gate uses when an item waits for a person's
+#: approval before a save. The durable pause classifier keys on it.
+ITEM_APPROVAL_PAUSE_MARKER = (
+    "Approval mode: this item is waiting for a person to approve it before saving"
+)
+#: The message prefix the gate uses when a person declined a save.
+ITEM_DECLINED_MARKER = "Approval mode: a person declined this save"
+
+#: Closed decline reasons a person picks in Desktop (design 9.1).
+DeclineReason = Literal["wrong_values", "wrong_record", "screen_problem"]
+DECLINE_REASONS: tuple[str, ...] = ("wrong_values", "wrong_record", "screen_problem")
+#: The only route that may approve or decline an item in phase 0.
+ITEM_APPROVAL_ROUTE: Literal["desktop_run_it"] = "desktop_run_it"
+#: How the approver was authenticated. ``none`` only for ``unauthenticated``.
+ApproverAuthMethod = Literal["cloud_aal2", "cloud_aal1", "none"]
+
+
+class ItemApprovalRef(BaseModel):
+    """One person's answer to one item-approval request, as PHI-free codes.
+
+    The approver is a Cloud user id (never a name), or ``unauthenticated``
+    when the person approved in Desktop while signed out. Digests bind the
+    exact request the person saw and the exact answer file.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    step_id: str = Field(min_length=1, max_length=256)
+    request_sha256: str = Field(pattern=PREFIXED_SHA256_PATTERN)
+    answer_sha256: str = Field(pattern=PREFIXED_SHA256_PATTERN)
+    decision: Literal["approved", "declined"]
+    decline_reason: Optional[DeclineReason] = None
+    decided_by: Literal["human"] = "human"
+    route: Literal["desktop_run_it"] = ITEM_APPROVAL_ROUTE
+    approver_kind: Literal["cloud_user", "unauthenticated"]
+    approver_id: Optional[str] = Field(default=None, pattern=OPAQUE_ID_PATTERN)
+    auth_method: ApproverAuthMethod
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "ItemApprovalRef":
+        if (self.decision == "declined") != (self.decline_reason is not None):
+            raise ValueError("a declined save needs exactly one closed reason")
+        if self.approver_kind == "cloud_user":
+            if self.approver_id is None or self.auth_method == "none":
+                raise ValueError("a Cloud approver needs an id and a sign-in method")
+        elif self.approver_id is not None or self.auth_method != "none":
+            raise ValueError("an unauthenticated approval names no approver")
+        return self
 
 
 class SwitchThresholds(BaseModel):
@@ -237,6 +293,8 @@ class ApprovalModeItemEvidence(BaseModel):
     switch_off_reason: Optional[OffReason] = None
     #: True when the runner's switch log recorded this item's result.
     switch_log_recorded: bool = False
+    #: Every person's answer to an approval request in this item, in order.
+    approvals: list[ItemApprovalRef] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _no_person_requires_every_check(self) -> "ApprovalModeItemEvidence":
@@ -264,6 +322,24 @@ class ApprovalModeItemEvidence(BaseModel):
         elif decision is ItemDecisionKind.NOT_GATED:
             if self.mode is not ApprovalMode.NOT_GATED:
                 raise ValueError("not_gated decision requires not_gated mode")
+        elif decision is ItemDecisionKind.APPROVED:
+            if self.mode is ApprovalMode.NOT_GATED:
+                raise ValueError("not_gated items are never approved per item")
+            if not self.approvals or any(
+                ref.decision != "approved" for ref in self.approvals
+            ):
+                raise ValueError("an approved item needs a person's approval")
+            if self.saves_without_person:
+                raise ValueError("an approved item has no save without a person")
+            if self.needs_person:
+                raise ValueError("an approved, checked item needs no person")
+            if self.switch_off_reason is not None:
+                raise ValueError("an item that switched the mode off needs a person")
+        elif decision is ItemDecisionKind.DECLINED:
+            if self.mode is ApprovalMode.NOT_GATED:
+                raise ValueError("not_gated items are never declined per item")
+            if not self.approvals or self.approvals[-1].decision != "declined":
+                raise ValueError("a declined item needs a person's decline")
         else:
             if not self.needs_person:
                 raise ValueError(f"a {decision.value} item needs a person")

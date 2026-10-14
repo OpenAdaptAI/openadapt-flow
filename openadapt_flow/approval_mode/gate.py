@@ -9,9 +9,15 @@ run's outcome is stamped. One gate instance serves one item (one run).
 Modes:
 
 - ``not_gated``: every save proceeds, and the run report says so.
-- ``each_item``: every save stops before delivery and the item goes to a
-  person for approval. The approve-and-save path is phase 0 work; this gate
-  only guarantees that nothing is saved without one.
+- ``each_item``: every save waits for a person. Before the save step runs,
+  the gate writes an approval request with a screenshot of the filled form
+  (:mod:`openadapt_flow.approval_mode.item_approval`) and waits for a person's
+  answer. After an approval the step takes a fresh frame and resolves its
+  target and right-record check again, and at the last point before the
+  save the gate re-reads the form and refuses if any field changed while
+  waiting. A decline, a refused answer or no answer in time stops the item
+  before the save. Without an approval store every save stops before
+  delivery, so nothing is ever saved without a person.
 - ``problems_only``: a save proceeds without a person only when the item
   checks (design 7.2) and P1 to P5 (design 7.3) all pass. Any failure stops
   before the save and sends the item to a person: per-item approval for an
@@ -36,10 +42,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol
 
+from openadapt_flow.approval_mode.item_approval import (
+    DEFAULT_APPROVAL_WAIT_S,
+    ItemApprovalRefused,
+    ItemApprovalRequest,
+    ItemApprovalStore,
+    wait_for_answer,
+)
 from openadapt_flow.approval_mode.model import (
+    ITEM_APPROVAL_PAUSE_MARKER,
+    ITEM_DECLINED_MARKER,
     ApprovalMode,
     ApprovalModeItemEvidence,
     CheckOutcome,
+    ItemApprovalRef,
     ItemContext,
     ItemDecisionKind,
     OffReason,
@@ -135,6 +151,34 @@ class ScreenTextSignedInUser:
 
 #: ``fetch_status(request)`` returns Cloud's signed status (model, dict, JSON).
 StatusFetcher = Callable[[StatusRequest], Any]
+#: Returns ``(kind, "sha256:<hex>")`` for the form's current field state, or
+#: ``None`` when it can't be read. Given the frame to read when it's known.
+FormStateReader = Callable[[Optional[bytes]], Optional[tuple[str, str]]]
+
+
+def _no_form_state(_frame: Optional[bytes]) -> Optional[tuple[str, str]]:
+    return None
+
+
+@dataclass(frozen=True)
+class StepContext:
+    """What the replayer knows when a save step starts, before it resolves."""
+
+    step: "Step"
+    workflow: "Workflow"
+    #: The step's own result object. An approval binds to exactly this
+    #: execution of the step; a later run of the same step asks again.
+    result: "StepResult"
+    step_index: int
+    run_id: str
+    #: The current settled frame, shown to the person as the filled form.
+    frame: Callable[[], Optional[bytes]]
+    form_state: FormStateReader = _no_form_state
+    #: True at the fault step of a qualification drill. A drill must stop
+    #: there by itself, so the gate never asks a person at that step.
+    drill_fault_step: bool = False
+    qualification_case_kind: Optional[str] = None
+    runtime_inputs_digest: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -153,6 +197,8 @@ class SaveContext:
     model_calls: int
     #: The frame the save's target and identity were resolved on, if any.
     frame: Callable[[], Optional[bytes]]
+    #: Re-reads the form's field state now (see :data:`FormStateReader`).
+    form_state: FormStateReader = _no_form_state
 
 
 @dataclass(frozen=True)
@@ -170,11 +216,18 @@ class GateVerdict:
             return None
         failed = next((check for check in self.checks if not check.passed), None)
         detail = f" ({failed.code}: {failed.detail})" if failed is not None else ""
+        if self.decision.kind is ItemDecisionKind.DECLINED:
+            reason = self.decision.reason or "declined"
+            return (
+                f"{ITEM_DECLINED_MARKER} ({reason}). This save was not made. "
+                "Nothing was retried."
+            )
         if self.decision.kind is ItemDecisionKind.STOP_BEFORE_SAVING:
-            what = "stopped before saving"
-        else:
-            what = "is waiting for a person to approve it before saving"
-        return f"Approval mode: this item {what}{detail}. Nothing was retried."
+            return (
+                f"Approval mode: this item stopped before saving{detail}. "
+                "Nothing was retried."
+            )
+        return f"{ITEM_APPROVAL_PAUSE_MARKER}{detail}. Nothing was retried."
 
 
 class ApprovalGate:
@@ -195,8 +248,19 @@ class ApprovalGate:
         item: Optional[ItemContext] = None,
         monotonic: Callable[[], float] = time.monotonic,
         nonce_factory: Callable[[], str] = lambda: secrets.token_urlsafe(32),
+        approval_store: ItemApprovalStore | Path | str | None = None,
+        approval_wait_s: float = DEFAULT_APPROVAL_WAIT_S,
+        sleep: Callable[[float], None] = time.sleep,
+        approval_poll_s: float = 0.5,
     ) -> None:
         self.mode = resolve_approval_mode(mode)
+        if approval_store is None or isinstance(approval_store, ItemApprovalStore):
+            self.approval_store = approval_store
+        else:
+            self.approval_store = ItemApprovalStore(approval_store)
+        self._approval_wait_s = float(approval_wait_s)
+        self._approval_poll_s = float(approval_poll_s)
+        self._sleep = sleep
         self.record = record
         if log is None or isinstance(log, SwitchLog):
             self.log = log
@@ -236,6 +300,14 @@ class ApprovalGate:
         # later result object, and the step id must match too.
         self._passed_results: dict[int, tuple[str, "StepResult"]] = {}
         self._item_started_logged = False
+        # Saves a person approved, keyed like ``_passed_results`` and holding
+        # the request whose form state the save must still show.
+        self._approved: dict[int, tuple[str, "StepResult", ItemApprovalRequest]] = {}
+        self._approved_edge_checked: set[int] = set()
+        self._approvals: list[ItemApprovalRef] = []
+        self._declined: Optional[ItemApprovalRef] = None
+        self._run_id: Optional[str] = None
+        self._workflow: Optional["Workflow"] = None
         self._off_logged: Optional[OffReason] = None
         self._status: Optional[SwitchStatus] = None
         self._status_fetched_at: Optional[float] = None
@@ -263,6 +335,7 @@ class ApprovalGate:
             self._item = self._item_pending
         self._item_pending = None
         self._began = True
+        self._run_id = run_id
         self._run_ref = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
         self._bundle_digest = bundle_content_digest
         if self.mode is ApprovalMode.NOT_GATED:
@@ -390,6 +463,175 @@ class ApprovalGate:
                 switch_off=None,
             )
 
+    # -- when a save step starts ------------------------------------------------
+    def before_step(self, ctx: StepContext) -> GateVerdict:
+        """Ask a person before a save step runs, when the mode requires it.
+
+        Called before the step resolves its target, so that after an approval
+        the step takes a fresh frame and resolves its target and right-record
+        check again. Returns ``proceed`` when no person is needed yet (the
+        last-point gate still decides), when a person approved, or when no
+        approval store is configured (the last-point gate then refuses).
+        """
+
+        try:
+            return self._before_step(ctx)
+        except Exception:  # noqa: BLE001 - every gate failure goes to a person
+            decision = ItemDecision(
+                kind=ItemDecisionKind.STOP_BEFORE_SAVING,
+                reason="gate_error",
+                needs_person=True,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            check = CheckOutcome(
+                code="gate_error",
+                passed=False,
+                detail="gate_error",
+                step_id=ctx.step.id,
+            )
+            self._halt_step(ctx.step.id, decision, [check])
+            return GateVerdict(proceed=False, decision=decision, checks=(check,))
+
+    def _halt_step(
+        self, step_id: str, decision: ItemDecision, checks: list[CheckOutcome]
+    ) -> None:
+        self._pre_checks.extend(checks)
+        # A person's decline, or a stop, replaces a pending request for
+        # approval as the item's decision. Nothing replaces a decline.
+        if self._decision is None or (
+            self._decision.kind is ItemDecisionKind.APPROVAL_REQUIRED
+            and decision.kind is not ItemDecisionKind.APPROVAL_REQUIRED
+        ):
+            self._decision = decision
+            self._gated_step_id = step_id
+        if decision.switch_off is not None:
+            self._log_switch_off(decision.switch_off)
+
+    def _needs_approval(self) -> bool:
+        if self.mode is ApprovalMode.EACH_ITEM:
+            return True
+        if self.mode is ApprovalMode.PROBLEMS_ONLY:
+            return self._item_fallback is not None or (
+                self._decision is not None
+                and self._decision.kind is ItemDecisionKind.APPROVAL_REQUIRED
+            )
+        return False
+
+    def _before_step(self, ctx: StepContext) -> GateVerdict:
+        if not self._began:
+            raise RuntimeError("begin_item was not called for this run")
+        if self.mode is ApprovalMode.NOT_GATED:
+            return GateVerdict(proceed=True, decision=None, checks=())
+        self._workflow = ctx.workflow
+        if not self._is_save(ctx):
+            return GateVerdict(proceed=True, decision=None, checks=())
+        if self._declined is not None:
+            decision = ItemDecision(
+                kind=ItemDecisionKind.DECLINED,
+                reason=self._declined.decline_reason,
+                needs_person=False,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            return GateVerdict(proceed=False, decision=decision, checks=())
+        if ctx.drill_fault_step:
+            # A drill must stop at its fault step by itself. Nobody is asked,
+            # and the last-point gate refuses any save there without an
+            # approval, so a drill that fails to stop still saves nothing.
+            return GateVerdict(proceed=True, decision=None, checks=())
+        if not self._needs_approval():
+            return GateVerdict(proceed=True, decision=None, checks=())
+        store = self.approval_store
+        if store is None or self._run_id is None:
+            # No way to ask a person here: the last-point gate refuses.
+            return GateVerdict(proceed=True, decision=None, checks=())
+
+        def wait_refusal(detail: str) -> GateVerdict:
+            if self._item_fallback is not None:
+                reason: Optional[str] = self._item_fallback.reason
+            elif self._decision is not None:
+                reason = self._decision.reason
+            else:
+                reason = ApprovalMode.EACH_ITEM.value
+            decision = ItemDecision(
+                kind=ItemDecisionKind.APPROVAL_REQUIRED,
+                reason=reason,
+                needs_person=True,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            check = CheckOutcome(
+                code="each_item", passed=False, detail=detail, step_id=ctx.step.id
+            )
+            self._halt_step(ctx.step.id, decision, [check])
+            return GateVerdict(proceed=False, decision=decision, checks=(check,))
+
+        found = store.find_unused_approval(
+            run_id=self._run_id, step_id=ctx.step.id, step_index=ctx.step_index
+        )
+        if found is not None:
+            # A resumed run: the person already approved this exact save.
+            request, answer = found
+        else:
+            frame = ctx.frame()
+            if not frame:
+                return wait_refusal("frame_unavailable")
+            form = ctx.form_state(frame)
+            if form is None:
+                return wait_refusal("form_state_unreadable")
+            try:
+                request = store.open_request(
+                    run_id=self._run_id,
+                    workflow_name=ctx.workflow.name,
+                    step_id=ctx.step.id,
+                    step_index=ctx.step_index,
+                    step_intent=ctx.step.intent or "",
+                    mode=self.mode,
+                    bundle_content_digest=self._bundle_digest,
+                    runtime_inputs_digest=ctx.runtime_inputs_digest,
+                    frame_png=frame,
+                    form_state=form,
+                    qualification_case_kind=ctx.qualification_case_kind,
+                )
+            except (OSError, ValueError, ItemApprovalRefused):
+                return wait_refusal("approval_request_unwritable")
+            waited, code = wait_for_answer(
+                store,
+                request,
+                timeout_s=self._approval_wait_s,
+                poll_s=self._approval_poll_s,
+                monotonic=self._monotonic,
+                sleep=self._sleep,
+            )
+            if waited is None:
+                return wait_refusal(code or "approval_wait_timed_out")
+            answer = waited
+        reference = answer.reference(request)
+        if answer.decision == "decline":
+            self._approvals.append(reference)
+            self._declined = reference
+            decision = ItemDecision(
+                kind=ItemDecisionKind.DECLINED,
+                reason=answer.decline_reason,
+                needs_person=False,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            check = CheckOutcome(
+                code="each_item",
+                passed=False,
+                detail="declined_by_person",
+                step_id=ctx.step.id,
+            )
+            self._halt_step(ctx.step.id, decision, [check])
+            return GateVerdict(proceed=False, decision=decision, checks=(check,))
+        if not store.consume(request.request_id):
+            return wait_refusal("approval_already_used")
+        self._approvals.append(reference)
+        self._approved[id(ctx.result)] = (ctx.step.id, ctx.result, request)
+        return GateVerdict(proceed=True, decision=None, checks=())
+
     # -- before each save ------------------------------------------------------
     def before_save(self, ctx: SaveContext) -> GateVerdict:
         """Decide whether this save may proceed without a person."""
@@ -428,12 +670,30 @@ class ApprovalGate:
             raise RuntimeError("begin_item was not called for this run")
         if self.mode is ApprovalMode.NOT_GATED:
             return GateVerdict(proceed=True, decision=None, checks=())
+        self._workflow = ctx.workflow
         if not self._is_save(ctx):
             # The runtime also asks before an identity-checked navigation
             # click (opening the patient's chart). That isn't a save: no record
             # check names it and nothing is gated on it. The engine's own
             # identity check still applies to it.
             return GateVerdict(proceed=True, decision=None, checks=())
+
+        approved = self._approved.get(id(ctx.result))
+        if (
+            approved is not None
+            and approved[1] is ctx.result
+            and approved[0] == ctx.step.id
+        ):
+            return self._approved_save(ctx, approved[2])
+        if self._declined is not None:
+            decision = ItemDecision(
+                kind=ItemDecisionKind.DECLINED,
+                reason=self._declined.decline_reason,
+                needs_person=False,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            return GateVerdict(proceed=False, decision=decision, checks=())
 
         if self._decision is not None:
             # A gate that already sent the item to a person never reopens.
@@ -527,8 +787,60 @@ class ApprovalGate:
         self._saves_without_person += 1
         return GateVerdict(proceed=True, decision=None, checks=tuple(checks))
 
+    def _approved_save(
+        self, ctx: SaveContext, request: ItemApprovalRequest
+    ) -> GateVerdict:
+        """A save a person approved: proceed only if the form is unchanged."""
+
+        key = id(ctx.result)
+        if key in self._approved_edge_checked:
+            # Another input edge of the same approved save (for example the
+            # focus click before typing). The form changes as it is typed.
+            return GateVerdict(proceed=True, decision=None, checks=())
+        try:
+            frame = ctx.frame()
+        except Exception:  # noqa: BLE001
+            frame = None
+        try:
+            current = ctx.form_state(frame)
+        except Exception:  # noqa: BLE001
+            current = None
+        expected = (request.form_state_kind, request.form_state_sha256)
+        if current is None or current != expected:
+            detail = (
+                "form_state_unreadable"
+                if current is None
+                else "form_changed_after_approval"
+            )
+            decision = ItemDecision(
+                kind=ItemDecisionKind.STOP_BEFORE_SAVING,
+                reason="each_item",
+                needs_person=True,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+            check = CheckOutcome(
+                code="each_item", passed=False, detail=detail, step_id=ctx.step.id
+            )
+            # The approval is spent: a changed form needs a new run and a new
+            # approval of what the person can see.
+            self._approved.pop(key, None)
+            self._decision = decision
+            self._gated_step_id = ctx.step.id
+            self._pre_checks.append(check)
+            return GateVerdict(proceed=False, decision=decision, checks=(check,))
+        self._approved_edge_checked.add(key)
+        check = CheckOutcome(
+            code="each_item",
+            passed=True,
+            detail="approved_by_person",
+            step_id=ctx.step.id,
+        )
+        self._pre_checks.append(check)
+        return GateVerdict(proceed=True, decision=None, checks=(check,))
+
     @staticmethod
-    def _is_save(ctx: SaveContext) -> bool:
+    def _is_save(ctx: SaveContext | StepContext) -> bool:
         """Whether this step is a consequential save (the static classifier).
 
         The same fail-closed classifier the record-check coverage uses for its
@@ -912,6 +1224,8 @@ class ApprovalGate:
             )
             self._finished = evidence
             return evidence
+        approvals = self._item_approvals()
+        approval_fields: dict[str, Any] = {"approvals": approvals}
         if mode is ApprovalMode.EACH_ITEM:
             decision = self._decision
             if decision is not None:
@@ -923,21 +1237,29 @@ class ApprovalGate:
                     gated_step_id=self._gated_step_id,
                     decision=decision.kind,
                     decision_reason=decision.reason,
-                    needs_person=True,
+                    needs_person=decision.kind is not ItemDecisionKind.DECLINED,
+                    **approval_fields,
                 )
             else:
+                kind, reason, needs_person = self._approved_item_decision(
+                    report, approvals
+                )
                 evidence = ApprovalModeItemEvidence(
                     mode=mode,
                     channel=channel,
                     item_checks=list(self._item_checks),
-                    decision=ItemDecisionKind.PROBLEM,
-                    decision_reason=(
-                        report.transaction_outcome or "unknown_outcome"
-                    ).lower(),
-                    needs_person=True,
+                    pre_checks=list(self._pre_checks),
+                    decision=kind,
+                    decision_reason=reason,
+                    needs_person=needs_person,
+                    **approval_fields,
                 )
             self._finished = evidence
             return evidence
+        if self._declined is not None or (approvals and self._decision is None):
+            return self._finish_problems_only_with_person(
+                report, approvals, channel=channel
+            )
 
         # problems_only
         if record is None:
@@ -1002,6 +1324,170 @@ class ApprovalGate:
             counts_toward_problems=counts,
             switch_off_reason=off,
             switch_log_recorded=recorded,
+            approvals=approvals,
+        )
+        self._finished = evidence
+        return evidence
+
+    def _item_approvals(self) -> list[ItemApprovalRef]:
+        """Every approval this run used, across resumed legs, then a decline."""
+
+        rows: list[ItemApprovalRef] = []
+        store = self.approval_store
+        if store is not None and self._run_id is not None:
+            try:
+                rows = store.consumed_approvals(self._run_id)
+            except (OSError, ItemApprovalRefused):
+                rows = []
+        seen = {row.answer_sha256 for row in rows}
+        for row in self._approvals:
+            if row.answer_sha256 not in seen:
+                rows.append(row)
+                seen.add(row.answer_sha256)
+        if self._declined is not None and rows[-1:] != [self._declined]:
+            rows = [row for row in rows if row != self._declined] + [self._declined]
+        return rows
+
+    def _unapproved_delivered_saves(
+        self, report: "RunReport", approvals: Sequence[ItemApprovalRef]
+    ) -> int:
+        """Delivered saves in the report that no person's approval covers."""
+
+        from collections import Counter
+
+        approved_steps = Counter(
+            row.step_id for row in approvals if row.decision == "approved"
+        )
+        workflow = self._workflow
+        steps = {}
+        if workflow is not None:
+            from openadapt_flow.traversal import iter_workflow_steps
+
+            steps = {step.id: step for step in iter_workflow_steps(workflow)}
+        delivered: Counter[str] = Counter()
+        for result in report.results:
+            if not (
+                result.delivery_attempted is True
+                or result.delivery_uncertainty is not None
+            ):
+                continue
+            step = steps.get(result.step_id)
+            if step is not None and workflow is not None:
+                from openadapt_flow.run_gate import is_consequential
+
+                consequential = is_consequential(step, workflow)
+            else:
+                from openadapt_flow.approval_mode.post import _consequential
+
+                consequential = _consequential(result)
+            if consequential:
+                delivered[result.step_id] += 1
+        return sum(
+            max(0, count - approved_steps.get(step_id, 0))
+            for step_id, count in delivered.items()
+        )
+
+    def _approved_item_decision(
+        self, report: "RunReport", approvals: Sequence[ItemApprovalRef]
+    ) -> tuple[ItemDecisionKind, Optional[str], bool]:
+        """(kind, reason, needs_person) for an item no gate check stopped.
+
+        ``approved`` only when a person approved every delivered save and the
+        engine's own outcome is ``VERIFIED``. Any other result goes to a
+        person; the outcome word is never changed.
+        """
+
+        outcome = report.transaction_outcome
+        unapproved = self._unapproved_delivered_saves(report, approvals)
+        if unapproved:
+            return ItemDecisionKind.PROBLEM, "save_not_approved", True
+        approved = [row for row in approvals if row.decision == "approved"]
+        if approved and outcome == "VERIFIED":
+            return ItemDecisionKind.APPROVED, None, False
+        return (
+            ItemDecisionKind.PROBLEM,
+            (outcome or "unknown_outcome").lower(),
+            True,
+        )
+
+    def _finish_problems_only_with_person(
+        self,
+        report: "RunReport",
+        approvals: list[ItemApprovalRef],
+        *,
+        channel: Optional[str],
+    ) -> ApprovalModeItemEvidence:
+        """A ``problems_only`` item a person approved or declined.
+
+        It never counts as saved without a person. A declined item, or an
+        approved item that reached ``VERIFIED``, is not a problem; anything
+        else is decided as an item that failed after the save.
+        """
+
+        record = self.record
+        switch_fields: dict[str, Any] = {}
+        if record is not None:
+            switch_fields = {
+                "switch_id": record.switch_id,
+                "switch_record_sha256": record.digest(),
+            }
+        if self._declined is not None:
+            decision = ItemDecision(
+                kind=ItemDecisionKind.DECLINED,
+                reason=self._declined.decline_reason,
+                needs_person=False,
+                counts_toward_problems=False,
+                switch_off=None,
+            )
+        else:
+            kind, reason, needs_person = self._approved_item_decision(report, approvals)
+            if kind is ItemDecisionKind.APPROVED:
+                decision = ItemDecision(
+                    kind=kind,
+                    reason=None,
+                    needs_person=False,
+                    counts_toward_problems=False,
+                    switch_off=None,
+                )
+            else:
+                failed = CheckOutcome(code="verified", passed=False, detail="approved")
+                approved_steps = {
+                    row.step_id for row in approvals if row.decision == "approved"
+                }
+                decision = decide_problems_only(
+                    report,
+                    r1=failed,
+                    r2=failed.model_copy(update={"code": "whole_run_clean"}),
+                    gate_decision=None,
+                    save_delivered=any(
+                        result.delivery_attempted is True
+                        and result.step_id in approved_steps
+                        for result in report.results
+                    ),
+                )
+                if reason == "save_not_approved":
+                    decision = ItemDecision(
+                        kind=ItemDecisionKind.PROBLEM,
+                        reason=reason,
+                        needs_person=True,
+                        counts_toward_problems=True,
+                        switch_off=decision.switch_off,
+                    )
+        recorded, off = self._log_finish(decision)
+        evidence = ApprovalModeItemEvidence(
+            mode=self.mode,
+            channel=channel,
+            **switch_fields,
+            item_checks=list(self._item_checks),
+            pre_checks=list(self._pre_checks),
+            gated_step_id=self._gated_step_id,
+            decision=decision.kind,
+            decision_reason=decision.reason,
+            needs_person=decision.needs_person,
+            counts_toward_problems=decision.counts_toward_problems,
+            switch_off_reason=off,
+            switch_log_recorded=recorded,
+            approvals=approvals,
         )
         self._finished = evidence
         return evidence

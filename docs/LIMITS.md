@@ -118,6 +118,13 @@ For an armed step:
   cross-render jitter of the same value no longer looks like a glyph change) and
   proven zero-false-accept on a synthetic cross-render battery, but its default
   is **off** (`runtime.identity.PIXEL_VERIFY_ENABLED`, see below).
+- the recorded identifier crop shows the demonstration's screen. When the
+  identity band contains a workflow parameter and the run's value differs from
+  the demonstrated one (for example, a first name typed earlier in the run),
+  the pixel tier doesn't compare the crops, because the right record renders
+  different pixels too. The OCR parameter check decides instead: it puts the
+  run's value into the recorded band and requires the whole band to match. A
+  band that rests on a glyph-confusable identifier keeps the pixel comparison.
 
 Permissive `replay` may proceed on an unreadable reversible target and reports
 that condition. Governed `run` requires an affirmative live verdict for every
@@ -134,9 +141,18 @@ the system of record.
 
 That last distinction makes correct risk classification important. Risk is
 inferred from action text and metadata and can be overridden, but inference is
-heuristic. An icon-only save, a generic "OK", or an Enter key that submits a
-form can be under-classified. A benign label containing a write-shaped word can
-be over-classified and halt unnecessarily.
+heuristic. A generic "OK" or an Enter key that submits a form can be
+under-classified. A benign label containing a write-shaped word can be
+over-classified and halt unnecessarily.
+
+Icon-only controls get two compile-time rules. A single OCR glyph (a
+floppy-disk Save icon reads as "日") is not a label, so the click needs
+qualification review instead of passing as a labelled non-write. And when a
+demonstration entered data and no later step declares a write, every icon-only
+click after the last entry is presumed to commit that record: it compiles
+irreversible, and qualification requires its record check. An icon-only click
+that only navigates after data entry is therefore over-classified until an
+operator reclassifies it.
 
 For consequential or entity-sensitive workflows, require a policy that refuses
 unarmed actions, review the inferred risk and tags, and test identity against

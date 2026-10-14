@@ -206,6 +206,11 @@ def test_replay_hints_use_the_launcher_spelling(
     _finish(tmp_path, "HALTED", success=False, profile="demo")
     out = capsys.readouterr().out
     assert "Next command: openadapt flow explain" in out
+    # The run folder is printed verbatim, and its path can itself contain
+    # "openadapt-flow" (CI checks the repo out under .../openadapt-flow/).
+    # Only the printed command spelling is under test, so drop the path.
+    for path in {str(tmp_path.resolve()), str(tmp_path)}:
+        out = out.replace(path, "<run-root>")
     assert "openadapt-flow" not in out
 
 

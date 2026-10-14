@@ -99,11 +99,14 @@ July 2026).
 Record yourself doing a task in a browser or a desktop app. openadapt-flow
 compiles the recording into a script that runs on your machine. The default
 healthy path makes no generative-model API call. Before a governed run reports
-`VERIFIED`, Flow confirms every declared effect through an independent
-system-of-record read. A pixel-only Citrix path with no such read cannot be
-`VERIFIED`: the run halts, or it ends `RECONCILIATION_REQUIRED`. The screen
-says saved, the configured verifier finds no declared effect, and the run
-stops.
+`VERIFIED`, Flow confirms every declared effect through a read that doesn't go
+through the session that typed: the system of record's API, database, or
+files, or, when you have none of those, the application's own record page
+opened in a separate signed-in browser session
+([`ui_readback`](docs/EFFECT_KIT.md#separate-session-ui-read-back-ui_readback),
+a weaker check). A pixel-only Citrix path with neither cannot be `VERIFIED`:
+the run halts, or it ends `RECONCILIATION_REQUIRED`. The screen says saved,
+the configured verifier finds no declared effect, and the run stops.
 
 It's for work you do the same way every week and have to be able to prove
 afterwards: claims entry, referrals, eligibility checks, invoice posting. If

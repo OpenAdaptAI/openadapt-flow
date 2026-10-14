@@ -253,8 +253,9 @@ def test_identity_of_configs_without_plugin_fields_is_unchanged():
     cfg = EffectsConfig(kind="rest", base_url="http://127.0.0.1:9")
     verifier = build_effect_verifier(cfg)
     legacy_config = cfg.model_dump(mode="json")
-    for name in ("options", "option_params", "secret_env"):
-        legacy_config.pop(name)
+    # Neither the plugin fields nor ui_readback existed when identities were first issued.
+    for name in ("options", "option_params", "secret_env", "ui_readback"):
+        legacy_config.pop(name, None)
     legacy_config["candidates"] = []
 
     def sanitized(value, *, key=""):  # the identity's own redaction, verbatim

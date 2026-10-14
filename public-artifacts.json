@@ -93,7 +93,7 @@
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ecb16823210bfb5ce71c8a52a6f107c7b832acb0877ea5a10adf924c5a63160b"
+      "sha256": "a39023ffcfd890fcf9a63f984e764d31ee8f61cc417c4604fecd11104790318c"
     },
     {
       "path": ".github/workflows/citrix-workspace-standin.yml",
@@ -584,6 +584,10 @@
       "sha256": "23505c38b6acd963c9ff647ca753a10b61a8981e31b9032eef032e1ad63d850c"
     },
     {
+      "path": "benchmark/ui_readback/results.json",
+      "sha256": "7f7a1ef83fef7ecab6f3bb990e6cd257a12e0af0b49be83aca6a16bfd25a2060"
+    },
+    {
       "path": "benchmark/vision_hardening/corpus.json",
       "sha256": "c64e45ce996f6b13b2e1a3f234d2931e10b5090163215a1185c639a019820e35"
     },
@@ -621,7 +625,7 @@
     },
     {
       "path": "claims.yaml",
-      "sha256": "8450f326dbc965e53061f0e2b7011b7c3521517615a74809f0ee08d8a9a61bc9"
+      "sha256": "18bbd20323ebc03dbd324281abff0341665eb922f78683235872055b56a02124"
     },
     {
       "path": "deploy/on-prem/docker-compose.yml",
@@ -661,7 +665,7 @@
     },
     {
       "path": "docs/deployment.example.yaml",
-      "sha256": "f6dac74406cfecdffae86d40be9e96737466132a27ebbaffb53c340184c321e5"
+      "sha256": "ac89697f29b492c5c4c01fb713b301dbbbcf1e9b450d4da0a52db245774699e4"
     },
     {
       "path": "docs/program-workbench.png",
@@ -1853,7 +1857,23 @@
     },
     {
       "path": "docs/verification.json",
-      "sha256": "36785c46f94786ad878a9c4eb3953f6342de9e7f08d2b9b57ca2cc7dd00eb6b2"
+      "sha256": "3180937cfabea39634fabb5afc51f0e8f003a4042f076be94d65e495de4ce6c7"
+    },
+    {
+      "path": "examples/claude-code-demo/demo.gif",
+      "sha256": "b4dcdf941ec450d54c287bd852993341e47bd9f99e485da69a5e4905df1f1e13"
+    },
+    {
+      "path": "examples/claude-code-demo/effect_contract.yaml",
+      "sha256": "d3272056e1d6bac6f78e57aa5c12e63c6eba055ab79196ad5da46dce88879d31"
+    },
+    {
+      "path": "examples/claude-code-demo/halt.gif",
+      "sha256": "91139d82dcff23a314b3097b9830223d2f01587bc2d8cc07cf24ab6ceed64276"
+    },
+    {
+      "path": "examples/claude-code-demo/policy.yaml",
+      "sha256": "831387f3481c7ea2d064b713361cc7650e46d30caf7ab54f72608e011676973b"
     },
     {
       "path": "openadapt_flow/console/static/console.css",

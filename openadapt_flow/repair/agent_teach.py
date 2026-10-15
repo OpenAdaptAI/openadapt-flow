@@ -111,6 +111,7 @@ def teach_from_calling_agent(
         shutil.copy2(run_dir / "report.json", evidence / "report.json")
         taught: list[TaughtStep] = []
         for step_id, step in sorted(new_steps.items()):
+            assert step.anchor is not None  # filtered above
             frame = _evidence_frame(recording, step.anchor.template)
             target = evidence / "heals" / step_id / "screen.png"
             target.parent.mkdir(parents=True)

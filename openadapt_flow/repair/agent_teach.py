@@ -6,12 +6,15 @@ turned on screen access for that workflow, the agent may demonstrate the
 stuck step once while OpenAdapt records it. This module takes that recording
 and:
 
-1. runs the ordinary :func:`openadapt_flow.learning.teach.teach` loop, which
+1. marks the dialog around each click as that step's identity
+   (:mod:`openadapt_flow.repair.dialog_identity`), so a dismiss step can
+   pass the fault campaign the same way a record-row step does;
+2. runs the ordinary :func:`openadapt_flow.learning.teach.teach` loop, which
    refuses an underdetermined or unsafe fix and writes nothing;
-2. copies the frame the agent acted on into a per-candidate evidence
+3. copies the frame the agent acted on into a per-candidate evidence
    directory, so ``openadapt-flow repair campaign`` has a frame to replay the
    taught step against;
-3. writes the detached ``repair/candidate.json`` with
+4. writes the detached ``repair/candidate.json`` with
    :class:`~openadapt_flow.repair.candidate.RepairProvenance` attached.
 
 The result is a candidate in state ``candidate``. It goes through the same
@@ -40,6 +43,7 @@ from openadapt_flow.repair.candidate import (
     sha256_hex,
 )
 from openadapt_flow.repair.cli import all_steps
+from openadapt_flow.repair.dialog_identity import mark_dialog_in_recording
 from openadapt_flow.repair.registration import build_candidate, detached_candidate_path
 
 __all__ = ["AgentTeachRefused", "AgentTeachResult", "teach_from_calling_agent"]
@@ -79,11 +83,14 @@ def teach_from_calling_agent(
     bundle: Path | str,
     provenance: RepairProvenance,
     library_dir: Optional[Path | str] = None,
+    dialog_region: Optional[tuple[int, int, int, int]] = None,
 ) -> AgentTeachResult:
     """Build a governed repair candidate from an agent's recorded demonstration.
 
     Raises :class:`AgentTeachRefused` when the teach loop refuses the fix or
     the candidate can't be recorded. In both cases nothing is left at ``out``.
+    ``dialog_region`` is the dialog's box when the caller knows it from the
+    DOM or accessibility tree; otherwise it is found in the recorded frame.
     """
     run_dir = Path(run_dir)
     recording = Path(recording)
@@ -92,6 +99,7 @@ def teach_from_calling_agent(
         raise AgentTeachRefused(f"{out} already exists; pick a new output path")
     evidence = out.parent / f"{out.name}.evidence"
     try:
+        mark_dialog_in_recording(recording, dialog_region=dialog_region)
         result = teach(run_dir, recording, out, bundle=bundle, library_dir=library_dir)
         if not result.promoted:
             raise AgentTeachRefused(result.outcome.reason)

@@ -1,15 +1,12 @@
 """A calling agent's demonstration becomes a governed repair candidate.
 
-End to end on the modal-once fixture: a run halts, the agent's one-click
-recording is taught through :func:`teach_from_calling_agent`, the candidate
-waits for a person, the agent's own review and approval are refused, a person
+End to end on :mod:`openadapt_flow.repair.dialog_fixture`, a rendered page
+where a survey dialog covers the confirm banner after Save. Flow's real
+replayer, template matcher, OCR, teach loop, and replay and fault campaigns
+run on it; nothing is stubbed. The run halts, the agent's one-click recording
+is taught, the agent's own review and approval are refused, a person
 approves, staging and canary activate it, and the activated bundle replays
 without halting.
-
-The vision-dependent campaign verdicts are recorded as fixed results here;
-``test_repair_lifecycle`` covers the campaign batteries themselves. One test
-runs the production campaign over the taught step to show it finds the step
-and refuses a binding with no identity evidence.
 """
 
 from __future__ import annotations
@@ -19,24 +16,19 @@ from pathlib import Path
 
 import pytest
 
+from openadapt_flow.ir import Workflow
 from openadapt_flow.repair import Actor, CanaryRunObservation, RepairStore
+from openadapt_flow.repair import dialog_fixture as fx
 from openadapt_flow.repair.agent_teach import (
     AgentTeachRefused,
     teach_from_calling_agent,
 )
-from openadapt_flow.repair.candidate import (
-    CampaignResult,
-    RepairProvenance,
-    ScreenScrubEvidence,
-)
+from openadapt_flow.repair.campaign import _fault_verifier_failure
+from openadapt_flow.repair.candidate import RepairProvenance, ScreenScrubEvidence
 from openadapt_flow.repair.cli import _run_campaign
+from openadapt_flow.repair.dialog_identity import enclosing_dialog_region
 from openadapt_flow.repair.lifecycle import ModelActuationError, RepairLifecycleError
-from tests.test_teach_cli import (
-    _assert_resolved,
-    _base_bundle,
-    _dismiss_recording,
-    _halt_run,
-)
+from openadapt_flow.runtime.replayer import Replayer
 
 AGENT_ID = "mcp-client:test-agent"
 PERSON = Actor(kind="human", id="reviewer@example.org")
@@ -61,15 +53,37 @@ def _provenance(**overrides) -> RepairProvenance:
     return RepairProvenance(**values)
 
 
+def _replay(bundle: Path, run_dir: Path):
+    app = fx.DialogApp()
+    report = Replayer(app).run(
+        Workflow.load(bundle), bundle_dir=bundle, run_dir=run_dir
+    )
+    return report, app
+
+
+def _agent_recording(root: Path, *, dialog_region=None) -> Path:
+    screen = fx.DialogApp(saved=True)
+    before = screen.screenshot()
+    screen.click(*fx.DISMISS_CLICK)
+    return fx.record_click(
+        root, before, screen.screenshot(), fx.DISMISS_CLICK, dialog_region=dialog_region
+    )
+
+
 @pytest.fixture()
-def taught(tmp_path: Path):
-    bundle = _base_bundle(tmp_path)
-    run_dir = tmp_path / "run"
-    _halt_run(bundle, run_dir)
-    recording = _dismiss_recording(tmp_path / "agent_recording")
+def halted(tmp_path: Path):
+    bundle = fx.base_bundle(tmp_path / "bundle")
+    report, _ = _replay(bundle, tmp_path / "run")
+    assert report.halt is not None and report.halt.state_id == "s_verify"
+    return bundle, tmp_path / "run"
+
+
+@pytest.fixture()
+def taught(halted, tmp_path: Path):
+    bundle, run_dir = halted
     result = teach_from_calling_agent(
         run_dir,
-        recording,
+        _agent_recording(tmp_path / "agent_recording"),
         tmp_path / "proposed",
         bundle=bundle,
         provenance=_provenance(),
@@ -77,26 +91,19 @@ def taught(tmp_path: Path):
     return bundle, run_dir, result
 
 
-def _passed(kind: str) -> CampaignResult:
-    return CampaignResult(campaign=kind, passed=True, total=5, failed=0)
-
-
 def test_halt_to_teach_to_approved_replay(taught, tmp_path: Path) -> None:
     _, _, result = taught
     candidate = result.candidate
     assert candidate.state == "candidate"
-    assert candidate.source == "teach"
     assert candidate.provenance is not None
     assert candidate.provenance.repaired_by == "calling_agent"
-    assert candidate.provenance.screens_scrubbed is True
-    assert [step.step_id for step in candidate.taught_steps] == ["s_click_'dismiss'"]
+    [taught_step] = candidate.taught_steps
     assert (
-        result.evidence_dir / "heals" / "s_click_'dismiss'" / "screen.png"
+        result.evidence_dir / "heals" / taught_step.step_id / "screen.png"
     ).is_file()
 
     store = RepairStore(tmp_path / "store")
     candidate = store.add_candidate(candidate)
-    # Until a person approves, nothing is active: the run stays halted.
     assert store.active_pointer() is None
 
     agent_as_person = Actor(kind="human", id=AGENT_ID)
@@ -104,23 +111,26 @@ def test_halt_to_teach_to_approved_replay(taught, tmp_path: Path) -> None:
         store.review(candidate.candidate_id, agent_as_person)
     with pytest.raises(ModelActuationError):
         store.review(candidate.candidate_id, Actor(kind="model", id=AGENT_ID))
-
     store.review(candidate.candidate_id, PERSON)
-    store.record_campaign(candidate.candidate_id, _passed("replay"), AUTOMATION)
-    store.record_campaign(candidate.candidate_id, _passed("fault"), AUTOMATION)
+
+    # The production campaigns, with Flow's real resolver and OCR.
+    for kind in ("replay", "fault"):
+        campaign = _run_campaign(store.load_candidate(candidate.candidate_id), kind)
+        assert campaign.passed, [c.detail for c in campaign.cases if not c.passed]
+        store.record_campaign(candidate.candidate_id, campaign, AUTOMATION)
 
     with pytest.raises(RepairLifecycleError, match="may not perform repair approval"):
         store.approve(candidate.candidate_id, agent_as_person, non_interactive=True)
     with pytest.raises(RepairLifecycleError):
         store.approve(candidate.candidate_id, AUTOMATION)
-
     candidate = store.approve(candidate.candidate_id, PERSON, non_interactive=True)
-    assert candidate.approval.approved_by == PERSON.id
     store.stage(candidate.candidate_id, AUTOMATION)
     store.start_canary(candidate.candidate_id, AUTOMATION, max_runs=1)
-    pointer = store.active_pointer()
-    active_bundle = store.bundle_path(pointer.active_digest)
-    _assert_resolved(active_bundle, tmp_path / "canary-run")
+
+    active = store.bundle_path(store.active_pointer().active_digest)
+    report, app = _replay(active, tmp_path / "canary-run")
+    assert report.success is True and report.halt is None
+    assert ("press", "S") in app.actions and app.dialog is False
     candidate = store.record_canary_run(
         candidate.candidate_id,
         CanaryRunObservation(run_id="canary-1", verified=True, silent_incorrect=False),
@@ -129,25 +139,79 @@ def test_halt_to_teach_to_approved_replay(taught, tmp_path: Path) -> None:
     assert "taught by calling agent" in candidate.diff_summary()
 
 
-def test_production_campaign_covers_taught_step_and_fails_closed(taught) -> None:
-    _, _, result = taught
-    fault = _run_campaign(result.candidate, "fault")
-    assert fault.total > 0
-    assert all(case.label.startswith("s_click_'dismiss'") for case in fault.cases)
-    # The fixture's dismiss button has no identity evidence: refused.
-    assert fault.passed is False
+def test_dialog_found_from_pixels_or_given_by_dom(halted, tmp_path: Path) -> None:
+    app = fx.DialogApp(saved=True)
+    region = enclosing_dialog_region(app.screenshot(), fx.DISMISS_CLICK)
+    assert region is not None
+    x, y, w, h = region
+    dx, dy, dw, dh = fx.DIALOG_REGION
+    assert (
+        abs(x - dx) <= 4 and abs(y - dy) <= 4 and abs(w - dw) <= 8 and abs(h - dh) <= 8
+    )
+    app.dialog = False
+    assert enclosing_dialog_region(app.screenshot(), fx.DISMISS_CLICK) is None
+
+    bundle, run_dir = halted
+    result = teach_from_calling_agent(
+        run_dir,
+        _agent_recording(tmp_path / "dom_recording"),
+        tmp_path / "dom_proposed",
+        bundle=bundle,
+        provenance=_provenance(),
+        dialog_region=fx.DIALOG_REGION,
+    )
+    assert _run_campaign(result.candidate, "fault").passed
 
 
-def test_refused_teach_leaves_nothing(tmp_path: Path) -> None:
-    bundle = _base_bundle(tmp_path)
-    run_dir = tmp_path / "run"
-    _halt_run(bundle, run_dir)
+def test_dismiss_without_a_dialog_box_stays_unarmed(halted, tmp_path: Path) -> None:
+    """With no dialog to read identity from, the fault campaign refuses."""
+    bundle, run_dir = halted
+    recording = _agent_recording(tmp_path / "bare_recording")
+    # A frame with no box around the click: nothing to mark.
+    blank = fx.DialogApp(saved=True)
+    blank.dialog = False
+    (recording / "frames" / "0000_before.png").write_bytes(
+        _paint_button_only(blank.screenshot())
+    )
+    result = teach_from_calling_agent(
+        run_dir, recording, tmp_path / "bare", bundle=bundle, provenance=_provenance()
+    )
+    assert _run_campaign(result.candidate, "fault").passed is False
+
+
+def _paint_button_only(png: bytes) -> bytes:
+    import cv2
+    import numpy as np
+
+    image = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_COLOR)
+    cv2.rectangle(image, (60, 116), (220, 164), (225, 225, 225), -1)
+    cv2.putText(
+        image, "Dismiss", (84, 148), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2
+    )
+    ok, buf = cv2.imencode(".png", image)
+    assert ok
+    return buf.tobytes()
+
+
+def test_verifier_failure_fault_grays_the_whole_identity_region() -> None:
+    from PIL import Image
+
+    image = Image.new("RGB", (300, 200), (255, 255, 255))
+    out = _fault_verifier_failure(image, (100, 150, 40, 20), (10, 10, 200, 100))
+    assert out.getpixel((15, 15)) == (128, 128, 128)
+    assert out.getpixel((120, 160)) == (255, 255, 255)  # target pasted back
+    unmarked = _fault_verifier_failure(image, (100, 150, 40, 20))
+    assert unmarked.getpixel((15, 15)) == (255, 255, 255)
+
+
+def test_refused_teach_leaves_nothing(halted, tmp_path: Path) -> None:
+    bundle, run_dir = halted
     empty = tmp_path / "empty_recording"
     (empty / "frames").mkdir(parents=True)
     (empty / "events.jsonl").write_text("")
     (empty / "meta.json").write_text(
         '{"id": "rec-empty", "created_at": "2026-07-14T00:00:00+00:00",'
-        ' "viewport": [1280, 800], "app_url": "http://localhost:0/", "params": {}}'
+        ' "viewport": [1280, 800], "app_url": "", "params": {}}'
     )
     out = tmp_path / "proposed"
     with pytest.raises(Exception):
@@ -173,7 +237,6 @@ def test_existing_output_is_refused(taught, tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "overrides",
     [
-        # Unscrubbed screens outside allow_unscrubbed.
         dict(screens_scrubbed=False, scrub_evidence=None),
         dict(
             screen_share_mode="ask_each_time",
@@ -181,9 +244,7 @@ def test_existing_output_is_refused(taught, tmp_path: Path) -> None:
             scrub_evidence=None,
             screen_share_approved_by="reviewer@example.org",
         ),
-        # Scrubbed without evidence of what scrubbed them.
         dict(scrub_evidence=None),
-        # ask_each_time without a named approver, or approved by the agent.
         dict(screen_share_mode="ask_each_time"),
         dict(screen_share_mode="ask_each_time", screen_share_approved_by=AGENT_ID),
     ],

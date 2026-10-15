@@ -21,6 +21,7 @@ from openadapt_flow.runtime.identity_template import (
 )
 
 _FORM_HTML = """<!doctype html><html><body style="margin:0;font:14px sans-serif">
+<style>form > div { display: flex; align-items: center; height: 40px; gap: 6px; }</style>
 <form>
  <div class="form-group row" id="g-name" style="height:40px">
   <label>Name:</label>

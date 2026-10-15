@@ -13770,7 +13770,15 @@ class Replayer:
             # text_present (not find_text): presence must not depend on
             # whether the OCR engine merged the target into a longer box
             # or split it across boxes — see vision.ocr.text_present.
-            return pc.text is not None and self.vision.text_present(frame_png, pc.text)
+            if pc.text is None:
+                return False
+            # Page-structure first: the DOM can PROVE the text is rendered,
+            # visible and uncovered (exact normalized substring, stricter
+            # than the fuzzy OCR match). It can never prove absence, so a DOM
+            # miss falls through to the OCR check, unchanged.
+            if self._dom_text_visible(pc.text):
+                return True
+            return self.vision.text_present(frame_png, pc.text)
         if kind == "text_absent":
             return pc.text is None or not self.vision.text_present(frame_png, pc.text)
         if kind == "region_stable":
@@ -13816,6 +13824,21 @@ class Replayer:
             distance = self.vision.phash_distance(live, pc.phash)
             return distance <= pc.phash_tolerance
         return False
+
+    def _dom_text_visible(self, text: str) -> bool:
+        """True only when the backend proves ``text`` is visibly rendered.
+
+        Optional backend seam ``visible_text_present`` (browser DOM). Any
+        other answer, a missing seam, or an error is "not proven" -> False,
+        so the caller keeps its visual check.
+        """
+        reader = getattr(self.backend, "visible_text_present", None)
+        if not callable(reader):
+            return False
+        try:
+            return reader(text) is True
+        except Exception:
+            return False
 
     def _postcondition_template(self, pc: Any, bundle_dir: Path) -> Optional[bytes]:
         """Bytes of a REGION_STABLE postcondition's template crop, if any."""

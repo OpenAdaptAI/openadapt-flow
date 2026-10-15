@@ -10,7 +10,7 @@ after a run halts, before the browser closes. It writes
 - ``{"secret": ..., "op": "click", "x": X, "y": Y}`` -> ``{"ok": true}``
 - ``{"secret": ..., "op": "release"}`` -> ends the hold
 
-The hold ends on ``release`` or after ``timeout_s``. Either way the socket,
+The hold ends on ``release``, after ``timeout_s``, or on SIGTERM. Either way the socket,
 its directory, and the hold file are removed, and the caller closes the
 browser as usual. Only openadapt-agent's teach_repair path uses this; it
 never acts on its own.
@@ -23,8 +23,10 @@ import json
 import os
 import secrets
 import shutil
+import signal
 import socket
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -73,6 +75,14 @@ def hold_for_repair(
     hold_file = run_dir / HOLD_FILE
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     ended = "timeout"
+    stopping: list[int] = []
+    previous = None
+    if threading.current_thread() is threading.main_thread():
+        # The parent ending the hold (SIGTERM) must still clean up and let the
+        # caller close the browser, so turn it into a normal end of the hold.
+        previous = signal.signal(
+            signal.SIGTERM, lambda signum, frame: stopping.append(signum)
+        )
     try:
         server.bind(str(sock_path))
         os.chmod(sock_path, 0o600)
@@ -92,6 +102,9 @@ def hold_for_repair(
             )
         while True:
             remaining = deadline - time.monotonic()
+            if stopping:
+                ended = "terminated"
+                break
             if remaining <= 0:
                 break
             server.settimeout(min(remaining, 1.0))
@@ -125,6 +138,8 @@ def hold_for_repair(
                     except OSError:
                         pass
     finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
         server.close()
         hold_file.unlink(missing_ok=True)
         shutil.rmtree(private, ignore_errors=True)

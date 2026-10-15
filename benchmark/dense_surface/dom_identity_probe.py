@@ -22,6 +22,7 @@ For each of three corpora it reports, per click config:
 
 Usage: python benchmark/dense_surface/dom_identity_probe.py [seeds...]
 """
+
 import sys
 from collections import defaultdict
 
@@ -65,22 +66,30 @@ def measure(name, builder, seeds):
     ofa, ofab, n = totals(ocr)
     dfa, dfab, _ = totals(dom)
     print(f"\n===== {name}: {n} trials =====")
-    print(f"  STRUCTURED (DOM)  FALSE ACCEPT {dfa}/{n} "
-          f"({100*dfa/n:.1f}%)   FALSE ABORT {dfab}/{n} ({100*dfab/n:.1f}%)")
-    print(f"  OCR FALLBACK #27  FALSE ACCEPT {ofa}/{n} "
-          f"({100*ofa/n:.1f}%)   FALSE ABORT {ofab}/{n} ({100*ofab/n:.1f}%)")
+    print(
+        f"  STRUCTURED (DOM)  FALSE ACCEPT {dfa}/{n} "
+        f"({100 * dfa / n:.1f}%)   FALSE ABORT {dfab}/{n} ({100 * dfab / n:.1f}%)"
+    )
+    print(
+        f"  OCR FALLBACK #27  FALSE ACCEPT {ofa}/{n} "
+        f"({100 * ofa / n:.1f}%)   FALSE ABORT {ofab}/{n} ({100 * ofab / n:.1f}%)"
+    )
     for cfg in ("click_name", "click_action"):
         cd, co = dom[cfg], ocr[cfg]
         if co["n"]:
-            print(f"    {cfg:13}  DOM FA {cd['fa']:3}/{cd['n']:3} "
-                  f"FABORT {cd['fab']:3}/{cd['n']:3} (armed {cd['armed']})"
-                  f"   |   OCR FA {co['fa']:3}/{co['n']:3} "
-                  f"FABORT {co['fab']:3}/{co['n']:3}")
+            print(
+                f"    {cfg:13}  DOM FA {cd['fa']:3}/{cd['n']:3} "
+                f"FABORT {cd['fab']:3}/{cd['n']:3} (armed {cd['armed']})"
+                f"   |   OCR FA {co['fa']:3}/{co['n']:3} "
+                f"FABORT {co['fab']:3}/{co['n']:3}"
+            )
     if dom_collapse:
         print("  -- glyph-collapse cases the DOM path CAUGHT that OCR missed --")
         for t in dom_collapse[:3]:
-            print(f"    {t['click_config']} {t['collision_class']} "
-                  f"tgt={t['target_mrn']} sib={t['sibling_mrn']}")
+            print(
+                f"    {t['click_config']} {t['collision_class']} "
+                f"tgt={t['target_mrn']} sib={t['sibling_mrn']}"
+            )
             print(f"      OCR  rec band={t['acc_expected']!r}")
             print(f"      OCR  obs band={t['acc_observed']!r}  (raw-identical)")
             print(f"      DOM  rec={t['structured_recorded']!r}")

@@ -67,6 +67,16 @@ QUIESCENCE_INSTALL_JS = r"""
     } catch (e) {
         state.broken = true;
     }
+
+    const COSMETIC = new Set([
+        'outline', 'outline-color', 'outline-width', 'outline-offset',
+        'outline-style', 'box-shadow', 'color', 'background-color',
+        'border-color', 'border-top-color', 'border-right-color',
+        'border-bottom-color', 'border-left-color', 'text-decoration-color',
+        'caret-color', 'fill', 'stroke',
+    ]);
+    const cosmeticEvent = (ev) => ev && typeof ev.propertyName === 'string' &&
+        COSMETIC.has(ev.propertyName);
     for (const type of [
         'input', 'change', 'scroll', 'focusin', 'focusout', 'selectionchange',
         'pointerdown', 'pointerup', 'pointermove', 'pointerover', 'pointerout',
@@ -75,8 +85,9 @@ QUIESCENCE_INSTALL_JS = r"""
         'transitionend', 'transitioncancel', 'animationstart',
         'animationiteration', 'animationend', 'animationcancel',
     ]) {
-        try { window.addEventListener(type, () => bump(type), true); } catch (e) {}
-        try { document.addEventListener(type, () => bump(type), true); } catch (e) {}
+        const h = (ev) => { if (!cosmeticEvent(ev)) bump(type); };
+        try { window.addEventListener(type, h, true); } catch (e) {}
+        try { document.addEventListener(type, h, true); } catch (e) {}
     }
     if (window === window.top) {
         state.ticks = [0, 0];
@@ -91,6 +102,36 @@ QUIESCENCE_INSTALL_JS = r"""
 
 # Judge one window's own document; '' when quiet, else a reason.
 _JUDGE_DOC_JS = r"""
+
+const COSMETIC = new Set([
+    'outline', 'outline-color', 'outline-width', 'outline-offset',
+    'outline-style', 'box-shadow', 'color', 'background-color',
+    'border-color', 'border-top-color', 'border-right-color',
+    'border-bottom-color', 'border-left-color', 'text-decoration-color',
+    'caret-color', 'fill', 'stroke',
+]);
+// A running animation/transition is cosmetic only when EVERY property it
+// animates is a paint-only colour/ring property (focus and hover rings). Any
+// transform, size, position, opacity or layout property keeps it blocking:
+// those move or reveal content.
+const cosmeticAnimation = (a) => {
+    try {
+        if (typeof a.transitionProperty === 'string') {
+            return COSMETIC.has(a.transitionProperty);
+        }
+        const frames = a.effect && a.effect.getKeyframes ? a.effect.getKeyframes() : [];
+        if (!frames.length) return false;
+        for (const f of frames) {
+            for (const k of Object.keys(f)) {
+                if (k === 'offset' || k === 'computedOffset' || k === 'easing' ||
+                        k === 'composite') continue;
+                const css = k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+                if (!COSMETIC.has(css)) return false;
+            }
+        }
+        return true;
+    } catch (e) { return false; }
+};
 const judgeDoc = (win, windowMs, nowAbs) => {
     const doc = win.document;
     const state = win.__oaflowQuiet;
@@ -109,7 +150,9 @@ const judgeDoc = (win, windowMs, nowAbs) => {
     }
     try {
         for (const a of doc.getAnimations()) {
-            if (a.playState === 'running' || a.pending) return 'busy:animation';
+            if (!(a.playState === 'running' || a.pending)) continue;
+            if (cosmeticAnimation(a)) continue;
+            return 'busy:animation';
         }
     } catch (e) { return 'unavailable'; }
     if (nowAbs - state.installed < windowMs) return 'busy:installed';

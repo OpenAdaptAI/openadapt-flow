@@ -8,6 +8,7 @@ thin runner that prints the ratios and writes ``structural_action.json``.
 
 Usage:  python benchmark/structural_action/structural_action_probe.py [n] [--show]
 """
+
 from __future__ import annotations
 
 import json

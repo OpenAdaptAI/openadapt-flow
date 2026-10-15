@@ -106,8 +106,14 @@ _CATEGORY = {
 }
 
 
-def _row(id_: int, *, note: str = F.NOTE_TEXT, source: str = "replay",
-         type_: str = F.TARGET_TYPE, patient: str = F.TARGET_PATIENT) -> dict:
+def _row(
+    id_: int,
+    *,
+    note: str = F.NOTE_TEXT,
+    source: str = "replay",
+    type_: str = F.TARGET_TYPE,
+    patient: str = F.TARGET_PATIENT,
+) -> dict:
     return {
         "id": id_,
         "patient_id": patient,
@@ -268,8 +274,10 @@ def main() -> None:
     effect = summarize(episodes, arm="effect_verify")
 
     print("EffectBench re-expression of benchmark/fault_model\n")
-    print(f"{'scenario':12s} {'true effect':16s} "
-          f"{'screen_only':22s} {'effect_verify':22s}")
+    print(
+        f"{'scenario':12s} {'true effect':16s} "
+        f"{'screen_only':22s} {'effect_verify':22s}"
+    )
     print("-" * 74)
     by_key: dict[tuple[str, str], EpisodeRecord] = {}
     for e in episodes:
@@ -279,12 +287,13 @@ def main() -> None:
         so = by_key[("screen_only", tid)]
         ev = by_key[("effect_verify", tid)]
         true = (
-            "correct" if so.oracle.effect_correct
-            else "absent" if so.oracle.effect_absent
+            "correct"
+            if so.oracle.effect_correct
+            else "absent"
+            if so.oracle.effect_absent
             else "wrong_persisted"
         )
-        print(f"{s.mode:12s} {true:16s} "
-              f"{so.outcome.value:22s} {ev.outcome.value:22s}")
+        print(f"{s.mode:12s} {true:16s} {so.outcome.value:22s} {ev.outcome.value:22s}")
 
     silent_transactional = sum(
         1

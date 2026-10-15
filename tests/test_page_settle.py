@@ -304,3 +304,78 @@ def test_half_loaded_page_blocks_action_under_readiness_gate(browser) -> None:
         assert page.locator("button").count() == 0
     finally:
         ctx.close()
+
+
+_FOCUS_RING = """<!doctype html><html><head><style>
+input { transition: box-shadow 1.5s, border-color 1.5s; border: 1px solid #ccc }
+input:focus { box-shadow: 0 0 0 4px blue; border-color: blue }
+#grow { width: 10px; height: 10px; background: red; transition: width 1.5s }
+#grow.big { width: 300px }
+</style></head><body><input id=i><div id=grow></div></body></html>"""
+
+
+def test_cosmetic_focus_ring_transition_does_not_block(browser) -> None:
+    backend, page, ctx = _backend(browser, _FOCUS_RING)
+    try:
+        time.sleep(0.3)
+        page.focus("#i")  # starts a 1.5 s box-shadow/border-color transition
+        time.sleep(0.25)
+        assert page.evaluate("document.getAnimations().length") > 0
+        assert backend.page_quiescent(0.1) is True
+    finally:
+        ctx.close()
+
+
+def test_layout_transition_still_blocks(browser) -> None:
+    backend, page, ctx = _backend(browser, _FOCUS_RING)
+    try:
+        time.sleep(0.3)
+        page.evaluate("document.getElementById('grow').classList.add('big')")
+        time.sleep(0.25)
+        assert backend.page_quiescent(0.1) is False
+        assert backend._quiescence.last_reason == "busy:animation"
+    finally:
+        ctx.close()
+
+
+class _SelectBackend:
+    def __init__(self, label):
+        self.label = label
+
+    def focused_select_label_at(self, x, y):
+        return self.label
+
+
+class _PixelVision:
+    def __init__(self):
+        self.ocr_calls = 0
+
+    def pixels_changed(self, a, b, region=None):
+        return True
+
+    def ocr(self, png, region=None):
+        self.ocr_calls += 1
+        return []
+
+
+def _typed(label, text="Massachusetts"):
+    from openadapt_flow.runtime.replayer import Replayer
+
+    r = Replayer.__new__(Replayer)
+    r.backend = _SelectBackend(label)
+    r.vision = _PixelVision()
+    r._settle_seeded = lambda: b"after"
+    r._field_region = lambda point, region: (0, 0, 10, 10)
+    return r._typed_input_landed(text, (5, 5), b"before"), r.vision.ocr_calls
+
+
+def test_dropdown_typed_input_verified_from_dom() -> None:
+    (landed, changed), ocr_calls = _typed("Massachusetts")
+    assert landed and changed and ocr_calls == 0
+
+
+@pytest.mark.parametrize("label", [None, "Maine", "Massachusetts (MA)"])
+def test_dropdown_dom_miss_falls_back_and_never_passes(label) -> None:
+    (landed, _changed), ocr_calls = _typed(label)
+    assert landed is False  # OCR (empty here) decides; DOM miss never passes
+    assert ocr_calls >= 1

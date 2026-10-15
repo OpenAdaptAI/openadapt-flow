@@ -93,8 +93,9 @@ from effectbench.schema import AgentReport, TaskSpec
 class MySUT:
     name = "my-agent"
 
-    def run_task(self, task: TaskSpec, env: EnvHandle, *,
-                 params: Mapping[str, str]) -> AgentReport:
+    def run_task(
+        self, task: TaskSpec, env: EnvHandle, *, params: Mapping[str, str]
+    ) -> AgentReport:
         # 1. Drive the reference system toward task.goal (intent, not steps).
         obs = env.attempt_intended_action(params)
         # 2. Decide success HOWEVER your system does. If you have your own
@@ -105,7 +106,7 @@ class MySUT:
 
 episodes = evaluate(MySUT(), trials=10)
 summary = summarize(episodes, arm="my-agent")
-print(summary.swer.rate, summary.over_halt.rate)   # report BOTH, always
+print(summary.swer.rate, summary.over_halt.rate)  # report BOTH, always
 ```
 
 ## The adapter contract
@@ -114,8 +115,10 @@ print(summary.swer.rate, summary.over_halt.rate)   # report BOTH, always
 @runtime_checkable
 class SystemUnderTest(Protocol):
     name: str
-    def run_task(self, task: TaskSpec, env: EnvHandle,
-                 *, params: Mapping[str, str]) -> AgentReport: ...
+
+    def run_task(
+        self, task: TaskSpec, env: EnvHandle, *, params: Mapping[str, str]
+    ) -> AgentReport: ...
 ```
 
 - `task.goal` is the natural-language intent, **never a step list** (fairness).
@@ -144,14 +147,17 @@ oracle, and runs through the same runner and the same two reference baselines:
 from effectbench import EpisodeSetup, evaluate_provider
 from effectbench.adapter import EffectVerifiedSUT, ScreenOnlySUT
 
+
 class MyProvider:
     name = "my-system"
-    def tasks(self):                      # opaque task handles
+
+    def tasks(self):  # opaque task handles
         ...
     def provision(self, task, trial) -> EpisodeSetup:
         # build a FRESH system-of-record state, an arm-facing env, and an
         # INDEPENDENT oracle the SUT can never reach; return an EpisodeSetup.
         ...
+
 
 episodes = evaluate_provider(ScreenOnlySUT(), MyProvider(), trials=10)
 ```

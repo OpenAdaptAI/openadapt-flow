@@ -77,8 +77,9 @@ def screenshot() -> object:
         png = _grab_png()
     except Exception as e:  # noqa: BLE001
         return (
-            jsonify({"status": "error", "error": str(e),
-                     "trace": traceback.format_exc()}),
+            jsonify(
+                {"status": "error", "error": str(e), "trace": traceback.format_exc()}
+            ),
             500,
         )
     return send_file(io.BytesIO(png), mimetype="image/png")
@@ -101,8 +102,9 @@ def execute_windows() -> object:
         exec(command, scope)  # noqa: S102 - the WAA contract is remote exec
     except Exception as e:  # noqa: BLE001
         return (
-            jsonify({"status": "error", "error": str(e),
-                     "trace": traceback.format_exc()}),
+            jsonify(
+                {"status": "error", "error": str(e), "trace": traceback.format_exc()}
+            ),
             500,
         )
     return jsonify({"status": "ok"})

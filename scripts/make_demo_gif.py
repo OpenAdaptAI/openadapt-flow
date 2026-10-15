@@ -71,12 +71,8 @@ def _panel(draw, img, shot: Path, x: int, label: str, label_color):
     if shot.is_file():
         panel = Image.open(shot).convert("RGB").resize((PANEL_W, PANEL_H))
         img.paste(panel, (x, y))
-    draw.rectangle(
-        [x - 1, y - 1, x + PANEL_W, y + PANEL_H], outline=(60, 60, 90)
-    )
-    _text_center(
-        draw, (x + PANEL_W / 2, y + PANEL_H + 10), label, F_BODY, label_color
-    )
+    draw.rectangle([x - 1, y - 1, x + PANEL_W, y + PANEL_H], outline=(60, 60, 90))
+    _text_center(draw, (x + PANEL_W / 2, y + PANEL_H + 10), label, F_BODY, label_color)
 
 
 def _step_caption(result: dict, healed: bool) -> tuple[str, tuple]:
@@ -103,19 +99,25 @@ def build(baseline_dir: Path, drift_dir: Path, out: Path) -> Path:
     img, draw = _frame()
     cx = CANVAS_W / 2
     _text_center(
-        draw, (cx, CANVAS_H / 2 - 70),
+        draw,
+        (cx, CANVAS_H / 2 - 70),
         "One demonstration. Two UIs. Same compiled workflow.",
-        F_TITLE, FG,
+        F_TITLE,
+        FG,
     )
     _text_center(
-        draw, (cx, CANVAS_H / 2 - 20),
+        draw,
+        (cx, CANVAS_H / 2 - 20),
         "Left: the UI it was recorded on.   Right: a theme it has never seen.",
-        F_BODY, DIM,
+        F_BODY,
+        DIM,
     )
     _text_center(
-        draw, (cx, CANVAS_H / 2 + 20),
+        draw,
+        (cx, CANVAS_H / 2 + 20),
         "Every frame below is a real screenshot saved by the replayer.",
-        F_SMALL, DIM,
+        F_SMALL,
+        DIM,
     )
     frames.append(img)
     durations.append(2600)
@@ -128,24 +130,36 @@ def build(baseline_dir: Path, drift_dir: Path, out: Path) -> Path:
             continue
         img, draw = _frame()
         _text_center(
-            draw, (CANVAS_W / 2, 18),
-            f"{step_id}  —  {res_b['intent']}", F_BODY, FG,
+            draw,
+            (CANVAS_W / 2, 18),
+            f"{step_id}  —  {res_b['intent']}",
+            F_BODY,
+            FG,
         )
         cap_b, col_b = _step_caption(res_b, healed=False)
         cap_d, col_d = _step_caption(res_d, healed=res_d.get("heal") is not None)
         _panel(
-            draw, img, baseline_dir / res_b["after_png"], MARGIN,
-            f"baseline · {cap_b}", col_b,
+            draw,
+            img,
+            baseline_dir / res_b["after_png"],
+            MARGIN,
+            f"baseline · {cap_b}",
+            col_b,
         )
         _panel(
-            draw, img, drift_dir / res_d["after_png"],
+            draw,
+            img,
+            drift_dir / res_d["after_png"],
             MARGIN + PANEL_W + GUTTER,
-            f"drift=theme · {cap_d}", col_d,
+            f"drift=theme · {cap_d}",
+            col_d,
         )
         _text_center(
-            draw, (CANVAS_W / 2, CANVAS_H - FOOTER_H + 12),
+            draw,
+            (CANVAS_W / 2, CANVAS_H - FOOTER_H + 12),
             "openadapt-flow · deterministic replay, self-healing on drift",
-            F_SMALL, DIM,
+            F_SMALL,
+            DIM,
         )
         frames.append(img)
         durations.append(1400 if res_d.get("heal") else 1000)

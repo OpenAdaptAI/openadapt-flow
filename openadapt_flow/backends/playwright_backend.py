@@ -581,6 +581,14 @@ _TEXT_AT_POINT_JS = r"""([px, py, target]) => {
     return false;
 }"""
 
+_FOCUSED_SELECT_AT_JS = r"""([px, py]) => {
+    const hit = document.elementFromPoint(px, py);
+    const sel = hit && hit.closest ? hit.closest('select') : null;
+    if (!sel || sel !== document.activeElement) return null;
+    const opt = sel.selectedOptions && sel.selectedOptions[0];
+    return opt ? (opt.label || opt.textContent || '') : null;
+}"""
+
 _STRUCTURED_TEXT_AT_JS = (
     r"""([px, py]) => {
     const el = document.elementFromPoint(px, py);
@@ -2665,6 +2673,22 @@ class PlaywrightBackend:
         return len(left) == len(right) and all(
             before is after for before, after in zip(left, right)
         )
+
+    def focused_select_label_at(self, x: int, y: int) -> Optional[str]:
+        """Selected option label of the FOCUSED ``<select>`` under ``(x, y)``.
+
+        ``None`` unless the hit-tested element at the point (through the real
+        frame chain) is a select that also holds focus. Used to verify typed
+        input into a dropdown without OCR; never raises.
+        """
+        try:
+            point = self._frame_point(int(x), int(y))
+            if point is None:
+                return None
+            out = point.scope.evaluate(_FOCUSED_SELECT_AT_JS, [point.x, point.y])
+        except Exception:
+            return None
+        return out if isinstance(out, str) else None
 
     def visible_text_present(self, text: str) -> Optional[bool]:
         """Is ``text`` rendered visibly in the viewport, per the DOM?

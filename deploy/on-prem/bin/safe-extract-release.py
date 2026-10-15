@@ -48,7 +48,9 @@ def extract(archive: Path, destination: Path) -> None:
                 raise ValueError(f"archive member exceeds size limit: {member.name!r}")
             total += member.size
             if total > MAX_TOTAL_BYTES:
-                raise ValueError("release archive exceeds total uncompressed size limit")
+                raise ValueError(
+                    "release archive exceeds total uncompressed size limit"
+                )
             checked.append((member, path))
 
         if not checked:
@@ -71,7 +73,9 @@ def extract(archive: Path, destination: Path) -> None:
             with source, os.fdopen(fd, "wb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
                 if output.tell() != member.size:
-                    raise ValueError(f"archive member size changed while extracting: {member.name!r}")
+                    raise ValueError(
+                        f"archive member size changed while extracting: {member.name!r}"
+                    )
 
 
 def main() -> int:

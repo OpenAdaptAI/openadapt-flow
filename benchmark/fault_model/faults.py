@@ -230,8 +230,7 @@ def classify(
         if n_writes == 0:
             return (
                 UNDETECTED_FAILURE,
-                "replay reported success but NOTHING was persisted "
-                "(phantom success)",
+                "replay reported success but NOTHING was persisted (phantom success)",
             )
         return (
             UNDETECTED_FAILURE,

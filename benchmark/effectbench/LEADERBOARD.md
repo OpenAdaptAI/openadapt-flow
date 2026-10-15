@@ -31,7 +31,7 @@ method) and build the submission in Python:
 from effectbench import evaluate
 from effectbench.leaderboard import build_submission
 
-episodes = evaluate(MySUT(), trials=10)          # runs the MockMed anchor
+episodes = evaluate(MySUT(), trials=10)  # runs the MockMed anchor
 doc = build_submission(
     system_name="my-agent",
     description="short description of the system under test",

@@ -12837,6 +12837,25 @@ class Replayer:
             # OCR, which could read the intended text elsewhere on the screen.
             return False, True
         changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
+        # Dropdown: typing selects the option whose label matches. When the
+        # focused <select> at the field point now shows exactly the typed
+        # label (whitespace-squashed, case-insensitive), the input landed.
+        # Any other answer falls through to the visual check, unchanged.
+        if field_point is not None and not allow_masked:
+            reader = getattr(self.backend, "focused_select_label_at", None)
+            label: Optional[str] = None
+            if callable(reader):
+                try:
+                    label = reader(int(field_point[0]), int(field_point[1]))
+                except Exception:
+                    label = None
+            if (
+                isinstance(label, str)
+                and identity_mod.squash(text)
+                and identity_mod.squash(label).casefold()
+                == identity_mod.squash(text).casefold()
+            ):
+                return True, True
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
             return changed, changed  # too short for OCR to arbitrate

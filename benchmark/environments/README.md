@@ -115,10 +115,10 @@ task, oracle contract, and per-table collateral-write audit.
 from benchmark.environments import all_environments, get
 
 emr = get("openemr_local")
-emr.service_digests()      # {"openemr": "openemr/openemr:8.0.0.3@sha256:...", ...}
-emr.sor.channels           # ("sql", "rest_api")
-emr.sor.read_recipe        # how to read the true effect off-screen
-emr.bringup                # deterministic bring-up commands
+emr.service_digests()  # {"openemr": "openemr/openemr:8.0.0.3@sha256:...", ...}
+emr.sor.channels  # ("sql", "rest_api")
+emr.sor.read_recipe  # how to read the true effect off-screen
+emr.bringup  # deterministic bring-up commands
 ```
 
 `registry_snapshot()` returns the JSON the task pack and oracle harness consume

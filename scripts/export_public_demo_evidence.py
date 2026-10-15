@@ -1000,9 +1000,7 @@ def _configure_qualification(
         application_identity=_origin(base_url),
         application_version=f"sha256:{app_digest}",
         environment_observer_id=ENVIRONMENT_OBSERVER_ID,
-        environment_observer_contract_sha256=(
-            ENVIRONMENT_OBSERVER_CONTRACT_SHA256
-        ),
+        environment_observer_contract_sha256=(ENVIRONMENT_OBSERVER_CONTRACT_SHA256),
         environment_digest=environment_digest,
         runtime_version=FLOW_VERSION,
         required_capabilities=[
@@ -1093,9 +1091,7 @@ def _configure_qualification(
     save_target = QualificationActionTarget(step_id=save.id, actuation_path="gui")
     for case in list(project.cases):
         fault_target = (
-            None
-            if case.kind is QualificationCaseKind.REPRESENTATIVE
-            else save_target
+            None if case.kind is QualificationCaseKind.REPRESENTATIVE else save_target
         )
         set_case_scope(
             workflow,
@@ -1197,9 +1193,7 @@ class _MockMedQualificationFaultDriver:
         elif context.fault_kind in {"weak_effect", "missing_effect"}:
             replace_effect_verifier = True
             replacement = (
-                _WeakEffectVerifier()
-                if context.fault_kind == "weak_effect"
-                else None
+                _WeakEffectVerifier() if context.fault_kind == "weak_effect" else None
             )
             after_sha256 = effect_verifier_input_sha256(
                 replacement,
@@ -1802,9 +1796,7 @@ def _run_idempotency_campaign(
                 "transaction_outcome": duplicate.transaction_outcome,
                 "idempotent_replay": duplicate.idempotent_replay,
                 "refusal_step_id": duplicate_results[0].step_id,
-                "delivery_attempted": bool(
-                    duplicate_results[0].delivery_attempted
-                ),
+                "delivery_attempted": bool(duplicate_results[0].delivery_attempted),
             },
             "independent_oracle": {
                 "sha256": _sha256(campaign_dir / "oracle.json"),
@@ -1858,9 +1850,7 @@ def _write_execute_acceptance_artifacts(
     template_path = qualification_dir / "governed-authorization-template.json"
     _write_json(template_path, template.model_dump(mode="json"))
     outcome_counts = Counter(
-        outcome["observed_outcome"]
-        for case in cases
-        for outcome in case["outcomes"]
+        outcome["observed_outcome"] for case in cases for outcome in case["outcomes"]
     )
     acceptance = {
         "schema_version": "openadapt.execute-transport-acceptance/v1",
@@ -1887,9 +1877,7 @@ def _write_execute_acceptance_artifacts(
                 "protocol_value": int(project.minimum_effect_tier),
                 "name": "INDEPENDENT_SYSTEM_OF_RECORD",
             },
-            "qualification_report_sha256": _sha256(
-                qualification_dir / "report.json"
-            ),
+            "qualification_report_sha256": _sha256(qualification_dir / "report.json"),
             "case_evidence_contract_sha256": (
                 certification.case_evidence_contract_sha256
             ),
@@ -1907,9 +1895,7 @@ def _write_execute_acceptance_artifacts(
     }
     _write_json(qualification_dir / "execute-transport-acceptance.json", acceptance)
 
-    representative = next(
-        case for case in cases if case["case_id"] == "representative"
-    )
+    representative = next(case for case in cases if case["case_id"] == "representative")
     representative_report = RunReport.model_validate_json(
         (root / representative["reports"][0]["path"]).read_text(encoding="utf-8")
     )
@@ -2939,14 +2925,10 @@ def _validate_execute_transport_artifacts(
         or oracle.get("passed") is not True
         or len(oracle.get("snapshot", {}).get("records", [])) != 1
         or summary.get("first", {}).get("report_sha256") != _sha256(first_path)
-        or summary.get("duplicate", {}).get("report_sha256")
-        != _sha256(duplicate_path)
-        or summary.get("independent_oracle", {}).get("sha256")
-        != _sha256(oracle_path)
+        or summary.get("duplicate", {}).get("report_sha256") != _sha256(duplicate_path)
+        or summary.get("independent_oracle", {}).get("sha256") != _sha256(oracle_path)
     ):
-        raise EvidencePackError(
-            "post-certification idempotency evidence is not exact"
-        )
+        raise EvidencePackError("post-certification idempotency evidence is not exact")
 
     template_path = _safe_file(
         root,
@@ -2969,8 +2951,7 @@ def _validate_execute_transport_artifacts(
     )
     if (
         acceptance.get("result") != "PASS"
-        or acceptance.get("scope", {}).get("bundle_content_digest")
-        != compiled_digest
+        or acceptance.get("scope", {}).get("bundle_content_digest") != compiled_digest
         or acceptance.get("qualification", {}).get(
             "governed_authorization_template_sha256"
         )

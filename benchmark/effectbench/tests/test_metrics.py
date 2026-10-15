@@ -15,7 +15,9 @@ from effectbench.schema import (
 from effectbench.effect import EffectKind, Verdict
 
 
-def _episode(outcome: OutcomeLabel, *, reported: bool, task: str = "t") -> EpisodeRecord:
+def _episode(
+    outcome: OutcomeLabel, *, reported: bool, task: str = "t"
+) -> EpisodeRecord:
     variant = (
         SwerVariant.WRONG_WRITE
         if outcome is OutcomeLabel.SILENT_WRONG_EFFECT

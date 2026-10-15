@@ -19,13 +19,18 @@ tradeoff is visible and reproducible:
 
 Usage: python benchmark/dense_surface/digit_flanked_probe.py [seeds...]
 """
+
 import sys
 import random
 from collections import defaultdict
 
 import openadapt_flow.validation.dense_surface as ds
 from openadapt_flow.validation.dense_surface import (
-    CollisionPair, Row, _dob, _mrn, run_trials,
+    CollisionPair,
+    Row,
+    _dob,
+    _mrn,
+    run_trials,
 )
 
 SURN, FIRST = ds._SURNAMES, ds._FIRSTS
@@ -52,11 +57,14 @@ def adversarial_pairs(seed):
         name = f"{rng.choice(SURN)}, {rng.choice(FIRST)}"
         sex = rng.choice("MF")
         status = rng.choice(ds._STATUSES)
-        pairs.append(CollisionPair(
-            label,
-            Row(name, dob, target_mrn, sex, status),
-            Row(name, dob, sibling_mrn, sex, status),
-            f"same name+DOB; digit-flanked MRN ({target_mrn} vs {sibling_mrn})"))
+        pairs.append(
+            CollisionPair(
+                label,
+                Row(name, dob, target_mrn, sex, status),
+                Row(name, dob, sibling_mrn, sex, status),
+                f"same name+DOB; digit-flanked MRN ({target_mrn} vs {sibling_mrn})",
+            )
+        )
     return pairs
 
 
@@ -69,8 +77,7 @@ def realistic_pairs(seed):
     mismatch on the sibling; the confusable-digit MRN must NOT block."""
     rng = random.Random(seed * 17 + 5)
     # realistic MRNs whose digit body carries 0/1 (glyph-vulnerable digits)
-    forms = ["MG480312", "RC710284", "PT601925", "KJ770019", "AC500614",
-             "MG140408"]
+    forms = ["MG480312", "RC710284", "PT601925", "KJ770019", "AC500614", "MG140408"]
     pairs = []
     for i, tmrn in enumerate(forms):
         # target and sibling are DIFFERENT people (different name; half also
@@ -84,11 +91,14 @@ def realistic_pairs(seed):
         sex = rng.choice("MF")
         status = rng.choice(ds._STATUSES)
         smrn = _mrn(rng, prefix=rng.choice(["MG", "RC", "PT"]))
-        pairs.append(CollisionPair(
-            f"realistic_{i}",
-            Row(tname, tdob, tmrn, sex, status),
-            Row(sname, sdob, smrn, sex, status),
-            f"different name/DOB; target confusable-digit MRN {tmrn}"))
+        pairs.append(
+            CollisionPair(
+                f"realistic_{i}",
+                Row(tname, tdob, tmrn, sex, status),
+                Row(sname, sdob, smrn, sex, status),
+                f"different name/DOB; target confusable-digit MRN {tmrn}",
+            )
+        )
     return pairs
 
 
@@ -110,18 +120,24 @@ def measure(name, builder, seeds):
     total_fab = sum(t["is_false_abort"] for t in tr)
     n = len(tr)
     print(f"\n===== {name}: {n} trials =====")
-    print(f"  FALSE ACCEPT: {total_fa}/{n} ({100*total_fa/n:.1f}%)   "
-          f"FALSE ABORT: {total_fab}/{n} ({100*total_fab/n:.1f}%)")
+    print(
+        f"  FALSE ACCEPT: {total_fa}/{n} ({100 * total_fa / n:.1f}%)   "
+        f"FALSE ABORT: {total_fab}/{n} ({100 * total_fab / n:.1f}%)"
+    )
     for cfg in ("click_name", "click_action"):
         c = by_cfg[cfg]
         if c["n"]:
-            print(f"    {cfg:13} FA {c['fa']:3}/{c['n']:3}  "
-                  f"FABORT {c['fab']:3}/{c['n']:3}")
+            print(
+                f"    {cfg:13} FA {c['fa']:3}/{c['n']:3}  "
+                f"FABORT {c['fab']:3}/{c['n']:3}"
+            )
     if fa_examples:
         print("  -- sample FALSE ACCEPTS --")
         for t in fa_examples[:4]:
-            print(f"    {t['click_config']} {t['collision_class']} "
-                  f"tgt={t['target_mrn']} sib={t['sibling_mrn']}")
+            print(
+                f"    {t['click_config']} {t['collision_class']} "
+                f"tgt={t['target_mrn']} sib={t['sibling_mrn']}"
+            )
             print(f"      rec={t['acc_expected']!r}")
             print(f"      obs={t['acc_observed']!r}")
     return total_fa, total_fab, n

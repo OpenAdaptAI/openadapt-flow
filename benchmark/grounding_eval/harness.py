@@ -64,7 +64,7 @@ from openadapt_grounding.types import Element
 
 HERE = Path(__file__).parent
 TOL_STRICT = 40  # px, the REPORT.md headline tolerance
-TOL_LOOSE = 60   # px, run_validation.run_grounder default
+TOL_LOOSE = 60  # px, run_validation.run_grounder default
 N_TARGETS = 6
 SEED = 1
 N_ROWS = 18  # floor; renders ~51 rows, exactly as the baseline harness used
@@ -177,9 +177,7 @@ def method_b_find_name_then_open(
     return (int(best["cx"]), int(best["cy"]))
 
 
-def method_c_row_anchor(
-    rows: list[dict], name: str, mrn: str
-) -> Optional[tuple]:
+def method_c_row_anchor(rows: list[dict], name: str, mrn: str) -> Optional[tuple]:
     """Score each OCR row against name tokens + MRN (glyph-normalised); the
     winning row's Open box is the proposal. Disambiguates same-name siblings by
     MRN."""
@@ -244,18 +242,24 @@ def summarise(rows: list[dict]) -> dict:
         "clean_rows": {
             "n": len(clean),
             "hit_rate@40": (sum(r["hit@40"] for r in clean) / len(clean))
-            if clean else None,
+            if clean
+            else None,
             "median_error_px": statistics.median(
                 [r["error_px"] for r in clean if r["error_px"] is not None]
-            ) if any(r["error_px"] is not None for r in clean) else None,
+            )
+            if any(r["error_px"] is not None for r in clean)
+            else None,
         },
         "ocr_collision_rows": {
             "n": len(coll),
             "hit_rate@40": (sum(r["hit@40"] for r in coll) / len(coll))
-            if coll else None,
+            if coll
+            else None,
             "median_error_px": statistics.median(
                 [r["error_px"] for r in coll if r["error_px"] is not None]
-            ) if any(r["error_px"] is not None for r in coll) else None,
+            )
+            if any(r["error_px"] is not None for r in coll)
+            else None,
         },
         "latency_s": {
             "median": statistics.median(lat) if lat else None,
@@ -294,16 +298,19 @@ def main() -> None:
     # --- registries (built "offline from the demo", the intended pattern) ---
     # Label registry: a single "Open" control, as a demo would capture.
     lbl_builder = RegistryBuilder()
-    lbl_builder.add_frame([Element(bounds=(0.9, 0.1, 0.05, 0.02), text="Open",
-                                   element_type="button")])
+    lbl_builder.add_frame(
+        [Element(bounds=(0.9, 0.1, 0.05, 0.02), text="Open", element_type="button")]
+    )
     label_registry = lbl_builder.build(min_stability=0.0)
     loc_label = ElementLocator(label_registry, fuzzy_match=False)
 
     # Name registry: every row's patient name (unique-ish text anchors).
     name_builder = RegistryBuilder()
     name_builder.add_frame(
-        [Element(bounds=(0.1, 0.1, 0.2, 0.02), text=table.rows[i].name)
-         for i in indices]
+        [
+            Element(bounds=(0.1, 0.1, 0.2, 0.02), text=table.rows[i].name)
+            for i in indices
+        ]
     )
     name_registry = name_builder.build(min_stability=0.0)
     loc_name = ElementLocator(name_registry, fuzzy_match=True)
@@ -314,8 +321,11 @@ def main() -> None:
     ocr_s = time.time() - t_ocr
     rows_clustered = cluster_rows(boxes)
 
-    results: dict[str, list[dict]] = {"A_find_label": [], "B_find_name_row": [],
-                                      "C_row_anchor": []}
+    results: dict[str, list[dict]] = {
+        "A_find_label": [],
+        "B_find_name_row": [],
+        "C_row_anchor": [],
+    }
 
     for i in chosen:
         name_point, open_point, y_center, _ = frame.points[i]
@@ -332,7 +342,9 @@ def main() -> None:
         # B
         t0 = time.time()
         pb = method_b_find_name_then_open(loc_name, img, row.name, boxes)
-        results["B_find_name_row"].append(_row(i, row, truth, pb, time.time() - t0, coll))
+        results["B_find_name_row"].append(
+            _row(i, row, truth, pb, time.time() - t0, coll)
+        )
 
         # C
         t0 = time.time()
@@ -370,8 +382,14 @@ def main() -> None:
     _print_summary(out)
 
 
-def _row(i: int, row, truth: tuple, proposed: Optional[tuple], dt: float,
-         ocr_collision: bool = False) -> dict:
+def _row(
+    i: int,
+    row,
+    truth: tuple,
+    proposed: Optional[tuple],
+    dt: float,
+    ocr_collision: bool = False,
+) -> dict:
     e = err_px(proposed, truth)
     return {
         "row": i,
@@ -392,28 +410,34 @@ def _print_summary(out: dict) -> None:
     print("=" * 72)
     print("Dense-list grounding: openadapt-grounding (OCR) vs bespoke VLM")
     print("=" * 72)
-    print(f"surface: {out['meta']['rendered_rows']} rows @ "
-          f"{out['meta']['viewport_px']}  |  targets: "
-          f"{out['meta']['chosen_row_indices']}")
-    print(f"BASELINE (bespoke VLM {b['model'].split('/')[-1]}): "
-          f"hit@40=0/6, median_err={b['median_error_px']}px, "
-          f"lat~{b['latency_s'].split(';')[0]}")
+    print(
+        f"surface: {out['meta']['rendered_rows']} rows @ "
+        f"{out['meta']['viewport_px']}  |  targets: "
+        f"{out['meta']['chosen_row_indices']}"
+    )
+    print(
+        f"BASELINE (bespoke VLM {b['model'].split('/')[-1]}): "
+        f"hit@40=0/6, median_err={b['median_error_px']}px, "
+        f"lat~{b['latency_s'].split(';')[0]}"
+    )
     print("-" * 72)
     for name, s in out["methods"].items():
         cr = s["clean_rows"]
         print(
-            f"{name:18s} hit@40={s['hit_rate@40']*100:5.1f}%  "
-            f"hit@60={s['hit_rate@60']*100:5.1f}%  "
+            f"{name:18s} hit@40={s['hit_rate@40'] * 100:5.1f}%  "
+            f"hit@60={s['hit_rate@60'] * 100:5.1f}%  "
             f"med_err={_fmt(s['median_error_px'])}px  "
-            f"proposal={s['returned_proposal_rate']*100:4.0f}%  "
-            f"lat_med={s['latency_s']['median']*1000:.0f}ms  "
+            f"proposal={s['returned_proposal_rate'] * 100:4.0f}%  "
+            f"lat_med={s['latency_s']['median'] * 1000:.0f}ms  "
             f"| clean {cr['n']} rows: "
-            f"hit@40={(cr['hit_rate@40'] or 0)*100:.0f}% "
+            f"hit@40={(cr['hit_rate@40'] or 0) * 100:.0f}% "
             f"med_err={_fmt(cr['median_error_px'])}px"
         )
     print("-" * 72)
-    print(f"OCR (once, shared by B/C): {out['meta']['ocr_s_once']}s  "
-          f"cost=${out['meta']['cost_usd']}  gpu={out['meta']['gpu']}")
+    print(
+        f"OCR (once, shared by B/C): {out['meta']['ocr_s_once']}s  "
+        f"cost=${out['meta']['cost_usd']}  gpu={out['meta']['gpu']}"
+    )
 
 
 def _fmt(v) -> str:
@@ -463,14 +487,20 @@ def sweep(seeds: list[int], targets_per_seed: int = 8) -> None:
     print("\n" + "=" * 72)
     print(f"SWEEP (method C, seeds {seeds}, {len(all_rows)} targets)")
     print("=" * 72)
-    print(f"overall   hit@40={a['hit_rate@40']*100:.1f}%  "
-          f"med_err={_fmt(a['median_error_px'])}px")
-    print(f"clean     n={a['clean_rows']['n']:2d} "
-          f"hit@40={(a['clean_rows']['hit_rate@40'] or 0)*100:.1f}%  "
-          f"med_err={_fmt(a['clean_rows']['median_error_px'])}px")
-    print(f"collision n={a['ocr_collision_rows']['n']:2d} "
-          f"hit@40={(a['ocr_collision_rows']['hit_rate@40'] or 0)*100:.1f}%  "
-          f"med_err={_fmt(a['ocr_collision_rows']['median_error_px'])}px")
+    print(
+        f"overall   hit@40={a['hit_rate@40'] * 100:.1f}%  "
+        f"med_err={_fmt(a['median_error_px'])}px"
+    )
+    print(
+        f"clean     n={a['clean_rows']['n']:2d} "
+        f"hit@40={(a['clean_rows']['hit_rate@40'] or 0) * 100:.1f}%  "
+        f"med_err={_fmt(a['clean_rows']['median_error_px'])}px"
+    )
+    print(
+        f"collision n={a['ocr_collision_rows']['n']:2d} "
+        f"hit@40={(a['ocr_collision_rows']['hit_rate@40'] or 0) * 100:.1f}%  "
+        f"med_err={_fmt(a['ocr_collision_rows']['median_error_px'])}px"
+    )
 
 
 if __name__ == "__main__":

@@ -54,3 +54,6 @@ Per arm x mode, over correct normal runs (7 patients pooled and per patient): me
 - No website edits. Healthcare prospect not named anywhere.
 - Agent timing depends on Anthropic API latency at run time; it is reported with the time of day.
 - The agent is given the same "do not create a duplicate" instruction as the prior study.
+
+## Amendment (2026-10-14 23:45 ET, after block 1; before any analysis of differences)
+Other sessions kept the 12-core machine's 1-min load at ~9-10 (test suites, the other executor's probes), so the load gate at 8 stalled runs 5-8 min each; the full plan would have taken ~17 h. From block 2 on: gate threshold 12 (= core count; load is still recorded per run and reported), and replay cold blocks capped at 5 (N=5 per patient per replay arm cold). Warm arms keep 10 blocks; agent cold keeps 3.

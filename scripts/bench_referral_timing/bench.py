@@ -364,7 +364,7 @@ def cmd_block(a):
         ref = G["REFERRALS"][idx - 1]
         out = root / f"{pos}-{ref.key}"; out.mkdir()
         run_id = f"{a.tag}-{a.arm}-{a.mode}-b{a.block:02d}-{ref.key}"
-        gate = wait_quiet(); gate["foreign_at_start"] = foreign_users(); sampler = LoadSampler(); c0 = container_started()
+        gate = wait_quiet(float(os.environ.get("GATE_LOAD1", "8"))); gate["foreign_at_start"] = foreign_users(); sampler = LoadSampler(); c0 = container_started()
         start_local = time.strftime("%H:%M:%S")
         if a.mode == "warm":
             marks = {"t0": time.time()}

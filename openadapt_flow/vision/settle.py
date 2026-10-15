@@ -87,6 +87,9 @@ class SettleSeed:
     phash: str
     stable_frames: int
     captured_at: float
+    # Page-signal settle only: the settled frame itself. Its ``phash`` is then
+    # the page change marker ("page:..."), not a perceptual hash.
+    png: bytes | None = None
 
 
 def _poll_settled(
@@ -116,7 +119,11 @@ def _poll_settled(
     captured_at = time.monotonic()
     last_hash = phash_png(png)
     streak = 1
-    if seed is not None and phash_distance(last_hash, seed.phash) == 0:
+    if (
+        seed is not None
+        and not seed.phash.startswith("page:")
+        and phash_distance(last_hash, seed.phash) == 0
+    ):
         # This fresh frame is identical to the last frame of a run that was
         # already observed stable (frames polled interval_s apart), so it
         # extends that run: the screen has now been identical for at least
@@ -180,7 +187,15 @@ def _page_settled(
     probe answering None (signals unavailable, e.g. a visible canvas or
     video) returns None so the caller runs the plain screenshot settle.
     """
-    del seed  # page signals do not use the screenshot seed
+    marker_of = getattr(backend, "page_change_marker", None)
+    page_seed = (
+        seed
+        if seed is not None
+        and seed.png is not None
+        and seed.phash.startswith("page:")
+        and callable(marker_of)
+        else None
+    )
     window_s = max(interval_s, interval_s * (stable_frames - 1))
     while True:
         try:
@@ -189,6 +204,28 @@ def _page_settled(
             quiet = None
         if quiet is None:
             return None
+        if quiet is True and page_seed is not None:
+            # No input since the seed frame (the caller's contract) and the
+            # page reports the very same last change: nothing that can alter
+            # pixels happened since that frame was captured, so it is still
+            # the current frame. Otherwise capture a fresh one as usual.
+            try:
+                same = marker_of() == page_seed.phash
+            except Exception:
+                same = False
+            page_seed = None
+            if same:
+                assert seed is not None and seed.png is not None
+                return SettleResult(
+                    png=seed.png,
+                    settled=True,
+                    stable_frames=stable_frames,
+                    required_frames=stable_frames,
+                    elapsed_s=time.monotonic() - start,
+                    phash=seed.phash,
+                    captured_at=time.monotonic(),
+                    mode="page",
+                )
         if quiet is True:
             shot = backend.screenshot()
             shot_at = time.monotonic()
@@ -199,13 +236,19 @@ def _page_settled(
             if still is None:
                 return None
             if still is True:
+                marker = None
+                if callable(marker_of):
+                    try:
+                        marker = marker_of()
+                    except Exception:
+                        marker = None
                 return SettleResult(
                     png=shot,
                     settled=True,
                     stable_frames=stable_frames,
                     required_frames=stable_frames,
                     elapsed_s=time.monotonic() - start,
-                    phash="",
+                    phash=marker if isinstance(marker, str) else "",
                     captured_at=shot_at,
                     mode="page",
                 )

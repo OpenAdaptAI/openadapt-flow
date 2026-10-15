@@ -9248,11 +9248,15 @@ class Replayer:
             seed = seed_entry[0]
         result = seeded(self.backend, seed)
         if result.settled and result.phash:
+            seed_kwargs: dict[str, Any] = {}
+            if getattr(result, "mode", "pixel") == "page":
+                seed_kwargs["png"] = result.png
             self._settle_seed = (
                 seed_type(
                     phash=result.phash,
                     stable_frames=result.stable_frames,
                     captured_at=result.captured_at,
+                    **seed_kwargs,
                 ),
                 epoch,
             )

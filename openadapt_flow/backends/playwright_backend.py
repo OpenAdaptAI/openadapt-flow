@@ -2690,6 +2690,15 @@ class PlaywrightBackend:
             return None
         return out if isinstance(out, str) else None
 
+    def page_change_marker(self) -> Optional[str]:
+        """Marker of the last change seen by the latest quiet probe, or None.
+
+        Two quiet probes with the same marker prove nothing in the page (DOM,
+        events, network, frames) changed between them.
+        """
+        tracker = getattr(self, "_quiescence", None)
+        return getattr(tracker, "marker", None) if tracker is not None else None
+
     def visible_text_present(self, text: str) -> Optional[bool]:
         """Is ``text`` rendered visibly in the viewport, per the DOM?
 

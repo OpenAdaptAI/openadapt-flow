@@ -379,3 +379,40 @@ def test_dropdown_dom_miss_falls_back_and_never_passes(label) -> None:
     (landed, _changed), ocr_calls = _typed(label)
     assert landed is False  # OCR (empty here) decides; DOM miss never passes
     assert ocr_calls >= 1
+
+
+def _seed_from(result):
+    return settle_mod.SettleSeed(
+        phash=result.phash,
+        stable_frames=result.stable_frames,
+        captured_at=result.captured_at,
+        png=result.png,
+    )
+
+
+def test_unchanged_page_reuses_settled_frame(browser) -> None:
+    backend, _page, ctx = _backend(browser, "<!doctype html><p>static</p>")
+    try:
+        time.sleep(0.3)
+        first = settle_mod.wait_settled_result(backend, timeout_s=2.0)
+        assert first.mode == "page" and first.phash.startswith("page:")
+        shots = []
+        real = backend.screenshot
+        backend.screenshot = lambda: shots.append(1) or real()
+        again = settle_mod.wait_settled_seeded(backend, _seed_from(first))
+        assert again.settled and again.png is first.png and shots == []
+    finally:
+        ctx.close()
+
+
+def test_any_change_since_seed_forces_a_fresh_frame(browser) -> None:
+    backend, page, ctx = _backend(browser, "<!doctype html><p id=p>static</p>")
+    try:
+        time.sleep(0.3)
+        first = settle_mod.wait_settled_result(backend, timeout_s=2.0)
+        page.evaluate("document.getElementById('p').textContent = 'changed'")
+        again = settle_mod.wait_settled_seeded(backend, _seed_from(first))
+        assert again.settled and again.png is not first.png
+        assert again.phash != first.phash
+    finally:
+        ctx.close()

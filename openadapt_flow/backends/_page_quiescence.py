@@ -234,6 +234,11 @@ class PageQuiescence:
         self._last_network = time.monotonic()
         self._armed = False
         self.last_reason = ""
+        self._frame_last = 0.0
+        # Identity of the last change seen by a quiet probe: the latest change
+        # time over all frames, the last network activity and the frame count.
+        # Equal markers from two quiet probes mean nothing changed in between.
+        self.marker: Optional[str] = None
         try:
             page.add_init_script(QUIESCENCE_INSTALL_JS)
             page.on("request", self._on_request)
@@ -279,6 +284,7 @@ class PageQuiescence:
             return None
         if not ticks or not float(ticks[0]) > last:
             return "busy:paint"
+        self._frame_last = last
         return "quiet"
 
     def probe(self, window_s: float) -> Optional[bool]:
@@ -301,6 +307,7 @@ class PageQuiescence:
             # A frame the tree walk did not reach (e.g. a frame Playwright
             # knows about that the DOM walk cannot see): judge frame by frame.
             verdict = "perframe"
+        self._frame_last = float(out.get("last") or 0.0)
         if verdict == "perframe":
             verdict = self._per_frame(frames, window_ms)
             if verdict is None:
@@ -316,4 +323,7 @@ class PageQuiescence:
         if time.monotonic() - self._last_network < window_s:
             self.last_reason = "busy:network-recent"
             return False
+        self.marker = (
+            f"page:{self._frame_last:.3f}:{self._last_network:.6f}:{len(frames)}"
+        )
         return True

@@ -89,24 +89,9 @@ def test_runtime_dependency_is_only_pydantic() -> None:
 
 
 _STDLIB = {
-    "__future__",
-    "argparse",
-    "ast",
-    "collections",
-    "dataclasses",
-    "datetime",
-    "enum",
-    "hashlib",
-    "importlib",
-    "json",
-    "math",
-    "pathlib",
-    "platform",
-    "random",
-    "sys",
-    "time",
-    "typing",
-    "collections.abc",
+    "__future__", "argparse", "ast", "collections", "dataclasses", "datetime",
+    "enum", "hashlib", "importlib", "json", "math", "pathlib", "platform",
+    "random", "sys", "time", "typing", "collections.abc",
 }
 
 

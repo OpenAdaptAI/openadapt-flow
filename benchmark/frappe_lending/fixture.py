@@ -523,14 +523,11 @@ class FrappeFixture:
             "console",
             input_bytes=script,
         )
-        if (
-            re.search(
-                rb"(?:^|In \[\d+\]: )OPENADAPT_FRAPPE_FIXTURE_READY\r?$",
-                output,
-                re.MULTILINE,
-            )
-            is None
-        ):
+        if re.search(
+            rb"(?:^|In \[\d+\]: )OPENADAPT_FRAPPE_FIXTURE_READY\r?$",
+            output,
+            re.MULTILINE,
+        ) is None:
             raise FixtureError("fixture bootstrap did not emit its readiness sentinel")
 
     def _site_db_name(self) -> str:

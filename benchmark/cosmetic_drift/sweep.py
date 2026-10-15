@@ -100,7 +100,8 @@ class Perturb:
             parts.append(f"body {{ zoom: {self.zoom}; }}")
         if abs(self.fontscale - 1.0) > 1e-9:
             rules = [
-                f"{sel} {{ font-size: {round(base * self.fontscale)}px !important; }}"
+                f"{sel} {{ font-size: {round(base * self.fontscale)}px"
+                f" !important; }}"
                 for sel, base in BASE_FONT_PX.items()
             ]
             parts.append("\n".join(rules))
@@ -125,7 +126,9 @@ def build_matrix(only: Optional[set[str]], quick: bool) -> list[Perturb]:
         points.append(Perturb("dpi", f"DPI {dsf}x", dsf=dsf))
     # Font-size scaling (1.1875 == the 16->19px bump MockMed's drift=font uses).
     for scale, note in ((1.10, "+10%"), (1.1875, "+19% (19px)"), (1.375, "+37%")):
-        points.append(Perturb("fontsize", f"font-size {note}", fontscale=scale))
+        points.append(
+            Perturb("fontsize", f"font-size {note}", fontscale=scale)
+        )
     # Font-family substitution (>= 2 families; all commonly installed).
     for fam, name in (
         ("Georgia, serif", "Georgia (serif)"),
@@ -134,8 +137,12 @@ def build_matrix(only: Optional[set[str]], quick: bool) -> list[Perturb]:
     ):
         points.append(Perturb("fontfamily", f"font {name}", fontfamily=fam))
     # Most-realistic combinations (varied-hardware back office).
-    points.append(Perturb("combo", "zoom 125% + DPI 2x", zoom=1.25, dsf=2.0))
-    points.append(Perturb("combo", "zoom 133% + DPI 1.5x", zoom=1.33, dsf=1.5))
+    points.append(
+        Perturb("combo", "zoom 125% + DPI 2x", zoom=1.25, dsf=2.0)
+    )
+    points.append(
+        Perturb("combo", "zoom 133% + DPI 1.5x", zoom=1.33, dsf=1.5)
+    )
     points.append(
         Perturb(
             "combo",
@@ -208,7 +215,8 @@ def read_state(page) -> dict:
     return {
         "hash": page.evaluate("location.hash"),
         "banner": page.evaluate(
-            "(document.getElementById('saved-banner') || {}).textContent || null"
+            "(document.getElementById('saved-banner') || {}).textContent"
+            " || null"
         ),
     }
 
@@ -292,7 +300,9 @@ def replay_perturbed(
                     ok=r.ok,
                     rung=rung,
                     postconditions_ok=r.postconditions_ok,
-                    identity_status=(r.identity.status if r.identity else None),
+                    identity_status=(
+                        r.identity.status if r.identity else None
+                    ),
                     heal=r.heal is not None,
                     error=r.error,
                 )
@@ -355,7 +365,9 @@ def render_markdown(rows: list[Row], meta: dict) -> str:
         )
     lines.append("")
     danger = [r for r in rows if not r.safe]
-    lines.append(f"**Wrong-actions / crashes: {len(danger)} of {len(rows)} points.**")
+    lines.append(
+        f"**Wrong-actions / crashes: {len(danger)} of {len(rows)} points.**"
+    )
     if danger:
         for r in danger:
             lines.append(f"- {r.label}: {r.outcome} (hash={r.final_hash})")
@@ -413,7 +425,9 @@ def main() -> None:
                         end="",
                         flush=True,
                     )
-                    row = replay_perturbed(browser, bundle_dir, url, run_dir, p)
+                    row = replay_perturbed(
+                        browser, bundle_dir, url, run_dir, p
+                    )
                     flag = "" if row.safe else "  <<< NOT SAFE"
                     print(
                         f" {row.outcome} ({row.steps_completed}/"

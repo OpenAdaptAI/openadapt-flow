@@ -76,11 +76,7 @@ def _save_step_pcs_ok(report: RunReport) -> Optional[bool]:
 
 
 def replay_once(
-    browser,
-    bundle_dir: Path,
-    base_url: str,
-    run_dir: Path,
-    fault: F.Fault,
+    browser, bundle_dir: Path, base_url: str, run_dir: Path, fault: F.Fault,
     repeat: int,
 ) -> RunObs:
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -254,7 +250,7 @@ def render_markdown(results: list[ClassResult], meta: dict) -> str:
     lines.append("")
     lines.append(
         "The bundled MockMed app is a client-side SPA with no backend, so a "
-        '"save" only mutates in-page state — the UI *is* the source of '
+        "\"save\" only mutates in-page state — the UI *is* the source of "
         "truth. This study adds a real persistence boundary "
         "(`openadapt_flow/mockmed/fault_server.py`): a flag-gated `?fault=` "
         "hook in the app (mirroring the existing `?drift=` hooks) routes the "
@@ -290,7 +286,9 @@ def render_markdown(results: list[ClassResult], meta: dict) -> str:
     )
     lines.append("|---|---|---|---|---|---|")
     for r in results:
-        counts = ", ".join(f"{k} ×{v}" for k, v in sorted(r.outcome_counts.items()))
+        counts = ", ".join(
+            f"{k} ×{v}" for k, v in sorted(r.outcome_counts.items())
+        )
         said = "SUCCESS" if r.example_report_success else "FAILURE"
         sm = (
             f"**YES ({r.silently_mishandled_count}/{r.repeats})**"
@@ -298,7 +296,8 @@ def render_markdown(results: list[ClassResult], meta: dict) -> str:
             else "no"
         )
         lines.append(
-            f"| {r.fault_class} | {r.title} | {r.injected} | {counts} | {said} | {sm} |"
+            f"| {r.fault_class} | {r.title} | {r.injected} | {counts} | "
+            f"{said} | {sm} |"
         )
     lines.append("")
 
@@ -357,7 +356,9 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--repeats", type=int, default=10, help="runs per fault")
     ap.add_argument("--quick", action="store_true", help="2 repeats, smoke")
-    ap.add_argument("--only", default="", help="comma-separated fault modes to run")
+    ap.add_argument(
+        "--only", default="", help="comma-separated fault modes to run"
+    )
     ap.add_argument("--out", default=str(HERE), help="output directory")
     args = ap.parse_args()
 
@@ -393,7 +394,9 @@ def main() -> None:
                     obs: list[RunObs] = []
                     for rep in range(repeats):
                         run_dir = runs_dir / f"{fault.mode}_{rep}"
-                        o = replay_once(browser, bundle_dir, url, run_dir, fault, rep)
+                        o = replay_once(
+                            browser, bundle_dir, url, run_dir, fault, rep
+                        )
                         obs.append(o)
                         all_obs.append(o)
                     res = aggregate(fault, obs)
@@ -417,7 +420,8 @@ def main() -> None:
     meta = {
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "platform": (
-            f"{platform.system()} {platform.machine()} py{platform.python_version()}"
+            f"{platform.system()} {platform.machine()} "
+            f"py{platform.python_version()}"
         ),
         "total_steps": total_steps,
         "repeats": repeats,

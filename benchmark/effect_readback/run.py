@@ -93,9 +93,7 @@ CASES = [
     FaultCase("session", "Session expired (401, nothing persisted)", False, False),
     FaultCase("timeout", "Commit then client timeout", True, True),
     FaultCase("duplicate", "Duplicate submission (value present)", True, False),
-    FaultCase(
-        "stale", "Lost update (value present)", True, False, seed_concurrent=True
-    ),
+    FaultCase("stale", "Lost update (value present)", True, False, seed_concurrent=True),
 ]
 
 
@@ -226,18 +224,12 @@ def _tally(rows: list[dict]) -> dict:
         true_confirms = confirmed(value_present)
         blind_spots = confirmed(struct_dirty)
         out[path] = {
-            "false_confirm_rate": round(
-                len(false_confirms) / max(1, len(value_absent)), 3
-            ),
+            "false_confirm_rate": round(len(false_confirms) / max(1, len(value_absent)), 3),
             "false_confirm_count": len(false_confirms),
             "false_confirm_of": [r["mode"] for r in false_confirms],
-            "false_halt_rate": round(
-                len(false_halts) / max(1, len(genuinely_correct)), 3
-            ),
+            "false_halt_rate": round(len(false_halts) / max(1, len(genuinely_correct)), 3),
             "false_halt_of": [r["mode"] for r in false_halts],
-            "true_confirm_rate": round(
-                len(true_confirms) / max(1, len(value_present)), 3
-            ),
+            "true_confirm_rate": round(len(true_confirms) / max(1, len(value_present)), 3),
             "structural_blind_spot_of": [r["mode"] for r in blind_spots],
         }
     return out

@@ -15,7 +15,9 @@ from effectbench.runner import evaluate
 
 def _submission(trials: int = 3) -> dict:
     episodes = evaluate(ScreenOnlySUT(), trials=trials)
-    return build_submission(system_name="screen_only", episodes=episodes, trials=trials)
+    return build_submission(
+        system_name="screen_only", episodes=episodes, trials=trials
+    )
 
 
 def test_submission_round_trips() -> None:

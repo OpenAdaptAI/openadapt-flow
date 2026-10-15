@@ -48,7 +48,9 @@ _BASE_CSS = (
 
 
 def _page(inner: str, *, bg: str, font: str = "Arial", title_px: int = 30) -> str:
-    css = _BASE_CSS.replace("{font}", font).replace("{title_px}", str(title_px))
+    css = _BASE_CSS.replace("{font}", font).replace(
+        "{title_px}", str(title_px)
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'><style>"
         f"body{{background:{bg}}}{css}</style></head><body>{inner}</body></html>"

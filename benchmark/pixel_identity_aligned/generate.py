@@ -39,9 +39,7 @@ def main() -> int:
     print(f"trials: {evidence['n_trials']}")
     print(f"false-accept (MUST be 0): {s['false_accept']} / {s['n_diff']}")
     print(f"false-mismatch: {s['false_mismatch']} / {s['n_same']}")
-    print(
-        f"same match rate (matching render): {s['same_match_rate_matching_render']:.0%}"
-    )
+    print(f"same match rate (matching render): {s['same_match_rate_matching_render']:.0%}")
     return 0 if s["false_accept"] == 0 else 1
 
 

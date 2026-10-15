@@ -227,3 +227,33 @@ harness) still guards each heal DURING a run: a weakening heal quarantines
 and halts the run exactly as before. This lifecycle governs the next level
 up: whether the resulting proposed BUNDLE may ever replace the active one.
 The in-run gate protects the run; the lifecycle protects the fleet.
+
+## Repairs taught by a calling agent
+
+`openadapt-agent` serves workflows to other agents over MCP. When a run halts
+there, the server can return a one-time repair token. If an administrator
+turned on screen access for that workflow or organization, the calling agent
+may demonstrate the stuck step once while OpenAdapt records it.
+`openadapt_flow.repair.agent_teach.teach_from_calling_agent` turns that
+recording into a candidate:
+
+- It runs the same `teach` loop as the CLI. If the loop refuses the fix, or
+  any later step fails, the taught bundle and its evidence are deleted and the
+  workflow keeps halting.
+- It copies the frame the agent clicked on to
+  `<proposed>.evidence/heals/<step_id>/screen.png` and lists the step under
+  `taught_steps`, so `openadapt-flow repair campaign` replays the taught step.
+  Before this change, a taught candidate had no changed bindings, so the
+  campaigns refused it.
+- It records `provenance`: the agent id, the halted run and step, a SHA-256 of
+  the repair token, who turned on screen access, the screen-sharing mode
+  (`scrubbed_only`, `ask_each_time`, or `allow_unscrubbed`), how many screens
+  the agent saw, whether they were scrubbed and by which openadapt-privacy
+  provider, and who approved sharing for this token in `ask_each_time` mode.
+  The model refuses combinations that break those rules, such as unscrubbed
+  screens outside `allow_unscrubbed` or sharing the agent approved itself.
+
+The candidate starts in `candidate` and needs the usual review, campaigns,
+approval, staging, and canary. `RepairStore.review` and `RepairStore.approve`
+refuse the actor whose id matches `provenance.agent_id`, whatever kind it
+claims to be. Model actors are refused for every transition, as before.

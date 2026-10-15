@@ -204,7 +204,7 @@ def _page_settled(
             quiet = None
         if quiet is None:
             return None
-        if quiet is True and page_seed is not None:
+        if quiet is True and page_seed is not None and callable(marker_of):
             # No input since the seed frame (the caller's contract) and the
             # page reports the very same last change: nothing that can alter
             # pixels happened since that frame was captured, so it is still

@@ -101,15 +101,20 @@ def propose_to_cloud(
     resolved_host = resolve_host(host)
     resolved_token = resolve_token(token, host=resolved_host)
     payload = ingest_projection(candidate, workflow_id=workflow_id, run_id=run_id)
-    if client is None:
+    owned = client is None
+    if owned:
         import httpx
 
         client = httpx.Client(timeout=15.0)
-    resp = client.post(
-        f"{resolved_host}/api/repairs/ingest",
-        json=payload,
-        headers={"Authorization": f"Bearer {resolved_token}"},
-    )
+    try:
+        resp = client.post(
+            f"{resolved_host}/api/repairs/ingest",
+            json=payload,
+            headers={"Authorization": f"Bearer {resolved_token}"},
+        )
+    finally:
+        if owned:
+            client.close()
     if resp.status_code not in (200, 201):
         raise HostedError(f"repair ingest returned {resp.status_code}")
     body = resp.json()

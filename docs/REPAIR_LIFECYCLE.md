@@ -257,3 +257,41 @@ The candidate starts in `candidate` and needs the usual review, campaigns,
 approval, staging, and canary. `RepairStore.review` and `RepairStore.approve`
 refuse the actor whose id matches `provenance.agent_id`, whatever kind it
 claims to be. Model actors are refused for every transition, as before.
+
+### Identity for a taught dialog dismissal
+
+A click that closes a dialog usually has no field value or row text to check,
+so the fault campaign used to find no identity evidence for it and refused
+the candidate. `openadapt_flow.repair.dialog_identity` gives such a step the
+dialog itself as its identity:
+
+- `teach_from_calling_agent` takes the dialog box from the caller (for
+  example, from the DOM) through `dialog_region`. Without one, it looks for the
+  smallest closed box around the click in the frame the agent clicked on. The
+  box must be at least four times the control's area and at most 60% of the
+  screen. When no box qualifies, nothing is marked and the step stays unarmed,
+  so the fault campaign still refuses it.
+- The box is recorded on the click as `identifier_region`. The compiler reads
+  its title and body text with OCR into the step's identity evidence, takes the
+  button label under the click as the target text, and snaps the click to the
+  label's center.
+- At replay, the step acts only when the same dialog text is present around
+  the same button. The `verifier_failure` fault grays the whole dialog, so a
+  dismissal that ignores the dialog's text fails the campaign. This is the same
+  bar the campaigns set for every other step.
+
+`openadapt_flow.repair.dialog_fixture` is a rendered app with such a dialog.
+`tests/test_agent_teach_repair.py` runs the real replayer, teach loop, and
+replay and fault campaigns on it.
+
+### Keeping the halted page open
+
+`openadapt-flow run --hold-on-halt SECONDS` keeps a halted browser run's page
+open so the repair acts on the page that halted rather than a new one. After
+writing `report.json`, Flow writes `<run_dir>/repair-hold.json` (mode 0600)
+with a Unix socket path in a private directory, a random secret, and the run's
+exit code. The socket accepts `viewport`, `screenshot`, `click`, and `release`
+requests that carry the secret. The hold ends on `release` or after the given
+time, at most 1800 seconds. Then the socket, its directory, and the hold file
+are removed and the browser closes. `openadapt-agent serve --repair-access`
+passes this flag and releases the hold after `teach_repair`.

@@ -61,7 +61,9 @@ def _handle(backend: Any, message: dict[str, Any]) -> tuple[dict[str, Any], bool
     return {"ok": False, "error": "unknown op"}, False
 
 
-def hold_for_repair(backend: Any, run_dir: Path | str, timeout_s: float) -> str:
+def hold_for_repair(
+    backend: Any, run_dir: Path | str, timeout_s: float, *, exit_code: int | None = None
+) -> str:
     """Serve the held backend until released or timed out. Returns why it ended."""
     run_dir = Path(run_dir)
     private = Path(tempfile.mkdtemp(prefix="oa-hold-"))
@@ -84,6 +86,7 @@ def hold_for_repair(backend: Any, run_dir: Path | str, timeout_s: float) -> str:
                     "secret": secret,
                     "pid": os.getpid(),
                     "expires_in_s": timeout_s,
+                    "exit_code": exit_code,
                 },
                 handle,
             )

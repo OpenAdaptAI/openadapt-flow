@@ -2135,7 +2135,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
                     sys.stdout.flush()
                     from openadapt_flow.repair.hold import hold_for_repair
 
-                    hold_for_repair(held_backend[-1], run_dir, hold_s)
+                    hold_for_repair(
+                        held_backend[-1], run_dir, hold_s, exit_code=held_exit[0]
+                    )
             finally:
                 video_path = None
                 if context is not None:

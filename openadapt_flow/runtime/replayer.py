@@ -9236,13 +9236,15 @@ class Replayer:
         frame starts over exactly as before.
         """
 
-        seed_entry, self._settle_seed = self._settle_seed, None
+        seed_entry = getattr(self, "_settle_seed", None)
+        self._settle_seed = None
+        epoch = getattr(self, "_actuation_epoch", 0)
         seeded = getattr(self.vision, "wait_settled_seeded", None)
         seed_type = getattr(self.vision, "SettleSeed", None)
         if seeded is None or seed_type is None:
             return self.vision.wait_settled(self.backend)
         seed = None
-        if seed_entry is not None and seed_entry[1] == self._actuation_epoch:
+        if seed_entry is not None and seed_entry[1] == epoch:
             seed = seed_entry[0]
         result = seeded(self.backend, seed)
         if result.settled and result.phash:
@@ -9252,7 +9254,7 @@ class Replayer:
                     stable_frames=result.stable_frames,
                     captured_at=result.captured_at,
                 ),
-                self._actuation_epoch,
+                epoch,
             )
         return result.png
 
@@ -9269,7 +9271,7 @@ class Replayer:
         been crossed and the step must not enter the pre-delivery retry loop.
         """
 
-        self._actuation_epoch += 1
+        self._actuation_epoch = getattr(self, "_actuation_epoch", 0) + 1
         self._settle_seed = None
         attempted_before = result.delivery_attempted
         acknowledgers = self._active_delivery_acknowledgers

@@ -33,8 +33,16 @@ def test_projection_is_digest_only_and_closed(bundles, tmp_path):  # noqa: F811
     candidate = registered(RepairStore(tmp_path / "s"), prior, proposed, run_dir)
     body = ingest_projection(candidate, workflow_id=WORKFLOW)
     assert set(body) == {
-        "schema", "candidate_id", "workflow_id", "run_id", "source", "prior_content_digest",
-        "proposed_content_digest", "consequential", "binding_changes", "failure_fingerprints",
+        "schema",
+        "candidate_id",
+        "workflow_id",
+        "run_id",
+        "source",
+        "prior_content_digest",
+        "proposed_content_digest",
+        "consequential",
+        "binding_changes",
+        "failure_fingerprints",
     }
     raw = json.dumps(body)
     assert "Submit Encounter" not in raw and str(tmp_path) not in raw
@@ -70,9 +78,13 @@ def test_cloud_rejection_and_refusals(bundles, tmp_path):  # noqa: F811
     store = RepairStore(tmp_path / "s")
     candidate = registered(store, prior, proposed, run_dir)
     with pytest.raises(RepairLifecycleError, match="different bundle bytes"):
-        apply_cloud_decision(store, _decision(candidate, proposed_content_digest="f" * 64))
+        apply_cloud_decision(
+            store, _decision(candidate, proposed_content_digest="f" * 64)
+        )
     with pytest.raises(RepairLifecycleError, match="name the person"):
         apply_cloud_decision(store, _decision(candidate, decided_by=""))
     with pytest.raises(RepairLifecycleError, match="schema"):
         apply_cloud_decision(store, _decision(candidate, schema="x"))
-    assert apply_cloud_decision(store, _decision(candidate, "reject")).state == "rejected"
+    assert (
+        apply_cloud_decision(store, _decision(candidate, "reject")).state == "rejected"
+    )

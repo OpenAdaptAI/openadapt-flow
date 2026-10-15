@@ -118,7 +118,9 @@ def propose_to_cloud(
     return body
 
 
-def apply_cloud_decision(store: RepairStore, decision: Mapping[str, Any]) -> RepairCandidate:
+def apply_cloud_decision(
+    store: RepairStore, decision: Mapping[str, Any]
+) -> RepairCandidate:
     """Apply one Cloud decision to the local lifecycle. Fails closed."""
     if decision.get("schema") != DECISION_SCHEMA:
         raise RepairLifecycleError("refused: unsupported Cloud repair decision schema")
@@ -132,7 +134,9 @@ def apply_cloud_decision(store: RepairStore, decision: Mapping[str, Any]) -> Rep
         )
     decided_by = str(decision.get("decided_by") or "").strip()
     if not decided_by:
-        raise RepairLifecycleError("refused: a Cloud decision must name the person who decided")
+        raise RepairLifecycleError(
+            "refused: a Cloud decision must name the person who decided"
+        )
     actor = Actor(kind="human", id=f"cloud:{decided_by}"[:256])
     if decision.get("decision") == "reject":
         if candidate.state == "rejected":

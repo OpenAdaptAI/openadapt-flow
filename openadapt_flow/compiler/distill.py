@@ -21,6 +21,11 @@ after frames show it had no visible effect, and never when:
 * its URL, title or page count changed (``*_before`` / ``*_after`` keys);
 * it carries a ``submit_binding`` (the compiler treats it as a submit).
 
+One more rule uses structure when the recording has it: text typed into a
+list box (role ``combobox``), and the Enter after it, is dropped when the
+next step types into the same list again. Only literal text is dropped this
+way, never a parameter.
+
 "Visible effect" means at least one pixel changed outside a caret-sized
 column (width <= 2 px, height <= 40 px). A blinking caret is not an effect.
 """
@@ -164,7 +169,36 @@ def distill_recording(recording_dir: Path | str, out_dir: Path | str) -> Distill
         if frames_unchanged(frame(a["i"], "before"), frame(b["i"], "after")):
             dropped[pos] = dropped[pos + 1] = "scroll_undone"
 
-    # Rule 2: a step whose own frames show no effect.
+    # Rule 2: a list selection replaced by the next selection in the same list.
+    # Typing into a list box (role combobox) selects an option; typing again
+    # selects another, so the first choice (and the Enter that closed it) has
+    # no effect on the result. Text boxes append, so they are never matched.
+    role = None
+    for pos, event in enumerate(events):
+        if event.get("kind") == "click":
+            role = (event.get("structural") or {}).get("role")
+            continue
+        if event.get("kind") != "type" or role != "combobox" or event.get("param"):
+            continue
+        if event.get("secret") or pos in dropped:
+            continue
+        j = pos + 1
+        enter = None
+        if j < len(events) and events[j].get("kind") == "key":
+            if str(events[j].get("key", "")).lower() in ("enter", "return"):
+                enter, j = j, j + 1
+        if j >= len(events):
+            continue
+        later = events[j]
+        if later.get("kind") == "type" and later.get("field_label") == event.get(
+            "field_label"
+        ):
+            if event.get("field_label") and not _structure_changed(event):
+                dropped[pos] = "selection_replaced"
+                if enter is not None and not _structure_changed(events[enter]):
+                    dropped[enter] = "selection_replaced"
+
+    # Rule 3: a step whose own frames show no effect.
     for pos, event in enumerate(events):
         if pos in dropped:
             continue

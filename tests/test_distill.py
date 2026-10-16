@@ -114,3 +114,43 @@ def test_refuses_existing_output(tmp_path: Path) -> None:
     (tmp_path / "out").mkdir()
     with pytest.raises(FileExistsError):
         distill_recording(rec, tmp_path / "out")
+
+
+def test_drops_list_selection_replaced_by_the_next_one(tmp_path: Path) -> None:
+    combo = {"kind": "click", "x": 1, "y": 1, "structural": {"role": "combobox"}}
+    rec = _recording(
+        tmp_path,
+        [
+            (combo, A, B),
+            ({"kind": "type", "text": "United States", "field_label": "country"}, B, A),
+            ({"kind": "key", "key": "Enter"}, A, B),
+            (
+                {
+                    "kind": "type",
+                    "text": "USA",
+                    "field_label": "country",
+                    "param": "cc",
+                },
+                B,
+                A,
+            ),
+        ],
+    )
+    report = distill_recording(rec, tmp_path / "out")
+    assert [(d.index, d.rule) for d in report.dropped] == [
+        (1, "selection_replaced"),
+        (2, "selection_replaced"),
+    ]
+
+
+def test_text_box_typing_is_never_treated_as_replaced(tmp_path: Path) -> None:
+    box = {"kind": "click", "x": 1, "y": 1, "structural": {"role": "textbox"}}
+    rec = _recording(
+        tmp_path,
+        [
+            (box, A, B),
+            ({"kind": "type", "text": "27 ", "field_label": "street"}, B, A),
+            ({"kind": "type", "text": "Willow", "field_label": "street"}, A, B),
+        ],
+    )
+    assert distill_recording(rec, tmp_path / "out").dropped == []

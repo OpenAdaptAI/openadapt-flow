@@ -268,8 +268,7 @@ How strong it is, compared with a read outside the application:
 
 A check the person shows is never a system-of-record read. Under
 `problems_only` approval, a save checked this way still goes to a person
-(`onscreen_readback`). Under `each_item`, the person who approves each entry
-sees the read-back result with it. At runtime it makes no model calls.
+(`onscreen_readback`). At runtime it makes no model calls.
 
 ## Separate-session UI read-back (`ui_readback`)
 

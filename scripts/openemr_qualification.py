@@ -260,6 +260,7 @@ def prepare_registration_bundle(
     steps = list(workflow.steps)
     out: list[Any] = []
     notes: list[dict[str, Any]] = []
+    dropped_enter: set[str] = set()
     i = 0
     while i < len(steps):
         step = steps[i]
@@ -278,9 +279,8 @@ def prepare_registration_bundle(
             # TYPE step's read-back then verifies the focused select's
             # selected option label equals the typed value. The Enter that
             # followed in the demonstration asserts nothing and is dropped.
-            typed, key = steps[i + 1], steps[i + 2]
-            out.append(step.model_copy(deep=True))
-            out.append(typed.model_copy(deep=True))
+            key = steps[i + 2]
+            dropped_enter.add(key.id)
             notes.append(
                 {
                     "change": "drop_select_commit_enter",
@@ -288,7 +288,8 @@ def prepare_registration_bundle(
                     "selector": structural.selector,
                 }
             )
-            i += 3
+        if step.id in dropped_enter:
+            i += 1
             continue
         if _is_ctrl_a(step) and i > 0 and steps[i - 1].action is ActionKind.CLICK and (
             i + 1 < len(steps) and steps[i + 1].action is ActionKind.TYPE

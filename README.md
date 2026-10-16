@@ -260,12 +260,12 @@ serves bundles to an MCP client over stdio and writes Agent Skills:
 
 ```bash
 pip install openadapt-agent
-openadapt-agent serve --bundles ./bundles --allow-run
+openadapt-agent serve --mode production --bundles ./bundles
 openadapt-agent emit-skill ./bundle --out ~/.claude/skills
 ```
 
-Leave out `--allow-run` to let the client inspect workflows without starting
-them. For a networked service with signed results, use `serve-execute`:
+Leave out `--mode production` to let the client list workflows without
+starting them. For a networked service with signed results, use `serve-execute`:
 
 ```bash
 pip install 'openadapt-flow[execute]'

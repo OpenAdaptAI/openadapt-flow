@@ -154,3 +154,16 @@ def test_text_box_typing_is_never_treated_as_replaced(tmp_path: Path) -> None:
         ],
     )
     assert distill_recording(rec, tmp_path / "out").dropped == []
+
+
+def test_scroll_target_must_reach_its_demonstrated_position() -> None:
+    from openadapt_flow.runtime.replayer import _scroll_target_positioned
+
+    frame = _png(10)  # 80x60
+    # Scrolling down: a target still 30 px lower than recorded (> 25% of 60) is not ready.
+    assert not _scroll_target_positioned((40, 10), (40, 40), (0, 300), frame)
+    assert _scroll_target_positioned((40, 10), (40, 20), (0, 300), frame)
+    # Already past the recorded point is fine.
+    assert _scroll_target_positioned((40, 40), (40, 10), (0, 300), frame)
+    # Scrolling up mirrors it.
+    assert not _scroll_target_positioned((40, 50), (40, 10), (0, -300), frame)

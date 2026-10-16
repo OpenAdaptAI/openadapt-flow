@@ -466,6 +466,35 @@ class EgressNotPermitted(RuntimeError):
     """
 
 
+#: How far past its demonstrated position (as a fraction of the frame's extent
+#: along the scroll axis) a scroll target may still be before the closed-loop
+#: scroll counts it as ready.
+SCROLL_POSITION_SLACK_FRACTION = 0.25
+
+
+def _scroll_target_positioned(
+    recorded: tuple[int, int],
+    resolved: tuple[int, int],
+    scroll_delta: tuple[int, int],
+    frame_png: bytes,
+) -> bool:
+    """Is the resolved target no further along the scroll than recorded?"""
+
+    dx, dy = scroll_delta
+    w, h = _frame_viewport(frame_png)
+    if dy:
+        slack = SCROLL_POSITION_SLACK_FRACTION * h
+        ahead = (resolved[1] - recorded[1]) if dy > 0 else (recorded[1] - resolved[1])
+        if ahead > slack:
+            return False
+    if dx:
+        slack = SCROLL_POSITION_SLACK_FRACTION * w
+        ahead = (resolved[0] - recorded[0]) if dx > 0 else (recorded[0] - resolved[0])
+        if ahead > slack:
+            return False
+    return True
+
+
 class Replayer:
     """Replays a Workflow against a Backend using injected vision.
 
@@ -13289,8 +13318,17 @@ class Replayer:
         workflow: Workflow,
         bundle_dir: Path,
         params: Mapping[str, RuntimeParamScalar],
+        scroll_delta: Optional[tuple[int, int]] = None,
     ) -> bool:
         """Resolve an implicit scroll target and honor its armed identity.
+
+        With ``scroll_delta``, the target must also be no further along the
+        scroll direction than where the demonstration had it (within
+        :data:`SCROLL_POSITION_SLACK_FRACTION` of the frame). A target that
+        is visible at the bottom edge but was clicked mid-screen in the
+        recording still needs the scroll: the step after the click was
+        recorded with that scroll position (for example, a section that
+        expands below the clicked header).
 
         A generic input crop can visually resolve in several places on a long
         form. Declaring the target visible from that visual match alone makes
@@ -13341,6 +13379,10 @@ class Replayer:
             "template_global",
             "ocr",
         }:
+            return False
+        if scroll_delta is not None and not _scroll_target_positioned(
+            step.anchor.click_point, resolution.point, scroll_delta, frame_png
+        ):
             return False
         if not step.identity_armed:
             return True
@@ -13425,6 +13467,10 @@ class Replayer:
             )
             return None
 
+        # Until a wheel edge stops moving the page, readiness also requires
+        # the target at (or past) its demonstrated position.
+        position_required = [True]
+
         def readiness_holds(frame_png: bytes) -> bool:
             if implicit_target_readiness:
                 assert next_step is not None
@@ -13434,6 +13480,7 @@ class Replayer:
                     workflow=workflow,
                     bundle_dir=bundle_dir,
                     params=params,
+                    scroll_delta=(dx, dy) if position_required[0] else None,
                 )
             return self._predicate_holds(
                 stop_pred,
@@ -13493,6 +13540,9 @@ class Replayer:
             )
             scrolled += increment
             frame = self._wait_for_scroll_transition_and_settle(before_png)
+            if not self.vision.pixels_changed(before_png, frame):
+                # The page did not move (its end): visibility is enough.
+                position_required[0] = False
             before_png = frame
             holds = readiness_holds(frame)
             if self._governed_asset_mutation is not None:

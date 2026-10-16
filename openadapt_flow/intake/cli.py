@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+from openadapt_flow.cli_hints import command
 from openadapt_flow.intake.document import read_document
 from openadapt_flow.intake.extract import (
     IntakeResult,
@@ -81,7 +82,8 @@ def cmd_intake(args: argparse.Namespace) -> int:
         return 2
     Path(args.out).write_text(json.dumps(result.to_params(), indent=2) + "\n")
     print(
-        f"Wrote {args.out}. Run: openadapt-flow run {args.bundle} --params-file {args.out}"
+        f"Wrote {args.out}. Run: "
+        + command(f"run {args.bundle} --params-file {args.out}")
     )
     return 0
 

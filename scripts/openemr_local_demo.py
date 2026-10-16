@@ -256,6 +256,17 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
                     matches.append(locator)
             if len(matches) != 1:
                 return None
+            # The confirm control's own visible label is part of its
+            # identity: the same element relabelled to another action (e.g.
+            # a merge) is not the recorded duplicate-check confirmation.
+            label = " ".join(
+                str(
+                    matches[0].evaluate(
+                        "(el) => el.tagName === 'INPUT' ? el.value : el.textContent"
+                    )
+                    or ""
+                ).split()
+            )
             box = matches[0].bounding_box()
             if box is None or not (
                 box["x"] <= x < box["x"] + box["width"]
@@ -270,6 +281,7 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
             "name": "Create New Patient",
             "target_kind": "action",
             "target_id": "confirm_create",
+            "label": label,
         }
 
     def _form_target(self, x: int, y: int) -> dict[str, str] | None:
@@ -413,12 +425,15 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         target = self._confirm_target(x, y) or self._form_target(x, y)
         if target is None:
             return super().structured_text_at(x, y)
+        identity = {
+            "form_path": FORM_PATH,
+            "target_kind": target["target_kind"],
+            "target_id": target["target_id"],
+        }
+        if "label" in target:
+            identity["label"] = target["label"]
         return json.dumps(
-            {
-                "form_path": FORM_PATH,
-                "target_kind": target["target_kind"],
-                "target_id": target["target_id"],
-            },
+            identity,
             sort_keys=True,
             separators=(",", ":"),
         )

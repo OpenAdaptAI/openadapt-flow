@@ -491,19 +491,14 @@ class OpenEMRFaultDriver:
             )
             after_sha256 = sha256_bytes(context.backend.screenshot())
         elif context.fault_kind == "wrong_identity":
-            # The save's identity band is the dialog row around the confirm
-            # button. Relabel the sibling control in that row, so the dialog
-            # no longer reads as the recorded duplicate-check confirmation.
+            # Relabel the confirm control itself to a different action. The
+            # structural selector still resolves the same unique element, so
+            # only the identity check (which binds the control's own label)
+            # can refuse it.
             _modal_frame(page).evaluate(
                 """(sel) => { const b = document.querySelector(sel);
-                    const row = b.parentElement;
-                    const others = [...row.querySelectorAll('button, input[type=button], a')]
-                        .filter((el) => el !== b);
-                    if (!others.length) throw new Error('identity band control missing');
-                    for (const el of others) {
-                        if (el.tagName === 'INPUT') el.value = 'Merge Into Existing Chart';
-                        else el.textContent = 'Merge Into Existing Chart';
-                    } }""",
+                    if (b.tagName === 'INPUT') b.value = 'Merge Into Existing Chart';
+                    else b.textContent = 'Merge Into Existing Chart'; }""",
                 SAVE_SELECTOR,
             )
             after_sha256 = sha256_bytes(context.backend.screenshot())

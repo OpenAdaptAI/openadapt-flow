@@ -878,3 +878,17 @@ def test_mockmed_continue_uses_text_value_at_not_type_text(
     assert compiled["workflow_id"].startswith("wf_")
     assert compiled["recording_retained"] is True
     assert "VERIFIED" not in json.dumps(compiled)
+
+
+def test_agent_pointer_and_chord_steps_are_recorded(tmp_path: Path) -> None:
+    session, _backend = _session(tmp_path)
+    session.start_record()
+    session.double_click(10, 20)
+    session.hotkey(["Control"], "a")
+    session.scroll(0, 300)
+    rec = session.stop_record()
+    kinds = [
+        json.loads(line)["kind"]
+        for line in (rec / "events.jsonl").read_text().splitlines()
+    ]
+    assert kinds == ["double_click", "hotkey", "scroll"]

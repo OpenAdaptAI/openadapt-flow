@@ -574,6 +574,42 @@ class AuthoringSession:
         self._require_not_paused()
         recorder.press(key)
 
+    def double_click(self, x: int, y: int) -> None:
+        """Double-click at pixels through :class:`Recorder`."""
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        self._last_target = _NodePixels(x=int(x), y=int(y), w=0, h=0)
+        recorder.double_click(int(x), int(y))
+
+    def right_click(self, x: int, y: int) -> None:
+        """Right-click at pixels through :class:`Recorder`."""
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        recorder.right_click(int(x), int(y))
+
+    def drag(self, x: int, y: int, end_x: int, end_y: int) -> None:
+        """Drag between two pixel points through :class:`Recorder`."""
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        recorder.drag(int(x), int(y), int(end_x), int(end_y))
+
+    def hotkey(self, modifiers: list[str], key: str) -> None:
+        """Press an explicit modifier chord through :class:`Recorder`."""
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        recorder.hotkey(list(modifiers), key)
+
+    def scroll(self, dx: int, dy: int) -> None:
+        """Scroll at the current pointer through :class:`Recorder`."""
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        recorder.scroll(int(dx), int(dy))
+
     def pause_for_input(
         self,
         *,

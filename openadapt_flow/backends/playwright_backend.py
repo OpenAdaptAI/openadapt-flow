@@ -262,6 +262,21 @@ _INSTALL_GUARD_BODY_JS = (
             recordTie = 'submit-binding';
         }
     }
+    if (args.requireRowIdentity && !recordTie && args.admitFormField) {
+        // Opt-in (backend ``keyboard_admits_form_fields``): a focused,
+        // uniquely identified data-entry control on a form that has no record
+        // row yet (a new-record form). The lease binds this exact element;
+        // its identity is still verified against the compiled structured
+        // template by the readback that follows, so this only replaces the
+        // missing row tie, never the identity check.
+        const type = (el.getAttribute('type') || '').toLowerCase();
+        if (el.matches('input, select, textarea') && el.id &&
+                !['hidden', 'password', 'submit', 'button', 'reset', 'image',
+                  'file'].includes(type) &&
+                document.querySelectorAll('#' + CSS.escape(el.id)).length === 1) {
+            recordTie = 'form-field:' + el.id;
+        }
+    }
     if (args.requireRowIdentity && !recordTie) return null;
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
@@ -954,6 +969,13 @@ class PlaywrightBackend:
         page: The underlying Playwright page (public so record-time helpers
             such as the demo driver may use locators; replay never does).
     """
+
+    # Guarded keyboard actuation normally requires the focused element to sit
+    # in a record row. A backend for a new-record form (no row exists yet) may
+    # opt in to admitting a focused, uniquely identified form control instead;
+    # identity readback against the compiled template still decides.
+    keyboard_admits_form_fields: bool = False
+
 
     def __init__(
         self,
@@ -2486,6 +2508,7 @@ class PlaywrightBackend:
                     "y": frame_point.y,
                     "requireRowIdentity": True,
                     "requireFocused": True,
+                    "admitFormField": bool(self.keyboard_admits_form_fields),
                 },
             )
             if not isinstance(observed, dict):

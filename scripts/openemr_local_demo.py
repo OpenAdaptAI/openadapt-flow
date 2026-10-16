@@ -204,6 +204,10 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
     value.
     """
 
+    # The registration form is a new-record form: no row ties its fields.
+    keyboard_admits_form_fields = True
+
+
     _INNER_TARGET_JS = """([px, py]) => {
         const el = document.elementFromPoint(px, py);
         if (!el) return null;

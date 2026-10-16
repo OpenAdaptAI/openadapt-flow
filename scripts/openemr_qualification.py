@@ -200,10 +200,183 @@ def patient_record_verifier(api_base_url: str, session: Any) -> RestRecordVerifi
     )
 
 
+def _is_ctrl_a(step: Any) -> bool:
+    from openadapt_flow.ir import ActionKind
+
+    if step.action is ActionKind.HOTKEY:
+        return (step.key or "").lower() == "a" and [
+            m.lower() for m in step.modifiers
+        ] in (["control"], ["ctrl"])
+    return step.action is ActionKind.KEY and (step.key or "").lower() in {
+        "control+a",
+        "ctrl+a",
+    }
+
+
+def prepare_registration_bundle(
+    src: Path, dst: Path, recording_dir: Path
+) -> tuple[Workflow, list[dict[str, Any]]]:
+    """Author the compiled registration program up to ``clinical-write``.
+
+    The compiler keeps the demonstration's literal gestures. Four of them leave
+    steps that assert nothing, which ``clinical-write`` refuses. Each change
+    below is listed in the returned notes and replaces a gesture with an
+    equivalent one that carries its own check, using only the recording's own
+    frames:
+
+    - click + type + Enter on a native ``<select>`` (role ``combobox``)
+      becomes one ``SELECT_OPTION`` with ``selection_commit_key=Enter``; the
+      runtime OCR-verifies the committed value in the band where the recording
+      shows it (required to be readable in the recorded after-frame);
+    - ``Control+a`` before typing into a field of the freshly opened form is
+      dropped (the field is empty; the TYPE step's own read-back still
+      verifies the field holds exactly the typed value);
+    - a field click with no postcondition gets a ``REGION_STABLE`` check of the
+      clicked field box from the recorded after-frame (the empty focused field;
+      no parameter value is in that box);
+    - an identity-applicable click on a static form control with no usable
+      identity band (the Contact section header, the Create New Patient
+      button) gets a pixel identifier crop of the control itself from the
+      recorded before-frame, verified by the pixel tier of the identity ladder.
+
+    The result is resealed; qualification then exercises it end to end.
+    """
+
+    from openadapt_flow.compiler.compile import (
+        _crop_png,
+        _exact_ocr_value_present,
+        _selection_readback_region,
+    )
+    from openadapt_flow.ir import ActionKind, Postcondition, PostconditionKind
+    from openadapt_flow.qualification import save_qualified_workflow
+    from openadapt_flow.vision.hashing import phash_png
+
+    if dst.exists():
+        raise QualificationError(f"bundle path exists: {dst}")
+    shutil.copytree(src, dst)
+    workflow = Workflow.load(dst)
+    frames = recording_dir / "frames"
+
+    def frame(step: Any, phase: str) -> bytes:
+        index = int(step.id.rsplit("_", 1)[1])
+        return (frames / f"{index:04d}_{phase}.png").read_bytes()
+
+    steps = list(workflow.steps)
+    out: list[Any] = []
+    notes: list[dict[str, Any]] = []
+    i = 0
+    while i < len(steps):
+        step = steps[i]
+        structural = step.anchor.structural if step.anchor is not None else None
+        if (
+            step.action is ActionKind.CLICK
+            and structural is not None
+            and structural.role == "combobox"
+            and i + 2 < len(steps)
+            and steps[i + 1].action is ActionKind.TYPE
+            and steps[i + 2].action is ActionKind.KEY
+            and (steps[i + 2].key or "").lower() in {"enter", "return"}
+            and steps[i + 1].text
+        ):
+            typed, key = steps[i + 1], steps[i + 2]
+            after = frame(key, "after")
+            region = _selection_readback_region(after, step.anchor.region)
+            if not _exact_ocr_value_present(after, typed.text, region):
+                raise QualificationError(
+                    f"{typed.id}: the committed option is not readable in the "
+                    "recorded frame; refusing to author a SELECT_OPTION"
+                )
+            out.append(
+                typed.model_copy(
+                    update={
+                        "action": ActionKind.SELECT_OPTION,
+                        "intent": f"select <{typed.param}>"
+                        if typed.param
+                        else "select option",
+                        "selection_commit_key": "Enter",
+                        "selection_region": region,
+                        "anchor": step.anchor.model_copy(deep=True),
+                        "identity_armed": step.identity_armed,
+                        "identity_unarmed_reason": step.identity_unarmed_reason,
+                        "identifier_crop_missing_reason": (
+                            step.identifier_crop_missing_reason
+                        ),
+                        "expect": list(key.expect),
+                    }
+                )
+            )
+            notes.append(
+                {
+                    "change": "select_option",
+                    "from": [step.id, typed.id, key.id],
+                    "to": typed.id,
+                    "selector": structural.selector,
+                }
+            )
+            i += 3
+            continue
+        if _is_ctrl_a(step) and i > 0 and steps[i - 1].action is ActionKind.CLICK and (
+            i + 1 < len(steps) and steps[i + 1].action is ActionKind.TYPE
+        ):
+            notes.append({"change": "drop_select_all_on_empty_field", "step": step.id})
+            i += 1
+            continue
+        step = step.model_copy(deep=True)
+        if (
+            step.action is ActionKind.CLICK
+            and not step.expect
+            and structural is not None
+            and structural.role == "textbox"
+            and step.anchor is not None
+        ):
+            after = frame(step, "after")
+            region = tuple(step.anchor.region)
+            rel = f"templates/{step.id}_expect.png"
+            (dst / rel).write_bytes(_crop_png(after, region))
+            step.expect = [
+                Postcondition(
+                    kind=PostconditionKind.REGION_STABLE,
+                    region=region,
+                    phash=phash_png(after, region=region),
+                    phash_tolerance=8,
+                    template=rel,
+                )
+            ]
+            notes.append({"change": "focused_field_region_stable", "step": step.id})
+        if (
+            step.action is ActionKind.CLICK
+            and step.anchor is not None
+            and not (
+                step.anchor.context_text
+                or step.anchor.structured_identity
+                or step.anchor.identity_template
+                or step.anchor.identifier_crop
+            )
+            and structural is not None
+            and structural.role == "button"
+        ):
+            before = frame(step, "before")
+            region = tuple(step.anchor.region)
+            rel = f"templates/identifiers/{step.id}.png"
+            (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+            (dst / rel).write_bytes(_crop_png(before, region))
+            step.anchor.identifier_crop = rel
+            step.anchor.identifier_region = region
+            step.identity_armed = True
+            step.identity_unarmed_reason = None
+            step.identifier_crop_missing_reason = None
+            notes.append(
+                {"change": "static_control_identifier_crop", "step": step.id}
+            )
+        out.append(step)
+        i += 1
+    workflow.steps = out
+    save_qualified_workflow(workflow, dst)
+    return Workflow.load(dst), notes
+
+
 def save_step(workflow: Workflow) -> Any:
     """The single irreversible, effect-bound, identity-armed save step."""
-
-    from openadapt_flow.policy import has_structured_identity
 
     candidates = [s for s in workflow.steps if s.risk == "irreversible" and s.effects]
     if len(candidates) != 1:
@@ -212,10 +385,10 @@ def save_step(workflow: Workflow) -> Any:
             f"{[s.id for s in candidates]}"
         )
     step = candidates[0]
-    if step.anchor is None or not step.identity_armed or not has_structured_identity(
-        step
-    ):
-        raise QualificationError("the save step has no structured identity")
+    # Identity may rest on structured (DOM) text or on the retained identity
+    # template; the run gate and certification decide whether it is enough.
+    if step.anchor is None or not step.identity_armed:
+        raise QualificationError("the save step has no armed identity")
     if any(effect.needs_operator_confirmation for effect in step.effects):
         raise QualificationError("the save step has an unbound placeholder effect")
     kinds = {effect.kind.value for effect in step.effects}
@@ -330,12 +503,19 @@ class OpenEMRFaultDriver:
             )
             after_sha256 = sha256_bytes(context.backend.screenshot())
         elif context.fault_kind == "wrong_identity":
+            # The save's identity band is the dialog row around the confirm
+            # button. Relabel the sibling control in that row, so the dialog
+            # no longer reads as the recorded duplicate-check confirmation.
             _modal_frame(page).evaluate(
                 """(sel) => { const b = document.querySelector(sel);
-                    const changed = 'Cancel';
-                    b.setAttribute('aria-label', changed);
-                    if ('value' in b && b.tagName === 'INPUT') b.value = changed;
-                    else b.textContent = changed; }""",
+                    const row = b.parentElement;
+                    const others = [...row.querySelectorAll('button, input[type=button], a')]
+                        .filter((el) => el !== b);
+                    if (!others.length) throw new Error('identity band control missing');
+                    for (const el of others) {
+                        if (el.tagName === 'INPUT') el.value = 'Merge Into Existing Chart';
+                        else el.textContent = 'Merge Into Existing Chart';
+                    } }""",
                 SAVE_SELECTOR,
             )
             after_sha256 = sha256_bytes(context.backend.screenshot())
@@ -614,6 +794,10 @@ def run_once(
             qualification_environment_observer=environment_observer,
             durable=True,
             require_settled=True,
+            # Two static form controls (the Contact section header and the
+            # Create New Patient button) carry a pixel identifier crop as
+            # their identity evidence; see prepare_registration_bundle.
+            pixel_verify_enabled=True,
         ).run(
             workflow.model_copy(deep=True),
             params=params,

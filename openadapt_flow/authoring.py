@@ -214,12 +214,20 @@ class MissingSecretTypeError(AuthoringError):
         self.param = param
 
 
-class CompileResult(TypedDict):
-    """Authoring compile is not success of the job."""
-
+class _CompileResultRequired(TypedDict):
     status: Literal["needs_human_admit"]
     workflow_id: str
     recording_retained: bool
+
+
+class CompileResult(_CompileResultRequired, total=False):
+    """Authoring compile is not success of the job.
+
+    ``distilled`` (steps in, steps out, dropped steps) is present when the
+    recording was distilled before compile.
+    """
+
+    distilled: dict[str, Any]
 
 
 class AdmitResult(TypedDict, total=False):
@@ -685,6 +693,7 @@ class AuthoringSession:
         bundle_dir: Path | str | None = None,
         *,
         name: str = "authoring",
+        distill: bool = True,
     ) -> CompileResult:
         """Compile via :func:`compile_recording`; never paints ``VERIFIED``.
 
@@ -692,6 +701,10 @@ class AuthoringSession:
         secret-field pause with no TYPE/param event. The compiler signature
         and return type (``Workflow``) are unchanged; this wrapper is the
         admit gate. ``bundle_dir`` defaults to a sibling of the recording.
+
+        With ``distill`` (the default), steps that had no visible effect are
+        removed first (:func:`~openadapt_flow.compiler.distill.distill_recording`)
+        and the distilled copy is compiled. The original recording is kept.
         """
 
         self._require_not_halted()
@@ -711,7 +724,28 @@ class AuthoringSession:
             if bundle_dir is not None
             else recording_dir.parent / f"{recording_dir.name}-bundle"
         )
-        workflow = compile_recording(recording_dir, out_bundle, name=name)
+        distilled: Optional[dict[str, Any]] = None
+        compile_dir = recording_dir
+        if distill:
+            from openadapt_flow.compiler.distill import distill_recording
+
+            distilled_dir = recording_dir.parent / f"{recording_dir.name}-distilled"
+            if distilled_dir.exists():
+                raise AuthoringError(
+                    f"distilled recording already exists: {distilled_dir}",
+                    code="distilled_exists",
+                )
+            report = distill_recording(recording_dir, distilled_dir)
+            compile_dir = distilled_dir
+            distilled = {
+                "steps_in": report.steps_in,
+                "steps_out": report.steps_out,
+                "dropped": [
+                    {"index": d.index, "kind": d.kind, "rule": d.rule}
+                    for d in report.dropped
+                ],
+            }
+        workflow = compile_recording(compile_dir, out_bundle, name=name)
         recording_id = workflow.recording_id or uuid.uuid4().hex
         workflow_id = f"wf_{recording_id}"
         result: CompileResult = {
@@ -719,6 +753,8 @@ class AuthoringSession:
             "workflow_id": workflow_id,
             "recording_retained": True,
         }
+        if distilled is not None:
+            result["distilled"] = distilled
         digest = None
         manifest = getattr(workflow, "manifest", None)
         raw_digest = getattr(manifest, "content_digest", None)

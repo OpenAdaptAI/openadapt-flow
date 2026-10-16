@@ -595,8 +595,11 @@ def test_compile_returns_needs_human_admit_and_calls_compile_recording(
     monkeypatch.setattr(authoring_mod, "compile_recording", wrapped)
     result = session.compile(tmp_path / "bundle", name="authoring-demo")
     assert calls, "compile wrapper must call compile_recording"
-    assert calls[0][0] == tmp_path / "rec"
+    assert calls[0][0] == tmp_path / "rec-distilled"
     assert calls[0][2] == "authoring-demo"
+    assert result["distilled"]["steps_in"] == result["distilled"]["steps_out"] + len(
+        result["distilled"]["dropped"]
+    )
     assert result["status"] == NEEDS_HUMAN_ADMIT
     assert result["workflow_id"].startswith("wf_")
     assert result["recording_retained"] is True
@@ -660,9 +663,32 @@ def test_compile_without_args_still_wraps_compile_recording(
 
     monkeypatch.setattr(authoring_mod, "compile_recording", wrapped)
     result = session.compile()
-    assert calls == [(tmp_path / "rec", tmp_path / "rec-bundle", "authoring")]
+    assert calls == [(tmp_path / "rec-distilled", tmp_path / "rec-bundle", "authoring")]
     assert result["status"] == NEEDS_HUMAN_ADMIT
     assert "VERIFIED" not in json.dumps(result)
+
+
+def test_compile_distill_false_compiles_the_original_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import openadapt_flow.authoring as authoring_mod
+
+    session, _backend = _session(tmp_path)
+    session.start_record()
+    session.click(10, 20)
+    session.stop_record()
+    calls: list[Path] = []
+    real = authoring_mod.compile_recording
+
+    def wrapped(recording_dir, out_bundle_dir, *, name, **kwargs):
+        calls.append(Path(recording_dir))
+        return real(recording_dir, out_bundle_dir, name=name, **kwargs)
+
+    monkeypatch.setattr(authoring_mod, "compile_recording", wrapped)
+    result = session.compile(distill=False)
+    assert calls == [tmp_path / "rec"]
+    assert "distilled" not in result
+    assert not (tmp_path / "rec-distilled").exists()
 
 
 def test_compile_accepts_secret_pause_after_continue(tmp_path: Path) -> None:

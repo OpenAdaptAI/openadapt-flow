@@ -698,10 +698,6 @@ def record(fixture: OpenEMRFixture, out_dir: Path, *, headed: bool) -> Path:
         # The pinned comprehensive form keeps every contact control inside a
         # collapsed, real UI accordion. Record opening it; never type into the
         # duplicate hidden inputs that exist while the section is collapsed.
-        # The Contact header sits on the viewport's bottom edge at 1280x800;
-        # a qualification proof needs the clicked control's whole box inside
-        # the retained frame, so the demonstration scrolls it fully into view.
-        recorder.scroll(0, 120)
         recorder.click(*_center(form.get_by_text("Contact", exact=True)))
         # Scrolling is part of the demonstrated program. A hidden helper scroll
         # would leave replay at the top of the page with off-viewport click

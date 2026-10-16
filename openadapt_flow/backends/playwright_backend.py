@@ -1810,12 +1810,20 @@ class PlaywrightBackend:
                 if not (0 <= point[0] < vw and 0 <= point[1] < vh):
                     self._cleanup_guard(token, scope)
                     return None
-                region = (
-                    int(round(float(box["x"]))),
-                    int(round(float(box["y"]))),
-                    int(round(float(box["width"]))),
-                    int(round(float(box["height"]))),
-                )
+                # The handle's region is the target's VISIBLE box: its
+                # bounding box clipped to the viewport. A control that runs a
+                # few pixels past the viewport edge (a full-width section
+                # header at the bottom of the screen) is still evidenced only
+                # by the part the retained frame shows; the center point was
+                # already required to be inside the viewport above.
+                x0 = max(0, int(round(float(box["x"]))))
+                y0 = max(0, int(round(float(box["y"]))))
+                x1 = min(vw, int(round(float(box["x"]) + float(box["width"]))))
+                y1 = min(vh, int(round(float(box["y"]) + float(box["height"]))))
+                if x1 <= x0 or y1 <= y0:
+                    self._cleanup_guard(token, scope)
+                    return None
+                region = (x0, y0, x1 - x0, y1 - y0)
             except Exception:
                 self._cleanup_guard(token, scope)
                 raise

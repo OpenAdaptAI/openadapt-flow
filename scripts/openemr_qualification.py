@@ -224,16 +224,16 @@ def prepare_registration_bundle(
     equivalent one that carries its own check, using only the recording's own
     frames:
 
-    - click + type + Enter on a native ``<select>`` (role ``combobox``)
-      becomes one ``SELECT_OPTION`` with ``selection_commit_key=Enter``; the
-      runtime OCR-verifies the committed value in the band where the recording
-      shows it (required to be readable in the recorded after-frame);
+    - the Enter after typing an option label into a browser ``<select>``
+      (role ``combobox``) is dropped: the typed label selects the option, and
+      the TYPE step's read-back verifies the focused select's selected option
+      label equals the typed value;
     - ``Control+a`` before typing into a field of the freshly opened form is
       dropped (the field is empty; the TYPE step's own read-back still
       verifies the field holds exactly the typed value);
     - a field click with no postcondition gets a ``REGION_STABLE`` check of the
-      clicked field box from the recorded after-frame (the empty focused field;
-      no parameter value is in that box);
+      clicked field box from the recorded after-frame (the focused field before
+      anything is typed into it; no parameter value is in that box);
     - an identity-applicable click on a static form control with no usable
       identity band (the Contact section header, the Create New Patient
       button) gets a pixel identifier crop of the control itself from the
@@ -242,11 +242,7 @@ def prepare_registration_bundle(
     The result is resealed; qualification then exercises it end to end.
     """
 
-    from openadapt_flow.compiler.compile import (
-        _crop_png,
-        _exact_ocr_value_present,
-        _selection_readback_region,
-    )
+    from openadapt_flow.compiler.compile import _crop_png
     from openadapt_flow.ir import ActionKind, Postcondition, PostconditionKind
     from openadapt_flow.qualification import save_qualified_workflow
     from openadapt_flow.vision.hashing import phash_png
@@ -278,38 +274,17 @@ def prepare_registration_bundle(
             and (steps[i + 2].key or "").lower() in {"enter", "return"}
             and steps[i + 1].text
         ):
+            # A browser <select> takes the typed option label directly; the
+            # TYPE step's read-back then verifies the focused select's
+            # selected option label equals the typed value. The Enter that
+            # followed in the demonstration asserts nothing and is dropped.
             typed, key = steps[i + 1], steps[i + 2]
-            after = frame(key, "after")
-            region = _selection_readback_region(after, step.anchor.region)
-            if not _exact_ocr_value_present(after, typed.text, region):
-                raise QualificationError(
-                    f"{typed.id}: the committed option is not readable in the "
-                    "recorded frame; refusing to author a SELECT_OPTION"
-                )
-            out.append(
-                typed.model_copy(
-                    update={
-                        "action": ActionKind.SELECT_OPTION,
-                        "intent": f"select <{typed.param}>"
-                        if typed.param
-                        else "select option",
-                        "selection_commit_key": "Enter",
-                        "selection_region": region,
-                        "anchor": step.anchor.model_copy(deep=True),
-                        "identity_armed": step.identity_armed,
-                        "identity_unarmed_reason": step.identity_unarmed_reason,
-                        "identifier_crop_missing_reason": (
-                            step.identifier_crop_missing_reason
-                        ),
-                        "expect": list(key.expect),
-                    }
-                )
-            )
+            out.append(step.model_copy(deep=True))
+            out.append(typed.model_copy(deep=True))
             notes.append(
                 {
-                    "change": "select_option",
-                    "from": [step.id, typed.id, key.id],
-                    "to": typed.id,
+                    "change": "drop_select_commit_enter",
+                    "step": key.id,
                     "selector": structural.selector,
                 }
             )
@@ -326,7 +301,7 @@ def prepare_registration_bundle(
             step.action is ActionKind.CLICK
             and not step.expect
             and structural is not None
-            and structural.role == "textbox"
+            and structural.role in {"textbox", "combobox"}
             and step.anchor is not None
         ):
             after = frame(step, "after")
@@ -370,6 +345,19 @@ def prepare_registration_bundle(
             )
         out.append(step)
         i += 1
+    # OpenEMR has no idempotency column. The record_written read-back counts
+    # charts bearing this run's email (a made-up, per-patient address) and
+    # requires exactly one, so a second chart for the same person is refuted
+    # by the read-back. This detects a duplicate; OpenEMR itself does not
+    # collapse one.
+    from openadapt_flow.runtime.effects import ValueExpr
+
+    for step in out:
+        for effect in step.effects:
+            if effect.kind.value == "record_written" and effect.idempotency_key is None:
+                effect.idempotency_key = ValueExpr(param="email")
+                effect.key_field = "email"
+                notes.append({"change": "email_as_duplicate_key", "step": step.id})
     workflow.steps = out
     save_qualified_workflow(workflow, dst)
     return Workflow.load(dst), notes

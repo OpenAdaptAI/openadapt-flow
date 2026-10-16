@@ -188,6 +188,7 @@ from openadapt_flow.runtime.program_predicates import (
     program_predicate_evaluator_contract_sha256,
 )
 from openadapt_flow.runtime.resolver import (
+    OCR_MIN_RATIO,
     is_below_ocr,
     pad_region,
     resolve,
@@ -12527,6 +12528,71 @@ class Replayer:
             [structured_tier, pixel_tier, vlm_tier, ocr_tier]
         )
 
+    def _identifier_displacement(
+        self,
+        anchor: Anchor,
+        resolution: Resolution,
+        before_png: bytes,
+        bundle_dir: Optional[Path],
+        *,
+        workflow: Optional[Workflow] = None,
+    ) -> tuple[int, int]:
+        """How far the target moved between the recorded and the live frame.
+
+        Template rungs resolve to the click point, so ``resolved -
+        click_point`` is the displacement. The OCR rung resolves to the CENTER
+        of the matched label, which is not where the operator clicked (a click
+        to the right of a placeholder, for example). Using ``resolved -
+        click_point`` then shifts the live identifier crop by that gap, and the
+        pixel tier reports a different identifier on an unchanged screen.
+
+        For an OCR resolution, OCR the label in the recorded anchor template
+        and in the same-sized live crop, so both label centers come from
+        equivalent crops and OCR's centroid jitter cancels. Falls back to the
+        click-point displacement whenever a label can't be found.
+        """
+        fallback = (
+            int(resolution.point[0] - anchor.click_point[0]),
+            int(resolution.point[1] - anchor.click_point[1]),
+        )
+        if (
+            resolution.rung != "ocr"
+            or not anchor.ocr_text
+            or not anchor.template
+            or bundle_dir is None
+        ):
+            return fallback
+        find_text = getattr(self.vision, "find_text", None)
+        if find_text is None:
+            return fallback
+        template_png = self._asset_bytes(bundle_dir, anchor.template, workflow=workflow)
+        if template_png is None:
+            return fallback
+        try:
+            recorded = find_text(template_png, anchor.ocr_text, min_ratio=OCR_MIN_RATIO)
+            if recorded is None:
+                return fallback
+            tx, ty, tw, th = anchor.region
+            rec_center = (tx + recorded.point[0], ty + recorded.point[1])
+            # First estimate from the resolved label center, then re-measure
+            # the label in a live crop shaped like the recorded template.
+            ex = int(round(resolution.point[0] - rec_center[0]))
+            ey = int(round(resolution.point[1] - rec_center[1]))
+            live_crop = identity_mod.crop_region(before_png, (tx + ex, ty + ey, tw, th))
+            live = (
+                find_text(live_crop, anchor.ocr_text, min_ratio=OCR_MIN_RATIO)
+                if live_crop
+                else None
+            )
+        except Exception:  # noqa: BLE001 - fall back, never fail open
+            return fallback
+        if live is None:
+            return fallback
+        return (
+            int(round(ex + live.point[0] - recorded.point[0])),
+            int(round(ey + live.point[1] - recorded.point[1])),
+        )
+
     def _identifier_crops(
         self,
         anchor: Anchor,
@@ -12561,9 +12627,12 @@ class Replayer:
         if recorded_png is None:
             return None, None
         rx, ry, rw, rh = anchor.identifier_region
+        dx, dy = self._identifier_displacement(
+            anchor, resolution, before_png, bundle_dir, workflow=workflow
+        )
         live_region = (
-            resolution.point[0] + (rx - anchor.click_point[0]),
-            resolution.point[1] + (ry - anchor.click_point[1]),
+            rx + dx,
+            ry + dy,
             rw,
             rh,
         )

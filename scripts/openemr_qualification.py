@@ -474,6 +474,22 @@ class OpenEMRFaultDriver:
         self.private_key, self.public_key_base64 = _ed25519_keypair()
 
     @staticmethod
+    def _settled_frame_sha256(context: QualificationFaultContext) -> str:
+        """Hash the frame the detector reads, once the mutation has rendered.
+
+        Uses the detector's own capture path; a frame taken mid-repaint would
+        name bytes the detector never sees and the receipt would not bind.
+        """
+
+        from openadapt_flow.qualification_drills import _settled_screenshot
+
+        capture = context.capture_frame or context.backend.screenshot
+        frame = _settled_screenshot(capture)
+        if frame is None:
+            raise QualificationError("fault mutation never settled on screen")
+        return sha256_bytes(frame)
+
+    @staticmethod
     def mutation_bytes(kind: str) -> bytes:
         return f"openadapt.openemr.synthetic-fault/{kind}/v1\n".encode("ascii")
 
@@ -489,7 +505,7 @@ class OpenEMRFaultDriver:
                     b.parentNode.insertBefore(b.cloneNode(true), b); }""",
                 SAVE_SELECTOR,
             )
-            after_sha256 = sha256_bytes(context.backend.screenshot())
+            after_sha256 = self._settled_frame_sha256(context)
         elif context.fault_kind == "wrong_identity":
             # Relabel the confirm control itself to a different action. The
             # structural selector still resolves the same unique element, so
@@ -501,7 +517,7 @@ class OpenEMRFaultDriver:
                     else b.textContent = 'Merge Into Existing Chart'; }""",
                 SAVE_SELECTOR,
             )
-            after_sha256 = sha256_bytes(context.backend.screenshot())
+            after_sha256 = self._settled_frame_sha256(context)
         elif context.fault_kind == "stale_identity":
             frame = _modal_frame(page)
             frame.evaluate(
@@ -509,7 +525,7 @@ class OpenEMRFaultDriver:
                     document.body.replaceChildren();
                     document.body.style.background = '#ffffff'; }"""
             )
-            after_sha256 = sha256_bytes(context.backend.screenshot())
+            after_sha256 = self._settled_frame_sha256(context)
         elif context.fault_kind in {"weak_effect", "missing_effect"}:
             replace_effect_verifier = True
             replacement = (

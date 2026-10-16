@@ -298,12 +298,10 @@ class _Example(BaseModel):
 
 
 def _load_example(
-    example: BranchExample, base: Workflow, program: ProgramGraph
+    example: BranchExample, base: Workflow, program: ProgramGraph, bundle: Path
 ) -> _Example:
     report = load_halt_report(example.run_dir)
-    check_provenance(
-        report, base, program, run_dir=example.run_dir, bundle_dir="--bundle"
-    )
+    check_provenance(report, base, program, run_dir=example.run_dir, bundle_dir=bundle)
     spec = _load_fix(example.fix)
     recorded: dict[str, Step] = {}
     carried: dict[str, Path] = {}
@@ -458,7 +456,7 @@ def teach_branch(
             "`openadapt-flow teach`"
         )
     base, program = load_base_program(bundle)
-    loaded = [_load_example(ex, base, program) for ex in examples]
+    loaded = [_load_example(ex, base, program, Path(bundle)) for ex in examples]
     n_neg = len(negatives)
 
     first = loaded[0]

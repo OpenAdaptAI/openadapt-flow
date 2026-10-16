@@ -336,5 +336,7 @@ At runtime the branch is an ordinary guarded state: an OCR text check and, when
 narrowed, a parameter compare. It makes no model calls. Limits: only one new
 corrective step is spliced (as with `teach`), the condition is text or text
 plus one parameter, and a parameter alone (with no shared screen text) is not
-accepted. Tests: `tests/test_teach_branch.py` (MockMed save scenario on the
+accepted. When a run's earlier frames can't be read, all of its halt-screen
+text counts as new, so text that every screen shows could become the
+condition; pass a `--normal-run` to rule that out. Tests: `tests/test_teach_branch.py` (MockMed save scenario on the
 fake backend; no browser).

@@ -297,7 +297,9 @@ class _Example(BaseModel):
     params: dict[str, str]
 
 
-def _load_example(example: BranchExample, base: Workflow, program: ProgramGraph) -> _Example:
+def _load_example(
+    example: BranchExample, base: Workflow, program: ProgramGraph
+) -> _Example:
     report = load_halt_report(example.run_dir)
     check_provenance(
         report, base, program, run_dir=example.run_dir, bundle_dir="--bundle"
@@ -505,7 +507,9 @@ def teach_branch(
     negative_runs = [
         _load_negative(Path(n), base, screen_texts or _run_texts) for n in negatives
     ]
-    clean = [c for c in candidates if not any(_contains(t, c) for _, t in negative_runs)]
+    clean = [
+        c for c in candidates if not any(_contains(t, c) for _, t in negative_runs)
+    ]
     if clean:
         signature = BranchSignature(text=clean[0])
     else:
@@ -568,7 +572,9 @@ def teach_branch(
         else Path(out).parent / f"{Path(out).name}.skills"
     )
     library = SkillLibrary(lib_root)
-    _seed_or_check_library(library, sid, program, dict(base.subflows), bundle_dir=bundle)
+    _seed_or_check_library(
+        library, sid, program, dict(base.subflows), bundle_dir=bundle
+    )
     library.extend_corpus(
         sid,
         [
@@ -599,7 +605,9 @@ def teach_branch(
     graph = updated.program
     assert graph is not None
     for trace in [*corrections, *contrasts]:
-        if not program_reproduces(graph, trace, subflows=dict(updated.subflows)).reproduced:
+        if not program_reproduces(
+            graph, trace, subflows=dict(updated.subflows)
+        ).reproduced:
             return BranchTeachResult(
                 promoted=False,
                 reason=(

@@ -43,7 +43,10 @@ from openadapt_flow.repair.candidate import (
     sha256_hex,
 )
 from openadapt_flow.repair.cli import all_steps
-from openadapt_flow.repair.dialog_identity import mark_dialog_in_recording
+from openadapt_flow.repair.dialog_identity import (
+    enclosing_dialog_region,
+    mark_dialog_in_recording,
+)
 from openadapt_flow.repair.registration import build_candidate, detached_candidate_path
 
 __all__ = [
@@ -164,6 +167,64 @@ def teach_from_calling_agent(
     )
 
 
+#: A shared band shorter than this can't hold a readable line of text.
+_MIN_BAND_HEIGHT = 20
+
+
+def shared_dialog_band(
+    recordings: Sequence[Path | str],
+) -> Optional[tuple[int, int, int, int]]:
+    """The part of the dialog that every demonstration shows identically.
+
+    Each demonstration's dialog can carry details of its own run (a payer,
+    a reference). Using the whole dialog as the dismiss step's identity would
+    then refuse the next run's dialog. This returns the horizontal band of the
+    dialog, around the click, whose pixels are the same in every recording's
+    frame, or None when the dialogs differ in place or nothing around the
+    click is shared.
+    """
+    import json
+
+    import cv2
+    import numpy as np
+
+    regions = []
+    frames = []
+    clicks = []
+    for rec in recordings:
+        rec = Path(rec)
+        lines = (rec / "events.jsonl").read_text().splitlines()
+        event = json.loads(next(line for line in lines if line.strip()))
+        frame = (rec / "frames" / f"{int(event['i']):04d}_before.png").read_bytes()
+        click = (int(event["x"]), int(event["y"]))
+        region = enclosing_dialog_region(frame, click)
+        if region is None:
+            return None
+        regions.append(region)
+        clicks.append(click)
+        frames.append(
+            cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_GRAYSCALE)
+        )
+    if len(set(regions)) != 1 or len(set(clicks)) != 1:
+        return None
+    x, y, w, h = regions[0]
+    cy = clicks[0][1]
+    stack = np.stack([f[y : y + h, x : x + w].astype(np.int16) for f in frames])
+    same = (stack.max(axis=0) - stack.min(axis=0)).max(axis=1) <= 8
+    row = cy - y
+    if not 0 <= row < h or not same[row]:
+        return None
+    top = row
+    while top > 0 and same[top - 1]:
+        top -= 1
+    bottom = row
+    while bottom + 1 < h and same[bottom + 1]:
+        bottom += 1
+    if bottom - top + 1 < _MIN_BAND_HEIGHT:
+        return None
+    return (x, y + top, w, bottom - top + 1)
+
+
 def teach_branch_from_calling_agent(
     examples: Sequence[tuple[Path | str, Path | str]],
     out: Path | str,
@@ -178,7 +239,10 @@ def teach_branch_from_calling_agent(
     ``examples`` pairs each halted run with the agent's recording for it. The
     branch is learned by :func:`openadapt_flow.learning.branch_teach.teach_branch`
     (shared screen text, optional parameter narrowing, the governed learn
-    loop). ``provenance`` describes the latest demonstration. The candidate
+    loop). The dismiss step's identity is the part of the dialog every
+    demonstration shows the same way (:func:`shared_dialog_band`), so a dialog
+    with another run's details still passes it. ``provenance`` describes the
+    latest demonstration. The candidate
     goes through the same campaigns and human approval as any repair, and the
     agent can't review or approve it.
     """
@@ -193,8 +257,9 @@ def teach_branch_from_calling_agent(
     evidence = out.parent / f"{out.name}.evidence"
     first_run, first_recording = (Path(p) for p in examples[0])
     try:
+        band = shared_dialog_band([rec for _, rec in examples])
         for _, recording in examples:
-            mark_dialog_in_recording(Path(recording))
+            mark_dialog_in_recording(Path(recording), dialog_region=band)
         try:
             result = teach_branch(
                 [BranchExample(run_dir=Path(r), fix=Path(f)) for r, f in examples],

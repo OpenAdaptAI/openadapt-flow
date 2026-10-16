@@ -2021,14 +2021,20 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             "omit --url to use it (drift your own app for real)."
         )
 
+    held_backend: list = []
+    hold_s = min(max(float(getattr(args, "hold_on_halt", 0.0) or 0.0), 0.0), 1800.0)
+    held_exit: list[int] = []
+
     def run_on_page(page, *, entry_url: Optional[str]):
         # The browser backend is built through the same factory as the
         # desktop backends; the grounding / identity / deployment wiring and
         # the run are shared (see _build_and_run_replayer). ``--drift`` (a
         # MockMed teaching aid) forces the visual floor so the healing ladder
         # is exercised instead of the structural rung resolving it.
+        backend = build_backend(backend_cfg, page=page)
+        held_backend.append(backend)
         return _build_and_run_replayer(
-            build_backend(backend_cfg, page=page),
+            backend,
             workflow=workflow,
             params=params,
             worklists=worklists,
@@ -2115,6 +2121,23 @@ def _cmd_replay(args: argparse.Namespace) -> int:
             page.goto(url)
             try:
                 report = run_on_page(page, entry_url=url)
+                if hold_s > 0 and not report.success and held_backend:
+                    # Report first, so the caller can act on the halt while
+                    # the page stays open for a repair demonstration.
+                    held_exit.append(
+                        _finish_replay(
+                            run_dir,
+                            report,
+                            args,
+                            backend_kind=_report_backend_kind(backend_cfg.kind),
+                        )
+                    )
+                    sys.stdout.flush()
+                    from openadapt_flow.repair.hold import hold_for_repair
+
+                    hold_for_repair(
+                        held_backend[-1], run_dir, hold_s, exit_code=held_exit[0]
+                    )
             finally:
                 video_path = None
                 if context is not None:
@@ -2130,6 +2153,8 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         if stop is not None:
             stop()
 
+    if held_exit:
+        return held_exit[0]
     return _finish_replay(
         run_dir, report, args, backend_kind=_report_backend_kind(backend_cfg.kind)
     )
@@ -2166,20 +2191,17 @@ def _refuse_unverified_managed_qualification_admission(
 def _resolve_run_approval_mode(args: argparse.Namespace, cfg, profile_value):
     """The approval mode a ``run`` uses, or ``None`` for an ungated run.
 
-    A direct ``--approval-mode`` wins over ``runtime.approval_mode``. For the
-    Standard and Regulated profiles a missing or unknown value means
-    ``each_item``: when the software can't tell which mode was meant, a person
-    approves each save. Demo and unprofiled runs stay ungated unless a mode is
-    named.
+    A direct ``--approval-mode`` wins over ``runtime.approval_mode``. Every
+    run is gated by default: a missing or unknown value means ``each_item``,
+    so a person approves each save whatever the profile. The only way to turn
+    the gate off is to name ``not_gated``, and the report records that choice.
     """
     from openadapt_flow.approval_mode.model import resolve_approval_mode
 
     requested = getattr(args, "approval_mode", None)
     if requested is None:
         requested = getattr(getattr(cfg, "runtime", None), "approval_mode", None)
-    if profile_value in {"standard", "regulated"} or requested is not None:
-        return resolve_approval_mode(requested)
-    return None
+    return resolve_approval_mode(requested)
 
 
 def _approval_wait_seconds(args: argparse.Namespace) -> float:
@@ -2254,6 +2276,57 @@ def _bind_approval_mode(args: argparse.Namespace) -> Optional[int]:
     }
     print(f"Approval mode: {mode.value} ({labels[mode.value]}).")
     return None
+
+
+def _attach_cloud_seal(args: argparse.Namespace) -> None:
+    """After a run connected to Cloud Execute, attach Cloud's signed receipt.
+
+    Only a VERIFIED report with an explicit Cloud execution id is touched;
+    any failure leaves the report and the exit code exactly as they were.
+    """
+    import os
+
+    execution_id = (
+        getattr(args, "cloud_execution_id", None)
+        or os.environ.get("OPENADAPT_CLOUD_EXECUTION_ID", "").strip()
+    )
+    run_dir = getattr(args, "run_dir", None)
+    if not execution_id or not run_dir or getattr(args, "dry_run", False):
+        return
+    from openadapt_flow.cloud_seal import attach_from_cloud
+
+    result = attach_from_cloud(Path(run_dir), execution_id=execution_id)
+    if result.attached:
+        print(
+            f"Cloud Seal attached for execution {execution_id} (report.json execute_receipt)."
+        )
+    elif result.code != "local_not_verified":
+        print(
+            f"Cloud Seal not attached ({result.code}); the run result is unchanged.",
+            file=sys.stderr,
+        )
+
+
+def _cmd_seal(args: argparse.Namespace) -> int:
+    """``attach-seal``: fetch Cloud's signed receipt into a VERIFIED run report."""
+    from openadapt_flow.cloud_seal import attach_from_cloud
+
+    result = attach_from_cloud(
+        Path(args.run_dir),
+        execution_id=args.execution_id,
+        cloud_url=args.cloud_url,
+    )
+    if result.attached:
+        print(
+            f"attached: report.json now carries the Cloud receipt for {result.execution_id}"
+        )
+        print(
+            "Check it with: openadapt-agent seal verify "
+            + str(Path(args.run_dir) / "report.json")
+        )
+        return 0
+    print(f"not attached: {result.code}", file=sys.stderr)
+    return 1
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -2647,7 +2720,9 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # Admitted. A deployment run is not the drift-demo; force it off and delegate
     # to the shared replay executor (which reads all deployment wiring itself).
     args.drift = None
-    return _cmd_replay(args)
+    exit_code = _cmd_replay(args)
+    _attach_cloud_seal(args)
+    return exit_code
 
 
 def _resume_approval_mode(args: argparse.Namespace, authorization):
@@ -5844,6 +5919,27 @@ def _cmd_teach(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_teach_branch(args: argparse.Namespace) -> int:
+    """Learn one guarded branch from two or more resolved halts."""
+    from openadapt_flow.learning.branch_teach import BranchExample, teach_branch
+    from openadapt_flow.learning.teach import TeachError
+
+    try:
+        result = teach_branch(
+            [BranchExample(run_dir=Path(r), fix=Path(f)) for r, f in args.example],
+            Path(args.out),
+            bundle=Path(args.bundle),
+            negatives=[Path(n) for n in args.normal_run or []],
+            skill_id=args.skill_id,
+            library_dir=Path(args.library) if args.library else None,
+        )
+    except TeachError as e:
+        print(f"teach-branch cannot run: {e}")
+        return 2
+    print(result.summary())
+    return 0 if result.promoted else 1
+
+
 def _cmd_repair(args: argparse.Namespace) -> int:
     """Governed repair promotion lifecycle (see docs/REPAIR_LIFECYCLE.md).
 
@@ -6035,7 +6131,7 @@ def _add_approval_flags(p: argparse.ArgumentParser) -> None:
         default=None,
         help=(
             "Per-item approval before each consequential save. each_item (the "
-            "default for the Standard and Regulated profiles): the run waits "
+            "default for every run): the run waits "
             "before every save until a person approves it in Desktop's Run it "
             "(see `item-approval`). problems_only: only problems go to a "
             "person; until a switch record is configured, every save still "
@@ -6885,6 +6981,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--record-video", default=None, metavar="DIR", help=argparse.SUPPRESS
     )
+    p.add_argument(
+        "--hold-on-halt",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help=(
+            "When a browser run halts, keep its page open for up to SECONDS "
+            "so openadapt-agent can record a repair on it (see "
+            "openadapt_flow.repair.hold). 0, the default, closes it at once. "
+            "Max 1800."
+        ),
+    )
     _add_backend_flags(p)
     _add_browser_session_flags(p)
     _add_deployment_flags(p, worklist=True)
@@ -7032,8 +7140,31 @@ def build_parser() -> argparse.ArgumentParser:
             "OPENADAPT_FLOW_REPORT_RUN=1)"
         ),
     )
+    p.add_argument(
+        "--cloud-execution-id",
+        default=None,
+        help=(
+            "OpenAdapt Cloud Execute execution this run belongs to (or "
+            "OPENADAPT_CLOUD_EXECUTION_ID). After a VERIFIED outcome, Cloud's "
+            "signed receipt is fetched with OPENADAPT_EXECUTE_API_KEY and "
+            "written into report.json as execute_receipt."
+        ),
+    )
     _add_approval_flags(p)
     p.set_defaults(func=_cmd_run)
+
+    sa = sub.add_parser(
+        "attach-seal",
+        help="Attach Cloud's signed Execute receipt (the Seal) to a VERIFIED run report",
+    )
+    sa.add_argument("run_dir", help="Run directory holding a VERIFIED report.json")
+    sa.add_argument("--execution-id", required=True, help="Cloud Execute execution id")
+    sa.add_argument(
+        "--cloud-url",
+        default=None,
+        help="Cloud base URL (or OPENADAPT_CLOUD_URL; default https://app.openadapt.ai)",
+    )
+    sa.set_defaults(func=_cmd_seal)
 
     p = sub.add_parser(
         "resume",
@@ -8007,6 +8138,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.set_defaults(func=_cmd_teach)
+
+    p = sub.add_parser(
+        "teach-branch",
+        help=(
+            "Learn a guarded branch from two or more halts resolved the same "
+            "way. The branch keys on the screen text they share (narrowed by "
+            "an enum parameter when normal runs show that text too) and is "
+            "written as a repair candidate that needs approval"
+        ),
+    )
+    p.add_argument(
+        "--example",
+        nargs=2,
+        action="append",
+        required=True,
+        metavar=("RUN_DIR", "FIX"),
+        help="A halted run directory and its fix (recording or .json spec). "
+        "Pass at least twice",
+    )
+    p.add_argument(
+        "--normal-run",
+        action="append",
+        metavar="RUN_DIR",
+        help="A run of the bundle that went the normal way (repeatable)",
+    )
+    p.add_argument("--bundle", required=True, help="The base bundle that halted")
+    p.add_argument("--out", required=True, help="Where to write the candidate bundle")
+    p.add_argument("--skill-id", default=None)
+    p.add_argument("--library", default=None)
+    p.set_defaults(func=_cmd_teach_branch)
 
     p = sub.add_parser(
         "repair",

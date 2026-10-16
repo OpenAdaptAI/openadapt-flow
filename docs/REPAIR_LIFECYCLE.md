@@ -227,3 +227,116 @@ harness) still guards each heal DURING a run: a weakening heal quarantines
 and halts the run exactly as before. This lifecycle governs the next level
 up: whether the resulting proposed BUNDLE may ever replace the active one.
 The in-run gate protects the run; the lifecycle protects the fleet.
+
+## Repairs taught by a calling agent
+
+`openadapt-agent` serves workflows to other agents over MCP. When a run halts
+there, the server can return a one-time repair token. If an administrator
+turned on screen access for that workflow or organization, the calling agent
+may demonstrate the stuck step once while OpenAdapt records it.
+`openadapt_flow.repair.agent_teach.teach_from_calling_agent` turns that
+recording into a candidate:
+
+- It runs the same `teach` loop as the CLI. If the loop refuses the fix, or
+  any later step fails, the taught bundle and its evidence are deleted and the
+  workflow keeps halting.
+- It copies the frame the agent clicked on to
+  `<proposed>.evidence/heals/<step_id>/screen.png` and lists the step under
+  `taught_steps`, so `openadapt-flow repair campaign` replays the taught step.
+  Before this change, a taught candidate had no changed bindings, so the
+  campaigns refused it.
+- It records `provenance`: the agent id, the halted run and step, a SHA-256 of
+  the repair token, who turned on screen access, the screen-sharing mode
+  (`scrubbed_only`, `ask_each_time`, or `allow_unscrubbed`), how many screens
+  the agent saw, whether they were scrubbed and by which openadapt-privacy
+  provider, and who approved sharing for this token in `ask_each_time` mode.
+  The model refuses combinations that break those rules, such as unscrubbed
+  screens outside `allow_unscrubbed` or sharing the agent approved itself.
+
+The candidate starts in `candidate` and needs the usual review, campaigns,
+approval, staging, and canary. `RepairStore.review` and `RepairStore.approve`
+refuse the actor whose id matches `provenance.agent_id`, whatever kind it
+claims to be. Model actors are refused for every transition, as before.
+
+### Identity for a taught dialog dismissal
+
+A click that closes a dialog usually has no field value or row text to check,
+so the fault campaign used to find no identity evidence for it and refused
+the candidate. `openadapt_flow.repair.dialog_identity` gives such a step the
+dialog itself as its identity:
+
+- `teach_from_calling_agent` takes the dialog box from the caller (for
+  example, from the DOM) through `dialog_region`. Without one, it looks for the
+  smallest closed box around the click in the frame the agent clicked on. The
+  box must be at least four times the control's area and at most 60% of the
+  screen. When no box qualifies, nothing is marked and the step stays unarmed,
+  so the fault campaign still refuses it.
+- The box is recorded on the click as `identifier_region`. The compiler reads
+  its title and body text with OCR into the step's identity evidence, takes the
+  button label under the click as the target text, and snaps the click to the
+  label's center.
+- At replay, the step acts only when the same dialog text is present around
+  the same button. The `verifier_failure` fault grays the whole dialog, so a
+  dismissal that ignores the dialog's text fails the campaign. This is the same
+  bar the campaigns set for every other step.
+
+`openadapt_flow.repair.dialog_fixture` is a rendered app with such a dialog.
+`tests/test_agent_teach_repair.py` runs the real replayer, teach loop, and
+replay and fault campaigns on it.
+
+### Keeping the halted page open
+
+`openadapt-flow run --hold-on-halt SECONDS` keeps a halted browser run's page
+open so the repair acts on the page that halted rather than a new one. After
+writing `report.json`, Flow writes `<run_dir>/repair-hold.json` (mode 0600)
+with a Unix socket path in a private directory, a random secret, and the run's
+exit code. The socket accepts `viewport`, `screenshot`, `click`, and `release`
+requests that carry the secret. The hold ends on `release` or after the given
+time, at most 1800 seconds. Then the socket, its directory, and the hold file
+are removed and the browser closes. `openadapt-agent serve --repair-access`
+passes this flag and releases the hold after `teach_repair`.
+
+## Branches taught from several halts
+
+`openadapt-flow teach` learns a fix from one halted run. Its condition is text
+that was new where that run stopped, so it can key on details of that one run,
+such as a payer name or a reference number. `openadapt-flow teach-branch`
+learns the same kind of branch from two or more halts that a person resolved
+the same way:
+
+```bash
+openadapt-flow teach-branch \
+  --example runs/halt-1 fixes/dismiss --example runs/halt-2 fixes/dismiss \
+  --normal-run runs/ok-1 \
+  --bundle bundles/save-encounter --out bundles/save-encounter-branch
+```
+
+- **Same place, same fix.** Every example must stop at the same step in the
+  same way and have the same corrective steps. Otherwise it refuses.
+- **Shared screen signature.** The condition is text that was new on every
+  example's halt screen: a whole line, or a run of at least two words (for
+  example, "Prior Auth Required" from "Prior Auth Required - Aetna ref 4471"
+  and "Prior Auth Required - Cigna ref 9032").
+- **Narrowing by a parameter.** A `--normal-run` is a run that went the usual
+  way. If the signature also appears in a normal run, the condition must also
+  compare one declared enum or boolean parameter (for example, `payer_type`)
+  that has one value in every example and a different one in every such
+  normal run. Secret and free-text parameters are never used. If no single
+  parameter separates them, it refuses.
+- **The same governed learn loop.** All example corrections and the normal runs
+  go through induction, the regression gate and held-out validation together.
+  After promotion, each example and each normal run must still be explained by
+  the learned program. Only then is a bundle written.
+- **A candidate, not an active bundle.** The output carries
+  `repair/candidate.json` (source `teach`) and `repair/branch_induction.json`
+  (example count, the stopped step, the fix, and a digest of the condition).
+  It goes through the same campaigns, human approval and canary as any repair.
+
+At runtime the branch is an ordinary guarded state: an OCR text check and, when
+narrowed, a parameter compare. It makes no model calls. Limits: only one new
+corrective step is spliced (as with `teach`), the condition is text or text
+plus one parameter, and a parameter alone (with no shared screen text) is not
+accepted. When a run's earlier frames can't be read, all of its halt-screen
+text counts as new, so text that every screen shows could become the
+condition; pass a `--normal-run` to rule that out. Tests: `tests/test_teach_branch.py` (MockMed save scenario on the
+fake backend; no browser).

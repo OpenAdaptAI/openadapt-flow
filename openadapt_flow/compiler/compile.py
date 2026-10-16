@@ -48,6 +48,7 @@ from openadapt_flow.ir import (
 )
 from openadapt_flow.risk import (
     PRESUMED_COMMIT_EXPLANATION,
+    confirmation_opener_step_ids,
     infer_step_risk,
     is_meaningful_label,
     presumed_commit_step_ids,
@@ -416,8 +417,13 @@ def _action_scoped_target_line(
     *,
     frame_size: tuple[int, int],
     reference_date: Optional[date],
+    click: Optional[Point] = None,
 ) -> Optional[tuple[Region, str]]:
     """Select one stable visual locator from an operator-marked action row.
+
+    With ``click`` (a marked dialog), the line under the click, the control's
+    own label, is the locator when it qualifies. A dialog's longest line is
+    usually its body text, which says nothing about which button to press.
 
     A complete marked row is strong identity evidence, but it is often too
     wide for strict template matching after the row moves. Prefer one unique,
@@ -463,6 +469,19 @@ def _action_scoped_target_line(
     if not candidates:
         return None
 
+    if click is not None:
+        under_click = [
+            candidate
+            for candidate in candidates
+            if candidate[1].region[0]
+            <= click[0]
+            < candidate[1].region[0] + candidate[1].region[2]
+            and candidate[1].region[1]
+            <= click[1]
+            < candidate[1].region[1] + candidate[1].region[3]
+        ]
+        if under_click:
+            candidates = under_click
     _score, selected, text = max(candidates, key=lambda candidate: candidate[0])
     x, y, w, h = selected.region
     frame_w, frame_h = frame_size
@@ -1967,6 +1986,7 @@ def compile_recording(
             anchor_region = crop_region
             anchor_ocr_text = ocr_text
             anchor_landmarks = landmarks
+            anchor_click = click
             if (
                 event_marked is not None
                 and identifier_crop_rel is not None
@@ -1979,12 +1999,23 @@ def compile_recording(
                         identifier_region,
                         frame_size=(frame.shape[1], frame.shape[0]),
                         reference_date=reference_date,
+                        click=(
+                            click if event.get("identifier_scope") == "dialog" else None
+                        ),
                     )
                     if selected_target is not None:
                         anchor_region, anchor_ocr_text = selected_target
                         (bundle / template_rel).write_bytes(
                             _crop_png(before_png, anchor_region)
                         )
+                        if event.get("identifier_scope") == "dialog":
+                            # The click landed on the control's own label.
+                            # Aim at the label's center, where every rung
+                            # (template and OCR) locates it, so a rescaled
+                            # or rethemed dialog is pressed in the same place.
+                            ax, ay, aw, ah = anchor_region
+                            if ax <= click[0] < ax + aw and ay <= click[1] < ay + ah:
+                                anchor_click = (ax + aw // 2, ay + ah // 2)
                     else:
                         # A marked image-only row still provides a complete
                         # visual target when no stable unique text is present.
@@ -1995,7 +2026,7 @@ def compile_recording(
             anchor = Anchor(
                 template=anchor_template,
                 region=anchor_region,
-                click_point=click,
+                click_point=anchor_click,
                 ocr_text=anchor_ocr_text,
                 context_text=context_text,
                 structured_identity=structured_identity,
@@ -2458,6 +2489,21 @@ def compile_recording(
         presumed.risk = "irreversible"
         presumed.risk_explanation = PRESUMED_COMMIT_EXPLANATION
         presumed.risk_review_required = False
+
+    # A click that only opens a confirmation dialog is not the save: the
+    # dialog's Confirm click is. Explicit risk_overrides below still win.
+    by_step_id = {step.id: step for step in steps}
+    for opener_id, confirm_id in confirmation_opener_step_ids(steps):
+        opener = by_step_id[opener_id]
+        opener.risk = "reversible"
+        opener.risk_explanation = (
+            f"opens a confirmation dialog; the save is the next click ({confirm_id})"
+        )
+        opener.risk_review_required = False
+        confirm = by_step_id[confirm_id]
+        confirm.risk_explanation = (
+            f"confirms the dialog opened by {opener_id}; this click saves"
+        )
 
     if risk_overrides:
         by_id = {step.id: step for step in steps}

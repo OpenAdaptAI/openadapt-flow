@@ -807,6 +807,13 @@ class Replayer:
         # caller that injects a facade without that readiness signal HALTs
         # before action rather than silently degrading to proceed-anyway.
         self.require_settled = require_settled
+        # Settle reuse (speed, not a gate): the after-action settled frame of
+        # the previous step, valid as the first frame of the next step's
+        # before-settle only while no input has been delivered since. Every
+        # backend input crosses ``_deliver_backend_call``, which bumps the
+        # epoch and so invalidates the seed.
+        self._actuation_epoch = 0
+        self._settle_seed: Optional[tuple[Any, int]] = None
         # One settle poll owns this complete bound. The replayer does not wrap
         # it in an outer retry loop, avoiding unaccounted blind retries.
         self.settle_readiness_timeout_s = settle_readiness_timeout_s
@@ -5873,9 +5880,7 @@ class Replayer:
         # capture only a raw diagnostic frame here so it is not preceded by an
         # unobservable proceed-anyway settle attempt.
         before_png = (
-            self.backend.screenshot()
-            if self.require_settled
-            else self.vision.wait_settled(self.backend)
+            self.backend.screenshot() if self.require_settled else self._settle_seeded()
         )
         result.before_png = self._save_step_png(
             run_dir, evidence_step_id, "before", before_png
@@ -6586,7 +6591,7 @@ class Replayer:
 
             if error is None:
                 try:
-                    after_png = self.vision.wait_settled(self.backend)
+                    after_png = self._settle_seeded()
                     last_frame = after_png
                     self._emit_control_overlay_phase(
                         "verifying",
@@ -9218,6 +9223,45 @@ class Replayer:
         )
         return resolution, region, error
 
+    def _settle_seeded(self) -> bytes:
+        """``vision.wait_settled`` that can extend the last settled run.
+
+        Same contract as ``vision.wait_settled``: a fresh frame is always
+        captured and returned, and it counts as settled only after a run of
+        identical frames polled at the normal interval. When the previous
+        settle on this backend ended settled and no input was delivered since
+        (every input crosses ``_deliver_backend_call``, which bumps the
+        epoch), an identical fresh frame extends that already-observed run
+        instead of starting a new one, saving one poll interval. A changed
+        frame starts over exactly as before.
+        """
+
+        seed_entry = getattr(self, "_settle_seed", None)
+        self._settle_seed = None
+        epoch = getattr(self, "_actuation_epoch", 0)
+        seeded = getattr(self.vision, "wait_settled_seeded", None)
+        seed_type = getattr(self.vision, "SettleSeed", None)
+        if seeded is None or seed_type is None:
+            return self.vision.wait_settled(self.backend)
+        seed = None
+        if seed_entry is not None and seed_entry[1] == epoch:
+            seed = seed_entry[0]
+        result = seeded(self.backend, seed)
+        if result.settled and result.phash:
+            seed_kwargs: dict[str, Any] = {}
+            if getattr(result, "mode", "pixel") == "page":
+                seed_kwargs["png"] = result.png
+            self._settle_seed = (
+                seed_type(
+                    phash=result.phash,
+                    stable_frames=result.stable_frames,
+                    captured_at=result.captured_at,
+                    **seed_kwargs,
+                ),
+                epoch,
+            )
+        return result.png
+
     def _deliver_backend_call(
         self,
         result: StepResult,
@@ -9231,6 +9275,8 @@ class Replayer:
         been crossed and the step must not enter the pre-delivery retry loop.
         """
 
+        self._actuation_epoch = getattr(self, "_actuation_epoch", 0) + 1
+        self._settle_seed = None
         attempted_before = result.delivery_attempted
         acknowledgers = self._active_delivery_acknowledgers
         self._active_delivery_acknowledgers = ()
@@ -11114,7 +11160,9 @@ class Replayer:
         evidence. A qualification case refuses before workflow actuation when
         the active backend cannot independently return the application,
         application version, and session identity or when either expected
-        application field differs.
+        application field differs. The one exception is the signed-in web
+        session observer: its version is the operator's Check it confirmation,
+        bound into its contract and environment digests.
         """
 
         authorization = self.governed_authorization
@@ -11132,6 +11180,26 @@ class Replayer:
             return "qualification target kind does not match the project"
 
         configured_observer = self.qualification_environment_observer
+        if configured_observer is None:
+            from openadapt_flow.qualification_web_session import (
+                SIGNED_IN_WEB_SESSION_OBSERVER_ID,
+                SignedInWebSessionObserver,
+            )
+
+            if (
+                project.environment.environment_observer_id
+                == SIGNED_IN_WEB_SESSION_OBSERVER_ID
+            ):
+                # Real web apps carry no OpenAdapt markers: identify them by
+                # origin and signed-in session, with the version the operator
+                # confirmed in Check it. The contract and environment digests
+                # below still have to match the project exactly.
+                try:
+                    configured_observer = SignedInWebSessionObserver(
+                        project.environment.application_version
+                    )
+                except ValueError:
+                    return "qualification confirmed application version is invalid"
         if configured_observer is None:
             if not callable(
                 getattr(self.backend, "qualification_environment_identity", None)
@@ -12736,7 +12804,7 @@ class Replayer:
             region's pixels changed at all (the caller's retry decision:
             retyping is only safe when nothing changed).
         """
-        after_png = self.vision.wait_settled(self.backend)
+        after_png = self._settle_seeded()
         region = self._field_region(field_point, field_region)
         if baseline_field_value is not None:
             expected = baseline_field_value + text
@@ -12773,6 +12841,25 @@ class Replayer:
             # OCR, which could read the intended text elsewhere on the screen.
             return False, True
         changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
+        # Dropdown: typing selects the option whose label matches. When the
+        # focused <select> at the field point now shows exactly the typed
+        # label (whitespace-squashed, case-insensitive), the input landed.
+        # Any other answer falls through to the visual check, unchanged.
+        if field_point is not None and not allow_masked:
+            reader = getattr(self.backend, "focused_select_label_at", None)
+            label: Optional[str] = None
+            if callable(reader):
+                try:
+                    label = reader(int(field_point[0]), int(field_point[1]))
+                except Exception:
+                    label = None
+            if (
+                isinstance(label, str)
+                and identity_mod.squash(text)
+                and identity_mod.squash(label).casefold()
+                == identity_mod.squash(text).casefold()
+            ):
+                return True, True
         needle = identity_mod.squash(text)
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
             return changed, changed  # too short for OCR to arbitrate
@@ -13706,7 +13793,15 @@ class Replayer:
             # text_present (not find_text): presence must not depend on
             # whether the OCR engine merged the target into a longer box
             # or split it across boxes — see vision.ocr.text_present.
-            return pc.text is not None and self.vision.text_present(frame_png, pc.text)
+            if pc.text is None:
+                return False
+            # Page-structure first: the DOM can PROVE the text is rendered,
+            # visible and uncovered (exact normalized substring, stricter
+            # than the fuzzy OCR match). It can never prove absence, so a DOM
+            # miss falls through to the OCR check, unchanged.
+            if self._dom_text_visible(pc.text):
+                return True
+            return self.vision.text_present(frame_png, pc.text)
         if kind == "text_absent":
             return pc.text is None or not self.vision.text_present(frame_png, pc.text)
         if kind == "region_stable":
@@ -13752,6 +13847,21 @@ class Replayer:
             distance = self.vision.phash_distance(live, pc.phash)
             return distance <= pc.phash_tolerance
         return False
+
+    def _dom_text_visible(self, text: str) -> bool:
+        """True only when the backend proves ``text`` is visibly rendered.
+
+        Optional backend seam ``visible_text_present`` (browser DOM). Any
+        other answer, a missing seam, or an error is "not proven" -> False,
+        so the caller keeps its visual check.
+        """
+        reader = getattr(self.backend, "visible_text_present", None)
+        if not callable(reader):
+            return False
+        try:
+            return reader(text) is True
+        except Exception:
+            return False
 
     def _postcondition_template(self, pc: Any, bundle_dir: Path) -> Optional[bytes]:
         """Bytes of a REGION_STABLE postcondition's template crop, if any."""

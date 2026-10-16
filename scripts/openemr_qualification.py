@@ -36,7 +36,6 @@ Usage (fixture already up; see benchmark/openemr_local/README.md)::
 
 from __future__ import annotations
 
-import argparse
 import base64
 import hashlib
 import json
@@ -738,6 +737,25 @@ def expected_sql_fields(params: dict[str, Any], state_code: Optional[str]) -> di
 BrowserFactory = Callable[[], tuple[Any, Callable[[], None]]]
 
 
+def _token_session_with_retry(fixture: Any, attempts: int = 5) -> Any:
+    """The read-only OAuth session; retries only transport errors.
+
+    Right after a fixture reset the API container can drop the first
+    connection. A refused credential is never retried.
+    """
+
+    import httpx
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return fixture.token_session("oracle")
+        except httpx.TransportError:
+            if attempt == attempts:
+                raise
+            time.sleep(2.0 * attempt)
+    raise AssertionError("unreachable")
+
+
 def run_once(
     *,
     fixture: Any,
@@ -760,7 +778,7 @@ def run_once(
     marks["browser_ready"] = time.time()
     try:
         verifier = patient_record_verifier(
-            fixture.api_base_url, fixture.token_session("oracle")
+            fixture.api_base_url, _token_session_with_retry(fixture)
         )
         gate_kwargs = dict(
             bundle_dir=bundle_dir,

@@ -976,7 +976,6 @@ class PlaywrightBackend:
     # identity readback against the compiled template still decides.
     keyboard_admits_form_fields: bool = False
 
-
     def __init__(
         self,
         page: "Page",

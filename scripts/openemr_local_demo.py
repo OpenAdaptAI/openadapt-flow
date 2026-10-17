@@ -207,7 +207,6 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
     # The registration form is a new-record form: no row ties its fields.
     keyboard_admits_form_fields = True
 
-
     _INNER_TARGET_JS = """([px, py]) => {
         const el = document.elementFromPoint(px, py);
         if (!el) return null;
@@ -391,9 +390,7 @@ class OpenEMRPlaywrightBackend(_BasePlaywrightBackend):
         except Exception:
             return None
 
-    def locate_structural(
-        self, locator: StructuralLocator
-    ) -> StructuralHandle | None:
+    def locate_structural(self, locator: StructuralLocator) -> StructuralHandle | None:
         selector = locator.selector or ""
         if selector == self._LEGACY_CONFIRM_SELECTOR:
             raise StructuralResolutionRefused(
@@ -487,9 +484,7 @@ def _preauthenticate_browser(backend: Any, fixture: OpenEMRFixture) -> None:
     page.locator(f'iframe[name="{FORM_FRAME_NAME}"]').wait_for(
         state="visible", timeout=60_000
     )
-    _form_frame(page).locator("#form_fname").wait_for(
-        state="visible", timeout=60_000
-    )
+    _form_frame(page).locator("#form_fname").wait_for(state="visible", timeout=60_000)
     # The pinned image displays an installation-registration dialog in the top
     # shell for every fresh browser profile. It intercepts all child-frame
     # pointer input. Dismiss it in unmeasured setup through the explicit
@@ -502,9 +497,7 @@ def _preauthenticate_browser(backend: Any, fixture: OpenEMRFixture) -> None:
             telemetry.uncheck()
         if telemetry.count() and telemetry.is_checked():
             raise FixtureError("OpenEMR anonymous telemetry could not be disabled")
-        registration.get_by_role(
-            "button", name="Ask again later", exact=True
-        ).click()
+        registration.get_by_role("button", name="Ask again later", exact=True).click()
         registration.wait_for(state="hidden", timeout=30_000)
 
 
@@ -851,9 +844,9 @@ def compile_recording(recording_dir: Path, bundle_dir: Path) -> None:
     # forced to "reversible" while #create, which only opens the duplicate
     # check, stayed irreversible.)
     save_steps[0].risk = "irreversible"
-    save_steps[0].risk_explanation = (
-        "the marked #confirmCreate click creates the patient chart"
-    )
+    save_steps[
+        0
+    ].risk_explanation = "the marked #confirmCreate click creates the patient chart"
     save_steps[0].risk_review_required = False
     expected_params = set(SyntheticPatientSpec().params())
     if (

@@ -50,3 +50,30 @@ def test_ocr_label_not_found_falls_back(tmp_path, monkeypatch):
     res = Resolution(rung="ocr", point=(427, 319), confidence=0.95, elapsed_ms=0)
     r = _replayer(vision, monkeypatch)
     assert r._identifier_displacement(ANCHOR, res, b"frame", tmp_path) == (-35, 2)
+
+
+def test_caret_glued_to_a_param_value_is_dropped():
+    from openadapt_flow.runtime.identity import strip_param_caret
+
+    ex = {"fname": "Nadia"}
+    assert strip_param_caret("Name: Nadial Middle Ne", ex) == "Name: Nadia Middle Ne"
+    assert strip_param_caret("Name: Nadia| Middle", ex) == "Name: Nadia Middle"
+    # Two extra glyphs, or a caret glyph inside a longer word, are not a caret.
+    assert strip_param_caret("Nadiall", ex) == "Nadiall"
+    assert strip_param_caret("xNadial", ex) == "xNadial"
+
+
+def test_template_reanchors_param_token_read_with_caret():
+    from openadapt_flow.runtime.identity_template import (
+        build_identity_template,
+        verify_template_identity,
+    )
+
+    ex = {"fname": "Nadia"}
+    tmpl = build_identity_template("Name: Nadial Middle Ne Last Name Name Su", param_examples=ex)
+    assert tmpl.param_token_indices == {"fname": [1]}
+    live = "Name: Marcus Middle Ne Last Name Name Su"
+    check = verify_template_identity(tmpl, live, params={"fname": "Marcus"}, param_examples=ex)
+    assert check.status == "verified"
+    wrong = verify_template_identity(tmpl, live, params={"fname": "Grace"}, param_examples=ex)
+    assert wrong.status == "mismatch"

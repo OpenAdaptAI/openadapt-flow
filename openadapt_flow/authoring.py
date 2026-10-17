@@ -549,6 +549,8 @@ class AuthoringSession:
 
         self._require_not_halted()
         viewport = self._viewport()
+        raw_nodes: list[Mapping[str, Any]]
+        raw_window: Optional[Mapping[str, Any]]
         if self.screen_only:
             # A remote session has no tree to read. The agent works from
             # pixels, so never project anything the backend might offer.
@@ -1027,9 +1029,13 @@ class AuthoringSession:
         events = _load_events(rec_dir)
         for event in events:
             index = event.get("i")
-            event["actor"] = self._actors.get(index, "agent") if isinstance(index, int) else "agent"
+            event["actor"] = (
+                self._actors.get(index, "agent") if isinstance(index, int) else "agent"
+            )
         if events:
-            events_path.write_text("".join(json.dumps(event) + "\n" for event in events))
+            events_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events)
+            )
         actors = {event["actor"] for event in events}
         if actors == {"person"}:
             demonstrated_by = "person"
@@ -1267,7 +1273,12 @@ def _clean_backend_hints(
                 code="invalid_backend_hints",
             )
         out[key] = value.strip()
-    unknown = set(hints) - {"backend", "rdp_window", "rdp_window_title", "rdp_readiness_text"}
+    unknown = set(hints) - {
+        "backend",
+        "rdp_window",
+        "rdp_window_title",
+        "rdp_readiness_text",
+    }
     if unknown or hints.get("backend") not in (None, kind):
         raise AuthoringError(
             "backend_hints accepts rdp_window, rdp_window_title, and rdp_readiness_text",

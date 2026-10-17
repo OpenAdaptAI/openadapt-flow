@@ -202,9 +202,10 @@ def shared_dialog_band(
             return None
         regions.append(region)
         clicks.append(click)
-        frames.append(
-            cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_GRAYSCALE)
-        )
+        image = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return None
+        frames.append(image)
     if len(set(regions)) != 1 or len(set(clicks)) != 1:
         return None
     x, y, w, h = regions[0]

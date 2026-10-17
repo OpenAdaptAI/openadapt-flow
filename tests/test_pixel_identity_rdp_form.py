@@ -77,3 +77,16 @@ def test_template_reanchors_param_token_read_with_caret():
     assert check.status == "verified"
     wrong = verify_template_identity(tmpl, live, params={"fname": "Grace"}, param_examples=ex)
     assert wrong.status == "mismatch"
+
+
+def test_click_template_is_clipped_away_from_a_typed_value():
+    from openadapt_flow.compiler.compile import _clip_away_param_lines
+    from openadapt_flow.vision.ocr import OcrLine
+
+    street = OcrLine(text="27 WILLOW BEND ROAD", region=(370, 537, 160, 20), confidence=0.9)
+    label = OcrLine(text="City:", region=(111, 570, 40, 18), confidence=0.9)
+    region = (382, 548, 160, 64)
+    clipped = _clip_away_param_lines(region, (462, 580), [street, label], ("27 WILLOW BEND ROAD",))
+    assert clipped == (382, 559, 160, 53)
+    # No parameter text in the crop: unchanged.
+    assert _clip_away_param_lines(region, (462, 580), [label], ("27 WILLOW BEND ROAD",)) == region

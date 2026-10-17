@@ -7392,6 +7392,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_pull_parser(sub)
 
+    from openadapt_flow.intake.cli import add_parser as _add_intake_parser
+
+    _add_intake_parser(sub)
+
     p = sub.add_parser(
         "lint",
         help=(

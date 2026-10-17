@@ -7,7 +7,9 @@ from openadapt_flow.runtime.replayer import Replayer, Resolution
 
 
 def _replayer(vision, monkeypatch):
-    monkeypatch.setattr(replayer_mod.identity_mod, "crop_region", lambda png, region: b"live")
+    monkeypatch.setattr(
+        replayer_mod.identity_mod, "crop_region", lambda png, region: b"live"
+    )
     r = Replayer.__new__(Replayer)
     r.vision = vision
     r._asset_bytes = lambda bundle_dir, rel, workflow=None: b"template"
@@ -15,7 +17,9 @@ def _replayer(vision, monkeypatch):
 
 
 ANCHOR = SimpleNamespace(
-    click_point=(462, 317), region=(382, 285, 160, 64), ocr_text="FirstName",
+    click_point=(462, 317),
+    region=(382, 285, 160, 64),
+    ocr_text="FirstName",
     template="templates/step_003.png",
 )
 
@@ -24,7 +28,9 @@ def test_ocr_rung_measures_from_the_label_not_the_click(tmp_path, monkeypatch):
     # The label sits at (44, 33) in the recorded template and in the live crop:
     # the screen did not move, even though the OCR rung resolved 35 px left of
     # the recorded click.
-    vision = SimpleNamespace(find_text=lambda png, text, **k: SimpleNamespace(point=(44, 33)))
+    vision = SimpleNamespace(
+        find_text=lambda png, text, **k: SimpleNamespace(point=(44, 33))
+    )
     res = Resolution(rung="ocr", point=(427, 319), confidence=0.95, elapsed_ms=0)
     r = _replayer(vision, monkeypatch)
     assert r._identifier_displacement(ANCHOR, res, b"frame", tmp_path) == (1, 1)
@@ -32,7 +38,9 @@ def test_ocr_rung_measures_from_the_label_not_the_click(tmp_path, monkeypatch):
 
 def test_ocr_rung_cancels_centroid_jitter(tmp_path, monkeypatch):
     points = {b"template": (44, 33), b"live": (45, 34)}
-    vision = SimpleNamespace(find_text=lambda png, text, **k: SimpleNamespace(point=points[png]))
+    vision = SimpleNamespace(
+        find_text=lambda png, text, **k: SimpleNamespace(point=points[png])
+    )
     res = Resolution(rung="ocr", point=(425, 317), confidence=0.95, elapsed_ms=0)
     r = _replayer(vision, monkeypatch)
     assert r._identifier_displacement(ANCHOR, res, b"frame", tmp_path) == (0, 0)
@@ -70,12 +78,18 @@ def test_template_reanchors_param_token_read_with_caret():
     )
 
     ex = {"fname": "Nadia"}
-    tmpl = build_identity_template("Name: Nadial Middle Ne Last Name Name Su", param_examples=ex)
+    tmpl = build_identity_template(
+        "Name: Nadial Middle Ne Last Name Name Su", param_examples=ex
+    )
     assert tmpl.param_token_indices == {"fname": [1]}
     live = "Name: Marcus Middle Ne Last Name Name Su"
-    check = verify_template_identity(tmpl, live, params={"fname": "Marcus"}, param_examples=ex)
+    check = verify_template_identity(
+        tmpl, live, params={"fname": "Marcus"}, param_examples=ex
+    )
     assert check.status == "verified"
-    wrong = verify_template_identity(tmpl, live, params={"fname": "Grace"}, param_examples=ex)
+    wrong = verify_template_identity(
+        tmpl, live, params={"fname": "Grace"}, param_examples=ex
+    )
     assert wrong.status == "mismatch"
 
 
@@ -83,10 +97,17 @@ def test_click_template_is_clipped_away_from_a_typed_value():
     from openadapt_flow.compiler.compile import _clip_away_param_lines
     from openadapt_flow.vision.ocr import OcrLine
 
-    street = OcrLine(text="27 WILLOW BEND ROAD", region=(370, 537, 160, 20), confidence=0.9)
+    street = OcrLine(
+        text="27 WILLOW BEND ROAD", region=(370, 537, 160, 20), confidence=0.9
+    )
     label = OcrLine(text="City:", region=(111, 570, 40, 18), confidence=0.9)
     region = (382, 548, 160, 64)
-    clipped = _clip_away_param_lines(region, (462, 580), [street, label], ("27 WILLOW BEND ROAD",))
+    clipped = _clip_away_param_lines(
+        region, (462, 580), [street, label], ("27 WILLOW BEND ROAD",)
+    )
     assert clipped == (382, 559, 160, 53)
     # No parameter text in the crop: unchanged.
-    assert _clip_away_param_lines(region, (462, 580), [label], ("27 WILLOW BEND ROAD",)) == region
+    assert (
+        _clip_away_param_lines(region, (462, 580), [label], ("27 WILLOW BEND ROAD",))
+        == region
+    )

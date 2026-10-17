@@ -1314,7 +1314,11 @@ def strip_param_caret(band_text: str, param_examples: dict[str, str]) -> str:
         if len(squash(example or "")) < MIN_PARAM_CHARS:
             continue
         band_text = re.sub(
-            r"(?i)(?<!\S)(" + re.escape(example) + r")[" + re.escape(CARET_GLYPHS) + r"](?!\S)",
+            r"(?i)(?<!\S)("
+            + re.escape(example)
+            + r")["
+            + re.escape(CARET_GLYPHS)
+            + r"](?!\S)",
             lambda m: m.group(1),
             band_text,
         )

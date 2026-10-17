@@ -1816,10 +1816,12 @@ class PlaywrightBackend:
                 # header at the bottom of the screen) is still evidenced only
                 # by the part the retained frame shows; the center point was
                 # already required to be inside the viewport above.
-                x0 = max(0, int(round(float(box["x"]))))
-                y0 = max(0, int(round(float(box["y"]))))
-                x1 = min(vw, int(round(float(box["x"]) + float(box["width"]))))
-                y1 = min(vh, int(round(float(box["y"]) + float(box["height"]))))
+                bx = int(round(float(box["x"])))
+                by = int(round(float(box["y"])))
+                bw = int(round(float(box["width"])))
+                bh = int(round(float(box["height"])))
+                x0, y0 = max(0, bx), max(0, by)
+                x1, y1 = min(vw, bx + bw), min(vh, by + bh)
                 if x1 <= x0 or y1 <= y0:
                     self._cleanup_guard(token, scope)
                     return None

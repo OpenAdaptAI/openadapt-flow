@@ -305,6 +305,11 @@ PROGRAM_MAX_STEPS = 100_000
 PROGRAM_MAX_DEPTH = 64
 
 
+#: Extra looks at a typed field whose echo was not yet painted (remote displays).
+TYPED_ECHO_REOBSERVE_TRIES = 3
+TYPED_ECHO_REOBSERVE_S = 0.3
+
+
 class _GraphStepContext:
     """Per-action-state context the program interpreter feeds ``_run_step``.
 
@@ -12962,15 +12967,35 @@ class Replayer:
         if len(needle) < identity_mod.MIN_PARAM_CHARS:
             return changed, changed  # too short for OCR to arbitrate
         need = identity_mod.required_run(len(needle))
-        after_hay = self._ocr_squashed(after_png, region)
-        if identity_mod.longest_run(needle, after_hay) >= need:
+
+        def _reads_value(png: bytes) -> bool:
+            if (
+                identity_mod.longest_run(needle, self._ocr_squashed(png, region))
+                >= need
+            ):
+                return True
+            if region is not None:
+                upscaled = identity_mod.upscale_crop(png, region)
+                if upscaled is not None:
+                    up_hay = self._ocr_squashed(upscaled, None)
+                    if identity_mod.longest_run(needle, up_hay) >= need:
+                        return True
+            return False
+
+        if _reads_value(after_png):
             return True, changed
-        if region is not None:
-            upscaled = identity_mod.upscale_crop(after_png, region)
-            if upscaled is not None:
-                up_hay = self._ocr_squashed(upscaled, None)
-                if identity_mod.longest_run(needle, up_hay) >= need:
-                    return True, changed
+        # The settle compares perceptual hashes, and a few new characters in a
+        # small field can leave the hash unchanged, so over a remote display
+        # (RDP repaints after the keystrokes are acknowledged) the "settled"
+        # frame can predate the echo. Look again a few times before deciding;
+        # this only observes, it never re-sends input.
+        for _ in range(TYPED_ECHO_REOBSERVE_TRIES):
+            time.sleep(TYPED_ECHO_REOBSERVE_S)
+            later_png = self.backend.screenshot()
+            if _reads_value(later_png):
+                return True, True
+            after_png = later_png
+        changed = self.vision.pixels_changed(baseline_png, after_png, region=region)
         if not changed:
             return False, False
         # Pixels changed but the value is unreadable: masked rendering is

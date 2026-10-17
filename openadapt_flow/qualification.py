@@ -3479,6 +3479,7 @@ def _case_run_report_integrity_error(
         # The profile classifier proves the ordered action trace and the broad
         # production outcome. Qualification also proves the exact compiled
         # action, path, identity policy, and resolved effect contracts.
+        from openadapt_flow.ir import ActionKind
         from openadapt_flow.policy import executable_actuation_paths
 
         for item in prior_action_results:

@@ -451,6 +451,11 @@ class AuthoringSession:
         self._draft: Optional[CompileResult] = None
         self._draft_digest: Optional[str] = None
         self._draft_bundle: Optional[Path] = None
+        self._check_start: Optional[int] = None
+        self._check_fields: list[Any] = []
+        #: Values typed for each parameter in this session, kept in memory
+        #: only, to check a marked field against the page structure.
+        self._typed: dict[str, str] = {}
 
     @property
     def backend_kind(self) -> str:
@@ -558,6 +563,8 @@ class AuthoringSession:
         recorder = self._require_recording()
         self._require_not_paused()
         recorder.type_text(text, param=param)
+        if param:
+            self._typed[param] = text
 
     def press(self, key: str) -> None:
         """Press a key or chord through :class:`Recorder`."""
@@ -662,7 +669,80 @@ class AuthoringSession:
             redact_region=redact_region,
         )
         self._pause = None
+        if not pause.secret and text:
+            self._typed[pause.param] = text
         return {"recorded": True, "param": pause.param}
+
+    def begin_check(self) -> dict[str, Any]:
+        """Ask the person to show how to check the save.
+
+        Events after this call are the check, not the task: the person
+        navigates to the saved record, then marks fields with
+        :meth:`mark_field`. Compile turns them into the save's read-back
+        (:mod:`openadapt_flow.compiler.readback_authoring`).
+        """
+        from openadapt_flow.compiler.readback_authoring import CHECK_PROMPT
+
+        recorder = self._require_recording()
+        self._require_not_paused()
+        if self._check_start is not None:
+            raise AuthoringError("the check has already started", code="check_started")
+        self._check_start = recorder.event_count
+        return {"prompt": CHECK_PROMPT, "checking": True}
+
+    def mark_field(
+        self,
+        *,
+        param: str,
+        node_id: Optional[str] = None,
+        backend_pixels: Optional[Mapping[str, Any]] = None,
+        locator: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Mark the element that shows the value typed for ``param``."""
+        from openadapt_flow.compiler.readback_authoring import MarkedField
+
+        self._require_recording()
+        if self._check_start is None:
+            raise AuthoringError("call begin_check first", code="no_check")
+        if not param:
+            raise AuthoringError("mark_field requires param", code="invalid_mark")
+        if backend_pixels is not None:
+            target = _pixels_from_mapping(backend_pixels)
+        elif node_id is not None:
+            target = self._lookup_node(node_id)
+        else:
+            raise AuthoringError(
+                "mark_field requires node_id or backend_pixels", code="invalid_mark"
+            )
+        if target.w <= 0 or target.h <= 0:
+            raise AuthoringError("the marked element has no size", code="invalid_mark")
+        structure_matched = False
+        reader = getattr(self._backend, "displayed_text_at", None)
+        typed = self._typed.get(param)
+        if callable(reader) and typed:
+            cx, cy = target.center
+            try:
+                shown = reader(cx, cy)
+            except Exception:
+                shown = None
+            # The element must show exactly the typed value, as the runtime
+            # read requires.
+            structure_matched = bool(shown) and " ".join(
+                str(shown).lower().split()
+            ) == " ".join(typed.lower().split())
+        self._check_fields.append(
+            MarkedField(
+                param=param,
+                region=target.region,
+                locator=locator,
+                structure_matched=structure_matched,
+            )
+        )
+        return {
+            "marked": True,
+            "param": param,
+            "read_from": ("structure" if structure_matched else "screen"),
+        }
 
     def stop_record(self) -> Path:
         """Finish the recording (``meta.json`` + events/frames)."""
@@ -711,7 +791,17 @@ class AuthoringSession:
             if bundle_dir is not None
             else recording_dir.parent / f"{recording_dir.name}-bundle"
         )
-        workflow = compile_recording(recording_dir, out_bundle, name=name)
+        if self._check_start is not None and not self._check_fields:
+            raise AuthoringError(
+                "the check was started but no field was marked",
+                code="check_unmarked",
+            )
+        from openadapt_flow.compiler.readback_authoring import CheckError
+
+        try:
+            workflow = compile_recording(recording_dir, out_bundle, name=name)
+        except CheckError as exc:
+            raise AuthoringError(str(exc), code="check_refused") from exc
         recording_id = workflow.recording_id or uuid.uuid4().hex
         workflow_id = f"wf_{recording_id}"
         result: CompileResult = {
@@ -860,6 +950,12 @@ class AuthoringSession:
         recorder = self._require_recording()
         self._pause = None
         rec_dir = recorder.finish()
+        if self._check_start is not None and self._check_fields:
+            from openadapt_flow.compiler.readback_authoring import write_check
+
+            write_check(
+                rec_dir, start_event=self._check_start, fields=self._check_fields
+            )
         self._recording_dir = rec_dir
         self._recorder = None
         return rec_dir

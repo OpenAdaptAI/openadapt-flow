@@ -167,6 +167,21 @@ openadapt-flow lint bundle
 openadapt-flow replay bundle --url https://your-test-app.example
 ```
 
+The same path from Python:
+
+```python
+from openadapt_flow import api
+
+url = "https://your-test-app.example"
+rec = api.record(url, out="rec")  # do the task once, then close the browser
+bundle = api.compile(rec, out="bundle", name="my-task", accept_params=["note"])
+report = api.replay(bundle, url, params={"note": "Follow-up in 2 weeks"})
+print(report.transaction_outcome)  # COMPLETED_UNVERIFIED: a rehearsal
+```
+
+`accept_params` names the field-label proposals to turn into parameters (see
+`bundle/param_proposals.json`); unlisted ones stay recorded constants.
+
 Python 3.10 through 3.12 is supported. On Windows `cmd.exe`, use double
 quotes: `pip install "openadapt-flow[browser]"`.
 
@@ -398,11 +413,9 @@ a real `openadapt-flow demo` run through `scripts/make_demo_proof_image.py`.
 
 OpenAdapt-authored package code is licensed under the [MIT License](LICENSE).
 
-A Git checkout or GitHub-generated source archive also contains an isolated
-openIMIS reference environment with adapted configuration files under
-`AGPL-3.0-only`. The MIT license does not relicense those files. Their exact
-provenance, file-local scope, and complete upstream license are recorded in the
-repository-only
+The openIMIS and OpenEMR reference environments fetch their third-party
+configuration (`AGPL-3.0-only` and `GPL-3.0`) from upstream at run time,
+pinned by commit and SHA-256. None of it is stored in this repository; see the
 [third-party notice](https://github.com/OpenAdaptAI/openadapt-flow/blob/main/THIRD_PARTY_NOTICES.md).
 
 Published PyPI wheels and source distributions exclude the openIMIS benchmark

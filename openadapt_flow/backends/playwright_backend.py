@@ -49,6 +49,17 @@ VIEWPORT: tuple[int, int] = (1280, 800)
 # Retry until the tree is quiet. Still refuse if it never settles.
 _MASKED_SCREENSHOT_TIMEOUT_S = 8.0
 _MASKED_SCREENSHOT_RETRY_SLEEP_S = 0.05
+# A capture that overlaps a navigation commit (a form POST answered with a
+# redirect, for example) fails in Chromium with "Unable to capture
+# screenshot" or stalls until Playwright's timeout. Such a failure says
+# nothing about the page; wait for the new document and capture again.
+_NAVIGATION_SCREENSHOT_TIMEOUT_S = 30.0
+_NAVIGATION_SCREENSHOT_ATTEMPT_TIMEOUT_MS = 10_000
+_TRANSIENT_SCREENSHOT_ERRORS = (
+    "Unable to capture screenshot",
+    "Timeout",
+    "Execution context was destroyed",
+)
 
 _MODIFIER_ALIASES = {
     "meta": "Meta",
@@ -618,6 +629,19 @@ _TEXT_VALUE_AT_JS = r"""([px, py]) => {
         return el.textContent || '';
     }
     return null;
+}"""
+
+# The text the element under a point shows: an input's value, else its
+# rendered text (innerText honours CSS visibility). Null when nothing is hit.
+_DISPLAYED_TEXT_AT_JS = r"""([px, py]) => {
+    const el = document.elementFromPoint(px, py);
+    if (!el || el === document.body || el === document.documentElement) {
+        return null;
+    }
+    if ('value' in el && typeof el.value === 'string' &&
+        el.matches('input, textarea, select')) return el.value;
+    const text = (el.innerText || el.textContent || '').trim();
+    return text || null;
 }"""
 
 _EDITABLE_VALUE_JS = r"""(el) => {
@@ -1457,6 +1481,21 @@ class PlaywrightBackend:
             if point is None:
                 return None
             result = point.scope.evaluate(_TEXT_VALUE_AT_JS, [point.x, point.y])
+        except Exception:
+            return None
+        return result if isinstance(result, str) else None
+
+    def displayed_text_at(self, x: int, y: int) -> Optional[str]:
+        """Return the text the element under ``(x, y)`` shows, from the DOM.
+
+        A read-only structural observation for a demonstrated read-back. Never
+        logged. Returns None when the point hits nothing or evaluation fails.
+        """
+        try:
+            point = self._frame_point(int(x), int(y))
+            if point is None:
+                return None
+            result = point.scope.evaluate(_DISPLAYED_TEXT_AT_JS, [point.x, point.y])
         except Exception:
             return None
         return result if isinstance(result, str) else None
@@ -2779,15 +2818,46 @@ class PlaywrightBackend:
             return None
         return tracker.probe(window_s)
 
+    def _capture_across_navigation(self, options: dict[str, Any]) -> bytes:
+        """Capture the viewport, retrying only failures caused by a navigation.
+
+        The screenshot guard runs before every attempt, so a retry can never
+        capture a page the guard would refuse. Any other error, or a
+        transient one that persists past the deadline, propagates.
+        """
+        deadline = time.monotonic() + _NAVIGATION_SCREENSHOT_TIMEOUT_S
+        while True:
+            if self._screenshot_guard is not None:
+                self._screenshot_guard()
+            try:
+                return self.page.screenshot(
+                    type="png",
+                    full_page=False,
+                    timeout=_NAVIGATION_SCREENSHOT_ATTEMPT_TIMEOUT_MS,
+                    **options,
+                )
+            except Exception as error:
+                message = str(error)
+                if (
+                    not any(m in message for m in _TRANSIENT_SCREENSHOT_ERRORS)
+                    or time.monotonic() >= deadline
+                ):
+                    raise
+            try:
+                self.page.wait_for_load_state(
+                    "load", timeout=_NAVIGATION_SCREENSHOT_ATTEMPT_TIMEOUT_MS
+                )
+            except Exception:
+                pass
+            time.sleep(_MASKED_SCREENSHOT_RETRY_SLEEP_S)
+
     def screenshot(self) -> bytes:
         """Return a stable current full-viewport frame as PNG bytes."""
         base_options: dict[str, Any] = {}
         if self._screenshot_scale == "css":
             base_options["scale"] = "css"
         if not self._screenshot_mask_selectors:
-            if self._screenshot_guard is not None:
-                self._screenshot_guard()
-            return self.page.screenshot(type="png", full_page=False, **base_options)
+            return self._capture_across_navigation(base_options)
 
         deadline = time.monotonic() + _MASKED_SCREENSHOT_TIMEOUT_S
         while True:

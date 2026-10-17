@@ -15,6 +15,26 @@
 
 <!-- version list -->
 
+## v2.2.0 (2026-10-17)
+
+### Features
+
+- An agent can drive recording on native Windows apps and over RDP and Citrix sessions; remote sessions are screen-only and the agent works from the client window's pixels ([#527](https://github.com/OpenAdaptAI/openadapt-flow/pull/527)). Accepts openadapt-types 0.22, which allows `agent_drive` on those backends.
+- Learn from an agent demonstration, with replay fixes from the learn and zero-DOM benchmarks ([#525](https://github.com/OpenAdaptAI/openadapt-flow/pull/525)).
+- Teach a branch from several calling-agent demonstrations ([#521](https://github.com/OpenAdaptAI/openadapt-flow/pull/521)).
+- Read marked fields from the page structure ([#522](https://github.com/OpenAdaptAI/openadapt-flow/pull/522)).
+- A workflow registry and `openadapt-flow pull` ([#517](https://github.com/OpenAdaptAI/openadapt-flow/pull/517)).
+- OpenEMR qualification path: verifier, fault driver, and six cases for the local registration bundle ([#518](https://github.com/OpenAdaptAI/openadapt-flow/pull/518)).
+
+### Fixes
+
+- Benchmarks fetch the openIMIS and OpenEMR compose files from upstream at run time ([#523](https://github.com/OpenAdaptAI/openadapt-flow/pull/523)).
+- uv.lock bumps fsspec, urllib3, mako, and oauthlib for open Dependabot alerts ([#524](https://github.com/OpenAdaptAI/openadapt-flow/pull/524)).
+
+### Build
+
+- openadapt-types range widened to >=0.18.0,<0.23.0 ([#520](https://github.com/OpenAdaptAI/openadapt-flow/pull/520) and this release).
+
 ## v2.1.0 (2026-10-16)
 
 ### Features

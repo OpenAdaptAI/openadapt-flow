@@ -613,6 +613,12 @@ def verify_template_identity(
     """
     params = params or {}
     param_examples = param_examples or {}
+    # The live field shows the run's value with the text caret drawn after it
+    # ("Grace" + caret -> "Gracel"); drop that one glyph exactly as the
+    # recorded band's caret is dropped at compile time.
+    run_values = {k: str(v) for k, v in params.items() if isinstance(v, str)}
+    if run_values:
+        observed_text = _id.strip_param_caret(observed_text, run_values)
     hay = _id.squash(observed_text)
     marker = "<identity template>"
 

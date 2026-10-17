@@ -1456,6 +1456,9 @@ def verify_target_identity(
     """
     params = params or {}
     param_examples = param_examples or {}
+    run_values = {k: str(v) for k, v in (params or {}).items() if isinstance(v, str)}
+    if run_values:
+        observed_text = strip_param_caret(observed_text, run_values)
     hay = squash(observed_text)
     expected = context_text
 

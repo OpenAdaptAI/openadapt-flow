@@ -111,3 +111,31 @@ def test_click_template_is_clipped_away_from_a_typed_value():
         _clip_away_param_lines(region, (462, 580), [label], ("27 WILLOW BEND ROAD",))
         == region
     )
+
+
+def test_live_caret_after_run_value_is_not_a_different_name():
+    from openadapt_flow.runtime.identity import verify_target_identity
+    from openadapt_flow.runtime.identity_template import (
+        build_identity_template,
+        verify_template_identity,
+    )
+
+    ex = {"fname": "Nadia"}
+    band = "Name: Nadial Middle Ne Last Name Name Su"
+    live = "Name: Gracel Middle Ne Last Name Name Su"
+    tmpl = build_identity_template(band, param_examples=ex, salt_hex="00" * 16)
+    run = {"fname": "Grace"}
+    assert (
+        verify_template_identity(tmpl, live, params=run, param_examples=ex).status
+        == "verified"
+    )
+    assert (
+        verify_target_identity(band, live, params=run, param_examples=ex).status
+        == "verified"
+    )
+    # A different typed name is still a mismatch.
+    other = "Name: Gracie Middle Ne Last Name Name Su"
+    assert (
+        verify_template_identity(tmpl, other, params=run, param_examples=ex).status
+        != "verified"
+    )

@@ -5,6 +5,13 @@
 [![Python](https://img.shields.io/pypi/pyversions/openadapt-flow)](https://pypi.org/project/openadapt-flow/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
+> **This repository is frozen.** openadapt-flow is now developed and released from the
+> [OpenAdapt monorepo](https://github.com/OpenAdaptAI/OpenAdapt) in
+> [`packages/flow`](https://github.com/OpenAdaptAI/OpenAdapt/tree/main/packages/flow).
+> openadapt-flow 2.2.0 and later ship from there. Open issues and pull requests in
+> [OpenAdaptAI/OpenAdapt](https://github.com/OpenAdaptAI/OpenAdapt). What it can do today:
+> [CAPABILITIES.md](https://github.com/OpenAdaptAI/OpenAdapt/blob/main/CAPABILITIES.md).
+
 A person or an agent shows openadapt-flow a task in a web or desktop app. It
 compiles the task into a program that runs on your own machine and repeats the
 same steps with new details. A healthy run makes no AI model calls. It's built
